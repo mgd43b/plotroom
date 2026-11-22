@@ -1,6 +1,6 @@
 # Write-list: tree pass 2026-11-22, epic 2 (branch tree/epic-2-slice)
 
-Status: HELD, waiting for mgd43b's go-ahead, typed in the ticketer's session. Nothing below has been done.
+Status: PUBLISHED 2026-11-22 on "Yes, publish" (mgd43b, typed in the ticketer's session). Created #29 to #46 (entries 2.2, 2.7, 2.1, 2.14, 2.3, 2.4, 2.15, 2.5, 2.10, 2.16, 2.6, 2.11, 2.17, 2.8, 2.9, 2.18, 2.12, 2.13 in that order); verified 18 sub-issues of #2, 56 blocked-by relations, #2 still blocked by #1; #1 and #2 bodies edited.
 
 Summary: 18 new issues, 2 body edits, 18 parent links and 56 blocked-by relations, no label changes, no comments, nothing closed.
 
