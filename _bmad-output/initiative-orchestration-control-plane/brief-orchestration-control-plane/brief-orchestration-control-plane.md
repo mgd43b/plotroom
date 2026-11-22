@@ -214,6 +214,10 @@ What the clerk doesn't change:
 
 The project owner, 2026-11-22, verbatim: "It should be able to run locally, or in a hosted (thing docker/k8s) location".
 
+## 11. Search (added 2026-11-22)
+
+The project owner, 2026-11-22, verbatim: "see, with hosted, we could even think about embeddings for searching for things".
+
 ## Appendix: incidents behind each capability (generalized)
 
 | Incident | Capability |

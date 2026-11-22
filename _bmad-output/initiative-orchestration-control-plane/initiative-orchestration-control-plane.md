@@ -48,6 +48,7 @@ An orchestrator running about 15 workers spends its turns deciding, approving, r
 - R25 (§3 Lane): A worker has at most one open PR at a time (one open PR per lane); a second is refused or flagged.
 - R26 (§8.2, decision 2026-11-22): Claude session turn-end reports and messages reach the inbox through an `ingest(event)` call in every mode, and through a local adapter that reads session state directly when the tool runs on the same machine.
 - R27 (§10, decision 2026-11-22): One hosted instance serves several projects, each with its own ledger, and no project's records are visible through another project's calls.
+- R28 (§11, decision 2026-11-22): The orchestrator finds past events, decisions, asks, lane reports and flake records by meaning, not only by id or exact text, within one project; each hit is a short excerpt that links to its record.
 
 ## Constraints
 
@@ -65,6 +66,7 @@ An orchestrator running about 15 workers spends its turns deciding, approving, r
 - C12 (§8.1, decision 2026-11-22): The control plane is a separate server; the Codex switchboard stays unchanged and is adapted as an inbox source.
 - C13 (§8.4, decision 2026-11-22): The ledger is scoped per project, with ids that allow a cross-project `next()` later.
 - C14 (§10, decision 2026-11-22): Local and hosted are the same build.
+- C15 (§11, C14, decision 2026-11-22): Search works in local and hosted modes behind one interface; a meaning-based backend (for example, embeddings) is pluggable and optional, over a baseline that runs everywhere.
 
 ## Done when
 
@@ -92,6 +94,7 @@ An orchestrator running about 15 workers spends its turns deciding, approving, r
 - brief — same file, §5 MCP interface (first cut)
 - brief — same file, §6 data model (first cut)
 - brief — same file, §9 the clerk session as a prototype
+- brief — same file, §11 search
 - brief — same file, appendix: incidents behind each capability
 
 ## Notes
@@ -100,9 +103,11 @@ An orchestrator running about 15 workers spends its turns deciding, approving, r
 - Assumption: Hosted means remote MCP clients connect over the network, so hosted mode needs a network transport and authentication; architecture settles both.
 - Assumption: The clerk spike's log runs in parallel with planning and informs epic order; it does not gate the start of the build.
 - Assumption: How the Claude desktop app's session state can be read locally (R26) is unknown; architecture or a spike finds the mechanism.
+- Assumption: Search (R28) ships after the ledger has history, as a late epic; architecture leaves room for it in the storage choice now.
 - Open question: Does the tool merge directly, or return a `merge_gate` verdict the orchestrator executes (§8.3)? Pick: the verdict first, with direct merging as a later switch once trusted. The owner decides before slicing.
 - Open question: How do callers authenticate to a hosted instance, and how is each call bound to one project (R27)? Pick: per-project tokens. The owner decides during architecture.
 - Decision: 2026-11-22, the owner chose a separate server that adapts the Codex switchboard (§8.1).
 - Decision: 2026-11-22, the owner chose `ingest(event)` in every mode plus a local session reader when co-located (§8.2).
 - Decision: 2026-11-22, the owner chose a per-project ledger (§8.4).
 - Decision: 2026-11-22, the owner chose the same build for local and hosted, with one hosted instance serving several projects (§10).
+- Decision: 2026-11-22, the owner added meaning-based search over the ledger as R28 (§11).
