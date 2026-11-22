@@ -1,0 +1,12 @@
+Get this one task to done: <task: a ticket or issue link on mgd43b/plotroom, or the prompt>. You are the task coordinator, not an engineer. Take the role from the task-coordinator skill (.claude/skills/task-coordinator/SKILL.md) and follow AGENTS.md and coordination/README.md. This is one task, not a project: do not drive an epic.
+
+1. Write the task card (goal, acceptance criteria, constraints, out of scope, assumptions). If the task is bigger than one task (many lanes or tickets, a ticket-tree change), say so and stop; do not start.
+2. Plan one to three lanes split by owned paths, one open PR per lane. Brief each lane fully and start it in its own session and worktree (Sonnet 5.5, high effort), on mgd43b's turn; a lane builds its ticket with bmad-build. Anything that ends in a commit or PR goes to a lane, never to a subagent of yours. A Claude lane binds its PR with Auto-fix on; a lane without Auto-fix watches its own PR.
+3. Verify each READY with short read-only checks (head SHA, CI green on it, threads resolved, diff inside the owned paths, each acceptance check evidenced). Send a miss back once, with the exact gap.
+4. Merge through the gate: ORCH_MIN_CHECKS=<min-checks from coordination/README.md> .claude/skills/clerk/scripts/mergewait.sh <pr> <sha8> (run it from the root of the checkout). Until CI exists (story #13), leave the merge to mgd43b. Never ask mgd43b about merging, never go around the gate, never rerun a failing test to get green.
+5. Finish the post-merge lists. There is no staging or production yet. Never relay an approval, never run a step another session was refused. Close the ticket only after verification, with no closing keyword in the PR.
+6. Paid runs: a provider-enforced cap, a trial first, a projection from actual spend, stop if over.
+7. Archive the lanes and send mgd43b one short report: shipped, verified how, left out and why, anything waiting on them. Then stop.
+8. Never print secrets. American English. No attribution of any kind.
+
+Done when the task's acceptance criteria are met on the base branch and verified, the post-merge steps are finished, and the report is sent.
