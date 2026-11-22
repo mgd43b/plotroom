@@ -1,12 +1,209 @@
-# Entries of the One inbox epic, in build order. The rest are planned when the epic is refined.
+# Entries of the One inbox epic, in build order. Ids are permanent; table order is build order.
+
+[[entry]]
+id = 2
+type = "story"
+title = "Tracer: a merged PR on a test repository reaches the projection once"
+description = "The thinnest path through the GitHub side: a credential provider with a fine-grained PAT, one configured repository per project, a poller built as one fetcher per resource (later entries add fetchers without editing shared code) with its own cursor, PR opened and merged as github.* events with versioned upstream_ids, core's projection of PRs and head SHAs, and a count of open PRs in snapshot(). The owner creates the test repository and one fine-grained PAT scoped to it with contents, pull requests, checks, actions, issues, deployments and workflows (read, plus write for test fixtures), and adds it as a CI secret. Hands on: the credential provider to entries 6, 10, 11 and 16; the poller and projection to entries 14, 3, 4, 15 and 5 and to epics 3, 4, 5 and 7."
+verify = "Against the test repository, opening and merging a PR produces each github.* event once, and snapshot() shows the open-PR count rise and fall while the projection shows the PR merged at its head SHA."
+covers = ["R1", "R2"]
+after = ["1.4", "1.5", "1.6"]
+hitl = true
+risk = "high"
+references = ["architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-2", "architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-16"]
+notes = ["Check beyond its criteria: a revoked or expired PAT stops polling with a clear error and an unavailable project, and its cursor is intact when a new PAT is configured."]
+
+[[entry]]
+id = 7
+type = "story"
+title = "Switchboard adapter: receive and acknowledge as an MCP client"
+description = "In local mode plotroom spawns the switchboard's stdio MCP server, registers a protected name (plotroom) and blocks on its wait() in a loop, holding a participant with the switchboard unchanged; turns each claimed message into a switchboard.message event with its lane inferred from the sender's configured channel address, and acknowledges it upstream with that delivery's own receipt once the event commits, a duplicate included. It defines core's shared lane-inference hook that entry 15 extends. A scripted switchboard participant stands in for a Codex worker in tests. Hands on: the participant to entries 17 and 8, and switchboard events to entry 9."
+verify = "The scripted participant's message to plotroom becomes one event on the sender's lane and is acknowledged once, and a redelivery after a crash before the ack is stored once and acknowledged."
+covers = ["R3", "R4", "R11"]
+after = ["1.4", "1.5", "1.7", "1.8"]
+hitl = false
+risk = "high"
+references = ["architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-10"]
+notes = ["Check beyond its criteria: a switchboard that is down at startup is retried with backoff, and nothing is lost when it comes back.", "Decision: 2026-11-22, settled from the switchboard's own README: spawn its stdio server, register a protected name, loop on wait() (it blocks up to its timeout and claims mail with receipts)."]
 
 [[entry]]
 id = 1
 type = "spike"
 title = "Can plotroom read Claude desktop session state locally?"
-description = "Find whether the Claude desktop app exposes session turn-end reports and messages to a local process, and how, behind the SessionReader port. Time-boxed; with no mechanism, ingest() alone carries R26."
+description = "Find whether the Claude desktop app exposes session turn-end reports and messages to a local process, and how, behind the SessionReader port. Time-boxed to one session. Hands on: the answer to entries 9 and 18 and to the epic's Notes."
 verify = "The mechanism, or its absence, recorded in the epic's Notes with a working probe or the evidence that none exists."
-covers = ["R26"]
+covers = ["R7"]
 after = []
 hitl = false
 risk = "medium"
+
+[[entry]]
+id = 14
+type = "story"
+title = "PR updates, restarts and rate limits"
+description = "The poller adds pushes to a PR's head as new facts, survives a server restart mid-poll without losing or repeating a fact, and backs off on GitHub's rate limit before resuming from its cursor."
+verify = "Pushing to a PR moves its head SHA in the projection once; killing the server mid-poll and restarting it produces no missing or duplicate events; a simulated rate-limit response pauses and then resumes polling from the cursor."
+covers = ["R1"]
+after = [2]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Checks, runs and image builds on main"
+description = "A fetcher adds checks per head SHA and workflow runs on the default branch, including the configured image-build checks, each state change a new fact (<check_run_id>@<status>/<conclusion>), into the projection. The owner adds a CI workflow with an image-build job to the test repository. Hands on: main's verdict and image checks to epics 3 and 4."
+verify = "A CI run on a PR and on main produces one event per check state change, a rerun on the same head is a new fact, and the projection reports main's latest completed verdict and its image-build checks."
+covers = ["R1"]
+after = [14]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Review threads"
+description = "A fetcher adds review threads and their resolved state into the projection. Hands on: unresolved threads to epic 4."
+verify = "Opening a review thread on the test repository and resolving it each appear once, and the projection lists the PR's unresolved threads."
+covers = ["R1"]
+after = [3]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 15
+type = "story"
+title = "Labels, changed files and the lane's PR"
+description = "A fetcher adds labels with who applied them and the files each PR changes; core derives a lane's PR by matching its branch, extends entry 7's lane-inference hook so every github.* event on that PR carries the lane, and checks lane_ready arguments against the projection (the handoff from epic 1 entry 8). Hands on: labels to epic 4, changed files to epic 5."
+verify = "Labeling a PR and pushing a file change each appear once with the label's actor and the file; a lane's PR is found from its branch, and github.* events from every fetcher on that PR (PR, push, check, thread, label) carry the lane; lane_ready with a head SHA the projection does not show is refused."
+covers = ["R1", "R11"]
+after = [4, 7, "1.8"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Issues and comments"
+description = "A fetcher adds issues, their state, assignees and comments (comment ids and bodies stored verbatim) into the projection. Hands on: asks and exact-words checks to epic 7, issue_closed to epic 3, issues to entry 16."
+verify = "Opening, commenting on, assigning and closing an issue on the test repository each appear once, and the projection returns a comment's body byte for byte by its id."
+covers = ["R1"]
+after = [15]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 10
+type = "story"
+title = "Ticket tree from the default branch"
+description = "A WorkItemSource adapter reads a BMad repo-store ticket tree from the repository's default branch through entry 2's credential provider into the same read-only mirror as epic 1's local reader, refreshed on ticks. Hands on: the mirror to epic 5's tree-move checks."
+verify = "Against a fixture tree on the test repository, the mirror lists the same ready entries as epic 1's local reader reads from a checkout of the same commit, and a push to the default branch updates it on the next tick."
+covers = ["R8"]
+after = [2, "1.13"]
+hitl = false
+risk = "low"
+references = [".claude/skills/bmad-agent-po/scripts/tickets.py", "architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-17"]
+
+[[entry]]
+id = 16
+type = "story"
+title = "Work items from GitHub Issues"
+description = "Fetchers add milestones, sub-issues, blocked-by relations and issue labels to the projection, and a WorkItemSource adapter reads a BMad github-store tree from them into the same read-only work-item mirror, with readiness from the github store's mapping (the starter config plus the project's store config) as tickets.py next defines ready_to_start, so plotroom can see a project's own GitHub Issues tickets. Uses entry 2's credential provider."
+verify = "Against fixture issues on the test repository shaped like this project's tickets (an epic with sub-issues, a blocker in review), the mirror lists the same ready entries tickets.py next reports for them and never writes an issue."
+covers = ["R8"]
+after = [5, 10, "1.13"]
+hitl = false
+risk = "medium"
+references = [".claude/skills/bmad-agent-po/config/github-ticketing.toml", "_bmad/custom/ticketing-store-config.toml"]
+notes = ["Decision: 2026-11-22, the owner added this story ('Add a story') so plotroom can read this project's own GitHub Issues tickets."]
+
+[[entry]]
+id = 6
+type = "story"
+title = "GitHub App credentials for hosted mode"
+description = "The credential provider gains a GitHub App installation token, minted from the App's key in a mounted secret and refreshed before expiry, used when hosted; the PAT stays the local default. The owner creates the GitHub App, installs it on the test repository and adds its key as a CI secret."
+verify = "Under a fake Clock with a short token lifetime, a hosted instance configured with the App keeps polling the test repository across a refresh, and a scan of the project file and logs finds neither the key nor any token."
+covers = ["R2"]
+after = [2, "1.10"]
+hitl = true
+risk = "medium"
+references = ["architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-12"]
+
+[[entry]]
+id = 11
+type = "story"
+title = "Deploy status from GitHub Deployments and lane reports"
+description = "A DeployStatus adapter reads the repository's deployments and their statuses through entry 2's credential provider, and a deploy_report command lets a deploy lane's worker token report environment, SHA and state for its own lane; its handler appends deploy.* as system. Both land as typed deploy events."
+verify = "A deployment the test creates on the test repository and a lane's deploy_report each appear once with environment, SHA and state; the adapter's client is asserted to issue only GET requests; a deploy_report from another lane's token is refused."
+covers = ["R9"]
+after = [2, "1.5", "1.8"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 17
+type = "story"
+title = "Switchboard adapter: send"
+description = "Entry 7's participant gains a send that actions use, each message carrying its action_key, delivered at least once. Hands on: the send to epic 3's trigger actions and to entry 8."
+verify = "A test action's send reaches the scripted participant with its action_key, and a crash after sending and before the action is marked done sends it again with the same key."
+covers = ["R3"]
+after = [7, "1.7"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 8
+type = "story"
+title = "plotroom bridge for a hosted instance"
+description = "plotroom bridge runs on the switchboard's machine with entries 7 and 17's participant and a bridge token: it appends switchboard.* events to the hosted instance, leases and completes the hosted instance's pending switchboard sends, wakes through wait(), and acknowledges each receipt upstream once the hosted event commits."
+verify = "With the compose stack as the hosted instance, the scripted participant's message reaches it through the bridge once and is acknowledged, a hosted send reaches the participant, and a bridge killed between the hosted commit and the upstream ack leaves the redelivered message stored once."
+covers = ["R5", "R3", "R4"]
+after = [7, 17, "1.9", "1.10"]
+hitl = false
+risk = "medium"
+references = ["architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-10"]
+
+[[entry]]
+id = 9
+type = "story"
+title = "Claude intake through ingest(), the SessionReader port and inbound-message items"
+description = "ingest() appends only claude.* events (turn reports, session messages) from orchestrator, clerk and worker tokens, a worker's forced to its current lane, deduplicated on session and turn; the SessionReader port is defined, shaped by entry 1's finding, so a local reader can write the same events as well; an unhandled Codex message (entry 7), Claude session message or Claude turn report raises an inbound-message item that ack closes and that wakes plotroom watch. Hands on: the port to entry 18."
+verify = "A turn report sent through ingest twice is stored once; a worker token's report lands on its own lane whatever lane it names, and a github.* kind from it is refused; a turn report and a switchboard message each raise an item that wakes a running plotroom watch and closes on ack."
+covers = ["R6", "R7", "R10"]
+after = [1, 7, "1.4", "1.5", "1.6", "1.8", "1.9"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 18
+type = "story"
+title = "Local SessionReader adapter"
+description = "Implements the SessionReader port with the mechanism entry 1 found, writing the same claude.* events as ingest so a turn seen both ways is stored once. Dropped, with a Dropped: line, if entry 1 finds no mechanism; dropping it also removes it from entry 12's after. A person runs a Claude desktop session on the machine for the check."
+verify = "On a machine running the Claude desktop app, a lane's turn end appears once whether it arrives through the reader, through ingest, or both."
+covers = ["R7"]
+after = [1, 9]
+hitl = true
+risk = "medium"
+unknown = "Whether a mechanism exists and what it is; entry 1 answers."
+
+[[entry]]
+id = 12
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+verify = "Deferred findings are resolved or re-filed, and CI passes."
+covers = []
+after = [2, 7, 1, 14, 3, 4, 15, 5, 16, 10, 6, 11, 17, 8, 9, 18]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 13
+type = "story"
+title = "End-to-end suite over the epic's Done when"
+description = "One suite runs every Done-when check of this epic against the test repository, a scripted switchboard participant and the compose stack, and runs in CI with the secrets entries 2 and 6 added."
+verify = "The suite passes against a local daemon and the compose stack, one test per Done-when line except the spike's answer, which is checked in the epic's Notes."
+covers = ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11"]
+after = [12]
+hitl = false
+risk = "low"
