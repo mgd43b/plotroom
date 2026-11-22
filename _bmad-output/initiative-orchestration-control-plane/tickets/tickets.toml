@@ -4,7 +4,7 @@
 id = 1
 slug = "epic-server-and-ledger"
 title = "Server and ledger"
-description = "One plotroom daemon per data directory serves the ledger over a stdio proxy and stateless HTTP with per-project role tokens; the event log, unit of work, action runner, ticks and a local-path ticket-tree mirror are in place; an orchestrator records workers and lanes, rebuilds from snapshot() and next(), acks items and wakes through plotroom watch; it ships as a package, an image and a compose file."
+description = "One plotroom daemon per data directory serves the ledger over a stdio proxy and stateless HTTP with per-project role tokens; the event log, unit of work, action runner, ticks and a local-path ticket-tree mirror are in place; an orchestrator starts lanes for configured workers, rebuilds from snapshot() and next(), acks items and wakes through plotroom watch; it ships as a package, an image and a compose file."
 covers = ["R1", "R2", "R3", "R4", "R8", "R9", "R22", "R24", "R27"]
 
 [[epic]]

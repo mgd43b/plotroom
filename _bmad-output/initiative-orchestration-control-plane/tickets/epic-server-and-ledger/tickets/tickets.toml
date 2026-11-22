@@ -1,13 +1,184 @@
-# Entries of the Server and ledger epic, in build order. The rest are planned when the epic is refined.
+# Entries of the Server and ledger epic, in build order. Ids are permanent; table order is build order.
 
 [[entry]]
 id = 1
 type = "spike"
 title = "Which milestone pays first? Log the clerk session"
-description = "For a few working days, log what the hand-run clerk session does: triggers fired, missed or late; gate refusals routed; flake candidates; orchestrator turns saved and its own token cost; its mistakes. The log can reorder epics 2 to 9."
-verify = "A dated clerk log with each category counted, and a recommendation on epic order recorded in the initiative's Notes."
+description = "A person runs the hand-run clerk session for a few working days and logs what it does: triggers fired, missed or late; gate refusals routed; flake candidates; orchestrator turns saved and its own token cost; its mistakes. The log can reorder epics 2 to 9, and it says what the clerk's ledger.md holds, which epic 9 waits on."
+verify = "A dated clerk log in the epic folder (clerk-log.md) with each category counted, and a recommendation on epic order recorded in the initiative's Notes."
 covers = []
 after = []
 hitl = true
 risk = "low"
-notes = ["Owner, 2026-11-22: 'Spike in epic 1'"]
+notes = ["Decision: 2026-11-22, the owner placed the clerk spike at the top of this epic."]
+
+[[entry]]
+id = 2
+type = "story"
+title = "Tracer: plotroom serve answers snapshot() over HTTP and the stdio proxy"
+description = "The thinnest path through transport, store and migrations, plus shared setup: a uv package with ruff, pyright, pytest and the core dependency check in CI on 3.14 and 3.15; the TOML and PLOTROOM_* config loader with the project registry; Alembic with the single-head check; the {ok, data} error envelope; JSON logging. plotroom serve takes the data-directory lock, checks the SQLite floor, migrates one project file and serves an empty snapshot() over stateless HTTP; a thin plotroom connect --stdio forwards to it. Hands on: its empty snapshot() is replaced in entry 6."
+verify = "In CI, an MCP SDK client calls snapshot() over HTTP and through plotroom connect --stdio and gets an empty board, and a second plotroom serve on the same directory exits with the lock error."
+covers = ["R1", "R4", "R8", "R11"]
+after = []
+hitl = false
+risk = "medium"
+references = ["architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-3"]
+
+[[entry]]
+id = 3
+type = "story"
+title = "The stdio proxy works with real Claude Code and Codex clients"
+description = "Hardens plotroom connect --stdio: derives the HTTP envelope from message bodies in both protocol eras, handles concurrent calls and streamed progress, maps cancellation, starts the daemon with a clean environment when none runs, and reports the lock refusal. A person drives a real Claude Code session and a real Codex session through it; these are the spine's client spikes."
+verify = "A real Claude Code session and a real Codex session each call snapshot() through the proxy with the daemon started on demand, and cancelling a slow call ends it on the server."
+covers = ["R4", "R8"]
+after = [2]
+hitl = true
+risk = "high"
+notes = ["Check beyond its criteria: the proxy holds two concurrent calls, one of them a long wait, without blocking the other."]
+
+[[entry]]
+id = 4
+type = "story"
+title = "Event log and unit of work"
+description = "Adds the event-kind registry with typed fields and appending roles, events unique on (source, kind, upstream_id), the per-project writer task on one connection, one transaction per input, request_id deduplication of mutating commands recorded as core.<command> events, and the project seq. Hands on: the event log and registry to epic 2."
+verify = "With a fixture command registered in the test suite, replaying a recorded input set twice leaves the ledger unchanged, and the command retried with the same request_id returns the first result."
+covers = ["R1"]
+after = [2]
+hitl = false
+risk = "high"
+references = ["architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-2", "architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-14"]
+notes = ["Check beyond its criteria: killing the server mid-transaction leaves no partial input in the file."]
+
+[[entry]]
+id = 5
+type = "story"
+title = "Tokens, project isolation and the writer-rule table"
+description = "Declares the token roles (orchestrator, clerk, worker:<name>, drain, bridge) and system; plotroom token issue and revoke write hashed tokens straight to the instance token file under a file lock (reloaded without restart) and, locally, the 0600 tokens file the proxy reads; HTTP middleware maps a token to (project, role) and checks the Host header; core's writer-rule table declares every command and system write by role and denies anything undeclared; the project config gains its drain_session key. Later epics append their rows. Hands on: the drain and bridge roles to epics 2 and 3."
+verify = "With two projects and a fixture orchestrator-only command, an orchestrator token runs it, a worker token is refused it, project A's token cannot reach project B, a revoked token gets 401 and an unknown Host gets 421."
+covers = ["R1", "R7", "R12"]
+after = [3, 4]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Next items, ack and snapshot()"
+description = "Adds the next-item store in AD-18's shape with its kind registry, dedup keys and a new seq on every change; next() ranked by rank_class; ack declared in the writer table, closing event-backed and snoozing state-backed items, a second ack a no-op; snapshot() summarizing the whole board within its budget through one estimate_tokens function, replacing entry 2's empty one. Later entries and epics only append item kinds, summary counts and result fields."
+verify = "With fixture items, next() returns them in rank order, ack closes or snoozes each by kind and a second ack changes nothing, and snapshot() stays within budget and states how many items it left out."
+covers = ["R2", "R3", "R6"]
+after = [4, 5]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Actions, action runner and ticks"
+description = "Adds the actions table with cause-derived action_keys, the action runner executing committed actions after commit with a retry limit (its system writes declared in the writer table), a failed action opening a next item, and core.tick events from Clock at the configured cadence. Hands on: the action runner to epic 3."
+verify = "Under a fake Clock, an action that fails past the retry limit opens one failed-action item, also across a restart, and ack closes it; ticks arrive at the configured cadence."
+covers = ["R1", "R3", "R6"]
+after = [4, 6]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Workers and lanes"
+description = "Workers come from config; lane_start, lane_update, lane_ready (lane, PR, head SHA; epic 6 adds checklists, epic 2 checks the arguments against the projection) and lane_archive (epic 6 adds the checklist refusal) record lanes with work items, branch, state and waiting_on under the writer rules; a lane waiting on the orchestrator raises an item; snapshot() gains lane counts."
+verify = "Through both HTTP and the stdio proxy, an orchestrator token starts a lane for a configured worker and a worker token is refused lane_start; a lane_update waiting on the orchestrator raises an item; after a server restart, snapshot() and next() return the same board."
+covers = ["R3", "R4", "R7", "R9"]
+after = [5, 6]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 13
+type = "story"
+title = "Local ticket-tree mirror and the idle-worker item"
+description = "A WorkItemSource adapter reads a BMad repo ticket tree at a local path (tickets.toml entries and plan status) into a read-only mirror, refreshed on ticks, with readiness as the BMad ticket tooling's next step defines it (a ready-to-start entry); a tree whose store is a tracker is out of scope here and comes with epic 2; a worker with no lane while ready work exists raises 'idle worker with unblocked work'. Hands on: the WorkItemSource port to epic 2 (default-branch reader) and epic 5."
+verify = "Against a fixture tree, the mirror lists its ready entries, never writes the tree, and a configured worker with no lane raises one idle-worker item that closes when a lane starts."
+covers = ["R3", "R9"]
+after = [7, 8]
+hitl = false
+risk = "medium"
+references = [".claude/skills/bmad-agent-po/scripts/tickets.py"]
+notes = ["Decision: 2026-11-22, the owner chose the BMad repo tree for the local mirror; GitHub Issues as a work-item source comes with epic 2's GitHub adapter."]
+
+[[entry]]
+id = 9
+type = "story"
+title = "wait() and plotroom watch"
+description = "wait(cursor, timeout) returns on the first row visible to the caller's role with seq above the cursor, caps at a configurable limit (240 seconds by default) with progress notifications, and treats no cursor as now; plotroom watch loops it until a row arrives; the cursor is a field added to the results of snapshot() and next(); each role in the project config's watchers list (by default orchestrator, clerk and the drain session) with no wait() held across ticks raises 'watcher not running'."
+verify = "With the cap set to 2 seconds, a background plotroom watch keeps waiting across several caps, exits within a second of a new item, and stopping it raises a watcher-not-running item on the next tick."
+covers = ["R3", "R5"]
+after = [5, 7]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 10
+type = "story"
+title = "Container image, compose file and health endpoints"
+description = "A uv-based Debian slim image with a SQLite that meets the floor; a compose file with a volume for the data directory, the instance token file mounted and allowed Host names configured; /healthz and per-project /readyz; the first orchestrator token issued with docker compose run plotroom token issue against the volume; the Dockerfile built in CI. Hands on: the image and health endpoints to epic 11."
+verify = "docker compose up serves snapshot() to an HTTP client holding an issued token with /readyz passing, and after a container restart the same token still works and a recorded fixture event is still there."
+covers = ["R8"]
+after = [2, 4, 5]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 14
+type = "story"
+title = "Safe migrations across project files"
+description = "An online backup of each project file before it migrates, refusal to open a file whose schema is newer than the code, one bad file leaving only its project unavailable (the readiness state entry 10's /readyz reports), and a migration test running every revision against several project files."
+verify = "In CI, migrating three fixture files where one is corrupt leaves the other two migrated and backed up and reports the third not ready; a file stamped with a newer revision is refused."
+covers = ["R1", "R8"]
+after = [4, 10]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 15
+type = "story"
+title = "Transport contract test over every tool"
+description = "The contract test calls every tool from entries 2 to 13 through the stdio proxy and HTTP in both protocol eras, and covers a 401 with no WWW-Authenticate; it runs in CI. A person confirms how a real Claude Code session and a real Codex session handle that 401."
+verify = "The contract test passes in CI for every registered tool in both transports and both eras, and fails if a tool is missing from either."
+covers = ["R4", "R11"]
+after = [3, 5, 8, 9, 13]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 11
+type = "story"
+title = "Release to PyPI and ghcr.io"
+description = "release-please on Conventional Commits keeps a release PR; merging it after CI passes publishes wheels to PyPI through trusted publishing and the image to ghcr.io. The owner creates the PyPI project's trusted publisher and allows the workflow to push to ghcr.io."
+verify = "A first release publishes plotroom to PyPI and the image to ghcr.io only after CI succeeds on the release commit, and uvx plotroom serve runs from the published wheel."
+covers = ["R10"]
+after = [10, 15]
+hitl = true
+risk = "low"
+
+[[entry]]
+id = 12
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+verify = "Deferred findings are resolved or re-filed, and CI passes."
+covers = []
+after = [2, 3, 4, 5, 6, 7, 8, 13, 9, 10, 14, 15, 11]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 16
+type = "story"
+title = "End-to-end suite over the epic's Done when"
+description = "One suite runs every Done-when check of this epic against a real daemon, locally and in the container, and runs in CI."
+verify = "The suite passes in CI against a local daemon and the compose stack, one test per Done-when line."
+covers = ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R11"]
+after = [12]
+hitl = false
+risk = "low"
