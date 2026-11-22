@@ -1,0 +1,4 @@
+[tickets]
+store = "github"
+key = ""
+repo = "mgd43b/plotroom"

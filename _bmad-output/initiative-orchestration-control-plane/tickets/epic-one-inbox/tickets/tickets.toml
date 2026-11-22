@@ -1,0 +1,12 @@
+# Entries of the One inbox epic, in build order. The rest are planned when the epic is refined.
+
+[[entry]]
+id = 1
+type = "spike"
+title = "Can plotroom read Claude desktop session state locally?"
+description = "Find whether the Claude desktop app exposes session turn-end reports and messages to a local process, and how, behind the SessionReader port. Time-boxed; with no mechanism, ingest() alone carries R26."
+verify = "The mechanism, or its absence, recorded in the epic's Notes with a working probe or the evidence that none exists."
+covers = ["R26"]
+after = []
+hitl = false
+risk = "medium"

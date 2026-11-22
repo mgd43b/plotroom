@@ -1,4 +1,6 @@
 ---
+tracker_id: "milestone/1"
+remote: https://github.com/mgd43b/plotroom/milestone/1
 type: initiative
 title: "Orchestration control plane"
 parent: none
@@ -81,11 +83,11 @@ An orchestrator running about 15 workers spends its turns deciding, approving, r
 ## Boundaries
 
 - Out: making decisions, holding secrets, deploying or applying infrastructure, and replacing GitHub, the ticket tree or the session manager (§2 non-goals).
-- Touch point: GitHub — polled for CI, review threads, merges and issue comments; written only for branch updates and gated merges; owner: set at slicing
-- Touch point: Codex switchboard — messages read, sent and acknowledged; owner: set at slicing
-- Touch point: Claude session manager — turn-end reports and messages taken in; owner: set at slicing
-- Touch point: ticket tree — work items mirrored read-only from the default branch or a local path; tree moves checked against open PRs; owner: set at slicing
-- Touch point: deploy status and provider usage — read only; owner: set at slicing
+- Touch point: GitHub — polled for CI, review threads, merges, issues and comments; written only for branch updates and gated merges; owner: epic-one-inbox (polling, projection), epic-merge-controller (branch updates, gated merges)
+- Touch point: Codex switchboard — messages read, sent and acknowledged, directly or through `plotroom bridge`; owner: epic-one-inbox (read, acknowledge, bridge), epic-triggers (send)
+- Touch point: Claude session manager — turn-end reports and messages taken in, sends delivered by the drain session; owner: epic-one-inbox (intake), epic-triggers (outbox)
+- Touch point: ticket tree — work items mirrored read-only from the default branch or a local path; tree moves checked against open PRs; owner: epic-server-and-ledger (local path), epic-one-inbox (default branch), epic-claims-and-overlaps (tree moves)
+- Touch point: deploy status and provider usage — read only; owner: epic-one-inbox (deploy status), epic-guardrails (provider usage)
 - Tracer path: a lane starts and claims paths, opens a PR, the gate merges it, a trigger sends the next lane its go, the checklist empties, and `next()` proposes the archive.
 
 ## References
@@ -112,3 +114,8 @@ An orchestrator running about 15 workers spends its turns deciding, approving, r
 - Decision: 2026-11-22, the owner chose verdict-first merging (§8.3): the tool returns MERGE verdicts and the orchestrator or clerk executes them; direct merging is a per-project switch, built off.
 - Decision: 2026-11-22, storage, transport and hosted authentication are settled by the architecture spine (AD-4, AD-7, AD-8): one SQLite file per project under one owning process, stateless HTTP plus a stdio proxy, and one token per (project, role).
 - Decision: 2026-11-22, the Kubernetes check in Done when is met by a later Helm epic in this initiative; the first build ships a Dockerfile and compose file.
+- Decision: 2026-11-22, the owner approved 11 epics in build order, the inbox before triggers, and a clerk spike at the top of the first epic; tickets live in GitHub Issues on this repository, with the initiative as a milestone.
+- Decision: 2026-11-22, the owner chose that a lane reports its own run finished (`run_finished`) and that main's images count as built when main's image-build checks pass in CI (`main_green_with_images`).
+- Decision: 2026-11-22, R7's provider usage source is owned by epic-guardrails; every other R7 source by epic-one-inbox. R9 is shared: epic-server-and-ledger acks next items, epic-one-inbox acknowledges upstream.
+- Decision: 2026-11-22, epics built in parallel each add Alembic revisions on one linear history; the later one to merge re-parents its revision onto main's head.
+- Decision: 2026-11-22, the spine's transport and packaging work (client spikes, pre-migration backups) belongs to epic-server-and-ledger; scheduled backups go with the Helm chart.

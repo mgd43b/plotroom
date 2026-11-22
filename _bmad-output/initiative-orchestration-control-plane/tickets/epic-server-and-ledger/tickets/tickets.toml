@@ -1,0 +1,13 @@
+# Entries of the Server and ledger epic, in build order. The rest are planned when the epic is refined.
+
+[[entry]]
+id = 1
+type = "spike"
+title = "Which milestone pays first? Log the clerk session"
+description = "For a few working days, log what the hand-run clerk session does: triggers fired, missed or late; gate refusals routed; flake candidates; orchestrator turns saved and its own token cost; its mistakes. The log can reorder epics 2 to 9."
+verify = "A dated clerk log with each category counted, and a recommendation on epic order recorded in the initiative's Notes."
+covers = []
+after = []
+hitl = true
+risk = "low"
+notes = ["Owner, 2026-11-22: 'Spike in epic 1'"]
