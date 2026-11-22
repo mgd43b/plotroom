@@ -67,7 +67,7 @@ def _serve(config_path: Path | None) -> int:
 
 
 def _connect(url: str | None, config_path: Path | None) -> int:
-    from plotroom.adapters.mcp.proxy import StdioProxy
+    from plotroom.adapters.mcp.proxy import EndpointError, StdioProxy
 
     target = url or os.environ.get("PLOTROOM_URL")
     if target is None:
@@ -76,6 +76,11 @@ def _connect(url: str | None, config_path: Path | None) -> int:
         except ConfigError as exc:
             log.error("invalid configuration", extra={"reason": str(exc)})
             return EXIT_CONFIG
+    try:
+        proxy = StdioProxy(target)
+    except EndpointError as exc:
+        log.error("invalid endpoint", extra={"reason": str(exc)})
+        return EXIT_CONFIG
     with contextlib.suppress(KeyboardInterrupt, BrokenPipeError):
-        asyncio.run(StdioProxy(target).run())
+        asyncio.run(proxy.run())
     return 0

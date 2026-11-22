@@ -76,6 +76,11 @@ class Daemon:
             serving = asyncio.ensure_future(self._announce())
             try:
                 await self._server.serve()
+            except asyncio.CancelledError:
+                # uvicorn skips its own shutdown when the main loop is cancelled
+                if self._server.started:
+                    await self._server.shutdown()
+                raise
             finally:
                 serving.cancel()
 

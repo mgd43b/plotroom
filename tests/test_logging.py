@@ -48,3 +48,11 @@ def test_uvicorns_colored_copy_of_a_message_is_dropped() -> None:
         "Started", extra={"color_message": "\x1b[32mStarted\x1b[0m"}
     )
     assert "color_message" not in json.loads(stream.getvalue())
+
+
+def test_httpx_request_urls_are_not_logged_at_info() -> None:
+    stream = io.StringIO()
+    setup_logging(stream)
+    logging.getLogger("httpx").info('HTTP Request: POST http://h/mcp?token=abc "200 OK"')
+    logging.getLogger("httpcore.connection").info("connect to h")
+    assert stream.getvalue() == ""

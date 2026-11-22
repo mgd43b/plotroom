@@ -60,6 +60,8 @@ def violations(src: Path) -> list[str]:
         module = module_name(path, src)
         own_layer, own_adapter = layer(module)
         for target in sorted(imported_modules(path, module)):
+            if target == ROOT:  # `from plotroom import x` also records plotroom.x, which is judged
+                continue
             top = target.split(".")[0]
             target_layer, target_adapter = layer(target)
             if top == ROOT:

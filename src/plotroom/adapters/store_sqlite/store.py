@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import URL, event
+from sqlalchemy import URL, Connection, event
 from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import ConnectionPoolEntry
@@ -21,6 +21,13 @@ def _on_connect(dbapi_connection: DBAPIConnection, _record: ConnectionPoolEntry)
         cursor.execute("PRAGMA foreign_keys=ON")
     finally:
         cursor.close()
+    # The driver must not open transactions on its own (it skips BEGIN before DDL); the begin
+    # hook below emits BEGIN, so a migration's schema change and its revision commit together.
+    dbapi_connection.isolation_level = None
+
+
+def _on_begin(connection: Connection) -> None:
+    connection.exec_driver_sql("BEGIN")
 
 
 class SqliteStore:
@@ -33,6 +40,7 @@ class SqliteStore:
             URL.create("sqlite+aiosqlite", database=str(self.path))
         )
         event.listen(self._engine.sync_engine, "connect", _on_connect)
+        event.listen(self._engine.sync_engine, "begin", _on_begin)
 
     @property
     def project_id(self) -> str:

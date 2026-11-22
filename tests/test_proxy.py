@@ -7,12 +7,14 @@ import io
 import json
 import socket
 import threading
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+import pytest
 from mcp_types import PROTOCOL_VERSION_META_KEY
 
-from plotroom.adapters.mcp.proxy import StdioProxy, envelope_headers
+from plotroom.adapters.mcp.proxy import EndpointError, StdioProxy, check_endpoint, envelope_headers
 
 MODERN = "2026-07-28"
 
@@ -553,3 +555,152 @@ async def test_error_messages_never_carry_userinfo_or_a_query() -> None:
     [answer] = stdout.messages()
     assert secret not in json.dumps(answer)
     assert f"http://127.0.0.1:{port}/mcp" in answer["error"]["message"]
+
+
+async def test_a_method_that_cannot_be_an_http_header_is_answered_with_an_error() -> None:
+    stdout = Output()
+    message = modern("tôols/list", 14, {})
+    proxy = StdioProxy(
+        "http://daemon/mcp", stdin=lines(message), stdout=stdout, http=client_for(accepted)
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    [answer] = stdout.messages()
+    assert answer["id"] == 14
+    assert "cannot be forwarded" in answer["error"]["message"]
+
+
+async def test_a_boolean_cancel_target_does_not_cancel_request_one() -> None:
+    gate = asyncio.Event()
+    stdout = Output()
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        await gate.wait()
+        return httpx.Response(
+            200,
+            content=result_for(json.loads(http_request.content)),
+            headers={"content-type": "application/json"},
+        )
+
+    class Stdin:
+        def __init__(self) -> None:
+            self._script = [
+                modern("tools/list", 1, {}),
+                request("notifications/cancelled", None, {"requestId": True}),
+            ]
+
+        def readline(self) -> bytes:
+            if not self._script:
+                asyncio.run_coroutine_threadsafe(_set(gate), loop).result(timeout=30)
+                return b""
+            return json.dumps(self._script.pop(0)).encode() + b"\n"
+
+    async def _set(event: asyncio.Event) -> None:
+        event.set()
+
+    loop = asyncio.get_running_loop()
+    proxy = StdioProxy("http://daemon/mcp", stdin=Stdin(), stdout=stdout, http=client_for(handler))  # pyright: ignore[reportArgumentType]
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    assert [m["id"] for m in stdout.messages()] == [1]
+
+
+async def test_a_stream_cut_after_its_response_does_not_add_a_second_answer() -> None:
+    stdout = Output()
+    final: dict[str, Any] = {"jsonrpc": "2.0", "id": 3, "result": {}}
+
+    class CutStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield f"data: {json.dumps(final)}\n\n".encode()
+            raise httpx.ReadError("connection lost")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, stream=CutStream(), headers={"content-type": "text/event-stream"}
+        )
+
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(modern("tools/call", 3, {"name": "snapshot"})),
+        stdout=stdout,
+        http=client_for(handler),
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    assert stdout.messages() == [final]
+
+
+async def test_a_write_left_behind_by_a_cancelled_request_still_counts_as_pending() -> None:
+    write_started = threading.Event()
+    release = threading.Event()
+
+    class StuckOutput(Output):
+        def write(self, data: Any) -> int:
+            write_started.set()
+            assert release.wait(timeout=30)
+            return super().write(data)
+
+    stdout = StuckOutput()
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=result_for(json.loads(http_request.content)),
+            headers={"content-type": "application/json"},
+        )
+
+    class Stdin:
+        def __init__(self) -> None:
+            self._script = [
+                modern("tools/list", 1, {}),
+                request("notifications/cancelled", None, {"requestId": 1}),
+                modern("tools/list", 2, {}),
+            ]
+
+        def readline(self) -> bytes:
+            if len(self._script) == 2:  # request 1 is answered and its write is stuck
+                assert write_started.wait(timeout=30)
+            if not self._script:
+                release.set()
+                return b""
+            return json.dumps(self._script.pop(0)).encode() + b"\n"
+
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=Stdin(),  # pyright: ignore[reportArgumentType]
+        stdout=stdout,
+        http=client_for(handler),
+        max_pending=1,
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    ids = [m["id"] for m in stdout.messages()]
+    assert ids.count(2) == 1
+    refusal = next(m for m in stdout.messages() if m["id"] == 2)
+    assert "too many pending" in refusal["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://user:pw@plotroom.example.org/mcp",
+        "http://plotroom.example.org/mcp?token=abc",
+        "ftp://127.0.0.1/mcp",
+        "http:///mcp",
+        "http://127.0.0.1:notaport/mcp",
+    ],
+)
+def test_unsafe_or_unusable_endpoints_are_refused(url: str) -> None:
+    with pytest.raises(EndpointError):
+        check_endpoint(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8765/mcp",
+        "http://localhost:8765/mcp",
+        "http://[::1]:8765/mcp",
+        "http://user:pw@127.0.0.1:8765/mcp?token=abc",
+        "https://user:pw@plotroom.example.org/mcp?token=abc",
+        "http://plotroom.example.org/mcp",
+    ],
+)
+def test_loopback_https_and_unauthenticated_endpoints_are_allowed(url: str) -> None:
+    check_endpoint(url)

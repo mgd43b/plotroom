@@ -46,3 +46,6 @@ def setup_logging(stream: TextIO | None = None, level: int = logging.INFO) -> No
         root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(level)
+    # httpx logs every request URL at INFO, query string and userinfo included
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)

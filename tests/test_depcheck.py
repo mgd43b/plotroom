@@ -114,3 +114,35 @@ def test_an_adapter_importing_another_through_the_parent_is_still_a_violation(
         },
     )
     assert any("adapters never import each other" in v for v in depcheck.violations(src))
+
+
+def test_importing_ones_own_layer_through_the_root_package_is_allowed(tmp_path: Path) -> None:
+    src = tree(
+        tmp_path,
+        {
+            "core/a.py": "from plotroom import core\nfrom plotroom import ports\n",
+            "core/__init__.py": "",
+            "ports/b.py": "from plotroom import ports\nfrom plotroom import core\n",
+            "ports/__init__.py": "",
+        },
+    )
+    assert depcheck.violations(src) == []
+
+
+def test_importing_app_or_an_adapter_through_the_root_package_is_still_a_violation(
+    tmp_path: Path,
+) -> None:
+    src = tree(
+        tmp_path,
+        {
+            "core/a.py": "from plotroom import app\n",
+            "core/b.py": "from plotroom import core, app\n",
+            "core/c.py": "from plotroom import adapters\n",
+            "app/__init__.py": "",
+            "adapters/__init__.py": "",
+        },
+    )
+    found = depcheck.violations(src)
+    assert any("core.a imports plotroom.app" in v for v in found)
+    assert any("core.b imports plotroom.app" in v for v in found)
+    assert any("core.c imports plotroom.adapters" in v for v in found)

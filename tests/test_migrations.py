@@ -6,7 +6,7 @@ import pytest
 from alembic.script import ScriptDirectory
 
 from plotroom.adapters.store_sqlite import SqliteStore, head_revision, script_heads
-from plotroom.adapters.store_sqlite.migrate import MIGRATIONS_DIR, alembic_config
+from plotroom.adapters.store_sqlite.migrate import MIGRATIONS_DIR, alembic_config, upgrade_to_head
 
 
 def test_history_has_exactly_one_head() -> None:
@@ -91,3 +91,40 @@ def test_an_installation_path_with_a_percent_sign_still_loads_the_history(tmp_pa
     copy = tmp_path / "100%done" / "migrations"
     shutil.copytree(MIGRATIONS_DIR, copy, ignore=shutil.ignore_patterns("__pycache__"))
     assert script_heads(alembic_config(copy)) == script_heads()
+
+
+async def test_a_migration_that_fails_after_its_first_ddl_leaves_nothing_behind(
+    tmp_path: Path,
+) -> None:
+    """DDL and the revision commit together, so the next startup does not trip on a half migration."""
+    copy = tmp_path / "migrations"
+    shutil.copytree(MIGRATIONS_DIR, copy, ignore=shutil.ignore_patterns("__pycache__"))
+    broken = copy / "versions" / "0002_half.py"
+    broken.write_text(
+        'import sqlalchemy as sa\nfrom alembic import op\n\nrevision = "0002"\n'
+        'down_revision = "0001"\nbranch_labels = None\ndepends_on = None\n\n\n'
+        "def upgrade() -> None:\n"
+        '    op.create_table("half", sa.Column("id", sa.Integer(), primary_key=True))\n'
+        '    raise RuntimeError("stopped after the first DDL statement")\n',
+        encoding="utf-8",
+    )
+    cfg = alembic_config()
+    cfg.set_main_option("script_location", str(copy))
+    store = SqliteStore("demo", tmp_path)
+    try:
+        await store.migrate()  # real history: at 0001
+        with pytest.raises(RuntimeError, match="first DDL"):
+            await upgrade_to_head(store._engine, cfg)  # pyright: ignore[reportPrivateUsage]
+        assert await store.revision() == "0001"
+    finally:
+        await store.close()
+    with sqlite3.connect(tmp_path / "demo.db") as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "half" not in tables
+    broken.unlink()
+    again = SqliteStore("demo", tmp_path)
+    try:
+        await again.migrate()
+        assert await again.revision() == head_revision()
+    finally:
+        await again.close()

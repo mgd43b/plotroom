@@ -13,7 +13,7 @@ from mcp.client.client import Client
 from mcp.client.stdio import StdioServerParameters
 
 from conftest import Child, start_plotroom, tool_json
-from plotroom.app.cli import EXIT_FAILURE, EXIT_LOCKED
+from plotroom.app.cli import EXIT_CONFIG, EXIT_FAILURE, EXIT_LOCKED, main
 
 EMPTY_BOARD: dict[str, Any] = {
     "ok": True,
@@ -116,3 +116,11 @@ def test_a_project_file_that_cannot_migrate_stops_serve_before_it_listens(
     finally:
         child.stop()
     assert not any(e["msg"] == "serving" for e in child.seen)
+
+
+def test_connect_refuses_a_credential_in_a_plaintext_remote_url(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = main(["connect", "--stdio", "--url", "http://plotroom.example.org/mcp?token=abc"])
+    assert code == EXIT_CONFIG
+    assert "abc" not in capsys.readouterr().err

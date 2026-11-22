@@ -37,9 +37,9 @@ def _upgrade(connection: Connection, cfg: Config) -> None:
     command.upgrade(cfg, "head")
 
 
-async def upgrade_to_head(engine: AsyncEngine) -> None:
+async def upgrade_to_head(engine: AsyncEngine, cfg: Config | None = None) -> None:
     """Bring the project file the engine points at to the head revision."""
-    head_revision()
-    cfg = alembic_config()
+    cfg = cfg or alembic_config()
+    head_revision(cfg)
     async with engine.begin() as connection:
         await connection.run_sync(_upgrade, cfg)

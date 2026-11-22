@@ -109,3 +109,19 @@ async def test_several_projects_are_all_migrated_but_snapshot_needs_a_credential
         assert result["error"]["code"] == "invalid"
     finally:
         await stop(daemon, task)
+
+
+async def test_cancelling_the_daemon_closes_the_listener_before_the_lock_is_released(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    daemon = Daemon(config)
+    task, port = await run_daemon(daemon)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(ConnectionRefusedError):  # nothing is listening any more
+        await asyncio.open_connection("127.0.0.1", port)
+    again = Daemon(config)  # and the directory can be owned again
+    task2, _ = await run_daemon(again)
+    await stop(again, task2)
