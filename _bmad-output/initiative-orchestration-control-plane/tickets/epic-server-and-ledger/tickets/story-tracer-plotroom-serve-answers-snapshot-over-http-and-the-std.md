@@ -10,6 +10,7 @@ risk: medium
 tracker_id: "13"
 remote: "https://github.com/mgd43b/plotroom/issues/13"
 tracker_status: backlog
+status: built
 ---
 
 # Tracer: plotroom serve answers snapshot() over HTTP and the stdio proxy
@@ -26,3 +27,7 @@ Verify: In CI, an MCP SDK client calls snapshot() over HTTP and through plotroom
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md
 - architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-3
+
+## Notes
+
+- Built: https://github.com/mgd43b/plotroom/pull/28
