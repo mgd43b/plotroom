@@ -73,7 +73,7 @@ def load_config(
     if file_path.exists():
         try:
             raw = tomllib.loads(file_path.read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError(f"cannot read config {file_path}: {exc}") from exc
         base = file_path.resolve().parent
     elif explicit:

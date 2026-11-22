@@ -70,7 +70,7 @@ def violations(src: Path) -> list[str]:
                 elif own_layer == "adapter":
                     if target_layer == "app":
                         problems.append(f"{module} imports {target}: only app wires adapters")
-                    elif target_layer == "adapter" and target_adapter != own_adapter:
+                    elif target_layer == "adapter" and target_adapter not in ("", own_adapter):
                         problems.append(
                             f"{module} imports {target}: adapters never import each other"
                         )

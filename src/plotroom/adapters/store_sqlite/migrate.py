@@ -13,9 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
-def alembic_config() -> Config:
+def alembic_config(script_location: Path = MIGRATIONS_DIR) -> Config:
     cfg = Config()
-    cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
+    # Alembic reads options through ConfigParser, where a literal "%" must be written "%%"
+    cfg.set_main_option("script_location", str(script_location).replace("%", "%%"))
     return cfg
 
 

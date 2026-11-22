@@ -85,3 +85,9 @@ async def test_a_data_directory_with_url_special_characters_works(tmp_path: Path
     finally:
         await store.close()
     assert (odd / "demo.db").exists()
+
+
+def test_an_installation_path_with_a_percent_sign_still_loads_the_history(tmp_path: Path) -> None:
+    copy = tmp_path / "100%done" / "migrations"
+    shutil.copytree(MIGRATIONS_DIR, copy, ignore=shutil.ignore_patterns("__pycache__"))
+    assert script_heads(alembic_config(copy)) == script_heads()

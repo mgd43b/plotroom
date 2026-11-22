@@ -399,3 +399,157 @@ async def test_a_reused_request_id_can_still_be_cancelled() -> None:
     proxy = StdioProxy("http://daemon/mcp", stdin=Stdin(), stdout=stdout, http=client_for(handler))  # pyright: ignore[reportArgumentType]
     await asyncio.wait_for(proxy.run(), timeout=30)
     assert [m["id"] for m in stdout.messages()] == [5]  # only the first call answered
+
+
+async def test_a_request_with_an_array_or_object_id_is_dropped_without_stopping_the_proxy() -> None:
+    stdout = Output()
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=result_for(json.loads(http_request.content)),
+            headers={"content-type": "application/json"},
+        )
+
+    bad: list[dict[str, Any]] = [{"jsonrpc": "2.0", "id": [1], "method": "tools/list"}]
+    bad.append({"jsonrpc": "2.0", "id": {"a": 1}, "method": "tools/list"})
+    bad.append({"jsonrpc": "2.0", "id": True, "method": "tools/list"})
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(*bad, modern("tools/list", 3, {})),
+        stdout=stdout,
+        http=client_for(handler),
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    assert [m["id"] for m in stdout.messages()] == [3]
+
+
+async def test_a_pretty_printed_or_multi_line_response_is_written_on_one_line() -> None:
+    stdout = Output()
+    pretty = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"a": [1, 2]}}, indent=2)
+    sse = 'data: {\ndata:   "jsonrpc": "2.0", "id": 2,\ndata:   "result": {}\ndata: }\n\n'
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        if json.loads(http_request.content)["id"] == 1:
+            return httpx.Response(
+                200, content=pretty.encode(), headers={"content-type": "application/json"}
+            )
+        return httpx.Response(
+            200, content=sse.encode(), headers={"content-type": "text/event-stream"}
+        )
+
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(modern("tools/list", 1, {}), modern("tools/list", 2, {})),
+        stdout=stdout,
+        http=client_for(handler),
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    raw_lines = stdout.getvalue().splitlines()
+    assert len(raw_lines) == 2
+    assert sorted(json.loads(line)["id"] for line in raw_lines) == [1, 2]
+
+
+async def test_an_empty_or_202_answer_to_a_request_becomes_an_error() -> None:
+    stdout = Output()
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202 if json.loads(http_request.content)["id"] == 1 else 200)
+
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(modern("tools/list", 1, {}), modern("tools/list", 2, {})),
+        stdout=stdout,
+        http=client_for(handler),
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    answers = {m["id"]: m for m in stdout.messages()}
+    assert set(answers) == {1, 2}
+    assert all("without a reply" in a["error"]["message"] for a in answers.values())
+
+
+def accepted(_: httpx.Request) -> httpx.Response:
+    return httpx.Response(202)
+
+
+async def test_an_empty_answer_to_a_notification_stays_silent() -> None:
+    stdout = Output()
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(request("notifications/initialized", None)),
+        stdout=stdout,
+        http=client_for(accepted),
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    assert stdout.messages() == []
+
+
+async def test_a_client_that_stops_reading_does_not_stall_the_event_loop() -> None:
+    """The first write blocks until another coroutine on the same loop runs."""
+    unblocked = threading.Event()
+    loop_ran = asyncio.Event()
+
+    class BlockingOutput(Output):
+        def write(self, data: Any) -> int:
+            assert unblocked.wait(timeout=30), "the event loop never got to run"
+            return super().write(data)
+
+    async def other_work() -> None:
+        await asyncio.sleep(0)
+        loop_ran.set()
+        unblocked.set()
+
+    stdout = BlockingOutput()
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=result_for(json.loads(http_request.content)),
+            headers={"content-type": "application/json"},
+        )
+
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(modern("tools/list", 1, {})),
+        stdout=stdout,
+        http=client_for(handler),
+    )
+    await asyncio.wait_for(asyncio.gather(proxy.run(), other_work()), timeout=30)
+    assert loop_ran.is_set()
+    assert [m["id"] for m in stdout.messages()] == [1]
+
+
+async def test_requests_over_the_pending_limit_are_refused_but_a_cancel_still_works() -> None:
+    never = asyncio.Event()
+    stdout = Output()
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        await never.wait()
+        return httpx.Response(200)
+
+    stdin = lines(
+        modern("tools/call", 1, {"name": "snapshot"}),
+        modern("tools/call", 2, {"name": "snapshot"}),  # over the limit of 1
+        request("notifications/cancelled", None, {"requestId": 1}),
+    )
+    proxy = StdioProxy(
+        "http://daemon/mcp", stdin=stdin, stdout=stdout, http=client_for(handler), max_pending=1
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    [refusal] = stdout.messages()
+    assert refusal["id"] == 2
+    assert "too many pending" in refusal["error"]["message"]
+
+
+async def test_error_messages_never_carry_userinfo_or_a_query() -> None:
+    stdout = Output()
+    secret = "s3cret-token"
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    url = f"http://user:{secret}@127.0.0.1:{port}/mcp?token={secret}#frag"
+    proxy = StdioProxy(url, stdin=lines(modern("tools/list", 9, {})), stdout=stdout)
+    await asyncio.wait_for(proxy.run(), timeout=60)
+    [answer] = stdout.messages()
+    assert secret not in json.dumps(answer)
+    assert f"http://127.0.0.1:{port}/mcp" in answer["error"]["message"]

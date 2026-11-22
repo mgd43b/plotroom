@@ -104,6 +104,9 @@ Quick lens, one pass, 19 findings. Verdicts: medium patched = 9, low patched = 6
 | `__main__` unguarded | low | patch | guard added |
 | test_logging leaks root logger state | medium | patch | autouse restore fixture |
 
+
+Second pass, 9 inline PR threads from a review bot, all verified against the code and patched with tests: array or object request ids crashed the proxy (medium); multi-line responses broke stdout framing (medium); a stalled stdout blocked the event loop (medium); an empty or 202 answer to a request left it unanswered (medium); connection errors repeated the endpoint's userinfo and query (low); no pending-request bound (low); a literal `%` in the install path broke Alembic's script location (medium); invalid UTF-8 in the config file escaped as a traceback (low); the dependency check rejected an adapter's import of its own package through `plotroom.adapters` (medium).
+
 ## Design Notes
 
 - Migrations live in the package (`adapters/store_sqlite/migrations/`), not the spine's root `migrations/`: a wheel must carry them. `alembic.ini` points there for `alembic revision`. Reported to the coordinator.

@@ -89,3 +89,28 @@ def test_main_exit_codes(tmp_path: Path, capsys: object) -> None:
     dirty = tree(tmp_path / "dirty", {"core/a.py": "import httpx\n"})
     assert depcheck.main([str(clean)]) == 0
     assert depcheck.main([str(dirty)]) == 1
+
+
+def test_an_adapter_may_import_its_own_package_through_the_parent(tmp_path: Path) -> None:
+    src = tree(
+        tmp_path,
+        {
+            "adapters/mcp/server.py": "from plotroom.adapters import mcp\n",
+            "adapters/mcp/__init__.py": "",
+            "adapters/store_sqlite/__init__.py": "",
+        },
+    )
+    assert depcheck.violations(src) == []
+
+
+def test_an_adapter_importing_another_through_the_parent_is_still_a_violation(
+    tmp_path: Path,
+) -> None:
+    src = tree(
+        tmp_path,
+        {
+            "adapters/mcp/server.py": "from plotroom.adapters import store_sqlite\n",
+            "adapters/store_sqlite/__init__.py": "",
+        },
+    )
+    assert any("adapters never import each other" in v for v in depcheck.violations(src))

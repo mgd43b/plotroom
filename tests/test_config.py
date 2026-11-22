@@ -128,3 +128,10 @@ def test_projects_are_optional_for_a_client(tmp_path: Path) -> None:
 def test_duplicate_project_ids_from_the_environment(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="unique"):
         load_config(write(tmp_path, ""), {"PLOTROOM_PROJECTS": "a,a"})
+
+
+def test_a_config_file_that_is_not_utf8_is_a_config_error(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_bytes(b"data_dir = '\xff\xfe'\n")
+    with pytest.raises(ConfigError, match="cannot read config"):
+        load_config(path, {})
