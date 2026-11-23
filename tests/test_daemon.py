@@ -131,6 +131,28 @@ async def test_cancelling_the_daemon_closes_the_listener_before_the_lock_is_rele
     await stop(again, task2)
 
 
+async def test_a_failed_port_publication_closes_the_listener_and_frees_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_config(tmp_path)
+    bound: list[int] = []
+
+    def refuse(_data_dir: Path, port: int) -> None:
+        bound.append(port)
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr("plotroom.app.serve.write_port", refuse)
+    with pytest.raises(OSError, match="no space left"):
+        await asyncio.wait_for(Daemon(config).run(), timeout=30)
+    [port] = bound
+    with pytest.raises(ConnectionRefusedError):  # the socket was bound; it is closed again
+        await asyncio.open_connection("127.0.0.1", port)
+    monkeypatch.undo()
+    again = Daemon(config)  # and the directory can be owned again
+    task, _ = await run_daemon(again)
+    await stop(again, task)
+
+
 async def test_cancelling_during_uvicorns_own_shutdown_waits_for_it_and_keeps_the_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

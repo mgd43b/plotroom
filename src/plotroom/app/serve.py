@@ -63,7 +63,13 @@ class _Server(uvicorn.Server):
             port = int(bound[1])
             # Published before anyone is told the server is up: a client that sees "serving" in
             # the log, or reads the file, finds the same port.
-            write_port(self._data_dir, port)
+            try:
+                write_port(self._data_dir, port)
+            except BaseException:
+                # uvicorn skips its own shutdown when startup raises, which would leave the
+                # listener open after the lock is released.
+                await self.shutdown_task()
+                raise
             self._started_future.set_result(port)
 
 
