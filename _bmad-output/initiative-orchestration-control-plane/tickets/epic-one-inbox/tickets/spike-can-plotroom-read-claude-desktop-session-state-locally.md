@@ -30,3 +30,4 @@ Verify: The mechanism, or its absence, recorded in the epic's Notes with a worki
 ## Notes
 
 - Answer: a mechanism exists (the process registry, the app's per-session state file and the transcript, read-only); recorded with the probe in the epic's Notes, under "Finding (entry 1, #31)". Entries 9 and 18 take their key and limits from it.
+- Built: https://github.com/mgd43b/plotroom/pull/48
