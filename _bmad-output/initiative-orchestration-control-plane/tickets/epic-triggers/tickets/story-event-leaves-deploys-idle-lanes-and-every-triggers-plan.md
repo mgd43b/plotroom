@@ -49,6 +49,8 @@ Given a recurring trigger and local typed facts, when messages replay or a lane 
 
 ## Implementation Notes
 
+[Built in PR #154](https://github.com/mgd43b/plotroom/pull/154)
+
 - Each every trigger keeps its cursor and truth in the writer transaction and assigns a unique action cause to each rising edge. Switchboard sender identity comes from configuration and worker-submitted Claude messages from the authenticated role. lane_idle_minutes configures the quiet time and defaults to 15. The latest persisted tick and lane activity determine the idle state. Migrations preserve open and fired once records.
 
 ## Plan Change Log

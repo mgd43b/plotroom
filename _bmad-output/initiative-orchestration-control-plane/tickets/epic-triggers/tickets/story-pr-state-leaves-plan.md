@@ -41,6 +41,8 @@ Given incomplete, stale, or nonmatching facts, when complete current projected f
 
 ## Implementation Notes
 
+[Built in PR #154](https://github.com/mgd43b/plotroom/pull/154)
+
 - All PR leaves share the first-match branch binding code. Green requires a nonempty, complete check view for the current PR head and success for the latest run of each check name. Threads and issues require complete committed resources.
 
 ## Plan Change Log

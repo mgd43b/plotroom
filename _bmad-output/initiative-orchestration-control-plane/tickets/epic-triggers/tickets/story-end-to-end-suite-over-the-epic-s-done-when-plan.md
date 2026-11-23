@@ -41,6 +41,8 @@ Given local fixture adapters and configured tokens, when all four Done-when path
 
 ## Implementation Notes
 
+[Built in PR #154](https://github.com/mgd43b/plotroom/pull/154)
+
 - Each of four named cases runs through HTTP and stdio. Tests poll an in-process fixture repository through the GitHub read adapters and use a scripted Switchboard process and the existing drain stand-in.
 
 ## Plan Change Log

@@ -41,6 +41,8 @@ Given the six prior Epic 3 plan logs, when each deferred finding is checked agai
 
 ## Implementation Notes
 
+[Built in PR #154](https://github.com/mgd43b/plotroom/pull/154)
+
 - Checked the prior six Epic 3 plan logs and resolved #148 review threads. Reused PR selection across leaves and generalized the trigger state transition in one place. No deferred local item remained from those reviews. Real native drain acceptance remains on #60.
 
 ## Plan Change Log

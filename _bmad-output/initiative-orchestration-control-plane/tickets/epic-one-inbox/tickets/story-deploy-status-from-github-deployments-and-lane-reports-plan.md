@@ -49,6 +49,8 @@ Given fixture statuses and an authorized worker report, when both inputs are rep
 
 ## Implementation Notes
 
+[Built in PR #154](https://github.com/mgd43b/plotroom/pull/154)
+
 - Both inputs append `deploy.status` facts with exact environment, commit SHA, state, and a derived terminal-state flag. GitHub facts preserve deployment and status IDs. Worker facts carry the reporting lane.
 - The regular details poll uses the existing credential and pagination. A status read failure is isolated to its deployment. Rate limits use the details poll's existing cooldown.
 

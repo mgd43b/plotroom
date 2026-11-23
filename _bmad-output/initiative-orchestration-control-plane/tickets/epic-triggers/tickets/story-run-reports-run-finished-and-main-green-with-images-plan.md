@@ -49,6 +49,8 @@ Given a running lane-owned run and incomplete or mismatched main facts, when the
 
 ## Implementation Notes
 
+[Built in PR #154](https://github.com/mgd43b/plotroom/pull/154)
+
 - Reports use the worker-only lane ownership rule and a state fact deduplicated by lane, run ID, and state. Finished matches the latest report for the project-wide ID. Main readiness reads the latest completed verdict, the current default-branch tip, and every configured image job from that attempt.
 
 ## Plan Change Log
