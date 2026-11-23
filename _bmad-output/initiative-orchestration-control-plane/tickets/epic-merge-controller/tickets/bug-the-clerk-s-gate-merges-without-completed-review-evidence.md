@@ -8,17 +8,20 @@ after: []
 refined: false
 hitl: false
 risk: medium
+tracker_id: "141"
+remote: "https://github.com/mgd43b/plotroom/issues/141"
+tracker_status: backlog
 ---
 
 # The clerk's gate merges without completed review evidence
 
 ## Description
 
-Bootstrap maintenance, found by the coordinator. The copied clerk gate (.claude/skills/clerk/scripts/safemerge.sh) does not check that the configured Kody GitHub app has finished reviewing the PR's head. The clerk enforces this by hand today. The fix makes the gate fail closed per PR unless it reads completed review evidence from the configured Kody app for the pinned head. A skipped result alone or a progress comment is not enough, and a completed run with no findings passes. The existing pinned-head CI, thread and main checks stay as they are. This is a project-specific edit to the copied skill, which coordination/README.md allows when a rule really differs here.
+The copied bootstrap clerk gate must require completed review evidence from the configured Kody GitHub App for every PR. Use completed review on the current head, or the completed opening review when the configured cadence skips a later head and all review threads are answered and resolved. The gate must still check CI on the current pinned head.
 
 ## Requirements
 
-Verify: Under ORCH_DRY=1 on test PRs, the gate refuses a PR with no Kody review of its head, with only a skipped result, or with only a progress comment. It passes a PR with a completed Kody run, with findings resolved or with none. Its CI, thread and main refusals are unchanged.
+Verify: Use dry-run fixtures to confirm that the gate refuses missing or unreadable evidence, progress-only evidence, a skip without a completed opening review, and unresolved review threads. A completed Kody review with no findings passes. A completed opening review plus a valid later cadence skip passes after review threads are answered and resolved, with current-head CI and main checks passing.
 
 ## References
 
@@ -29,5 +32,4 @@ Verify: Under ORCH_DRY=1 on test PRs, the gate refuses a PR with no Kody review 
 
 ## Notes
 
-- Open question for the coordinator: safemerge.sh is epic 4's reference (R1, R2), and plotroom's own gate gains no matching rule unless one is added. Adding one is a new requirement on epic 4.
-- Follow-up outside this repository: the same change may belong upstream in mgd43b/prompts.
+- This ticket applies to the copied bootstrap clerk gate. Route a corresponding requirement for Plotroom's merge controller through the coordinator for separate scope review.

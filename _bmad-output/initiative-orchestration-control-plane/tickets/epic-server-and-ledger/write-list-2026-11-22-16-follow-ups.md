@@ -1,39 +1,37 @@
-# Write-list: tree pass 2026-11-22, #16 follow-ups, #129 done, the clerk-gate finding (branch tree/epic-1-16)
+# Tracker write-list for the #16 follow-ups
 
-Status: DRAFT, HELD. mgd43b gave the publish go-ahead to the Claude coordinator, which has stood down. That go-ahead waits until mgd43b says, in the ticketer's session, who gives it now. Nothing below has been done on GitHub.
+Status: PUBLISHED 2026-11-22 on "**Approve this write-list and tree PR**". Tracker writes verified.
 
-Summary: 4 new issues, 2 body edits, 4 parent links, 6 blocked-by relations, labels on 4 new issues and 1 removed, no comments, 1 close.
+Decision: 2026-11-22, mgd43b in the Codex ticketer chat, on the tracker pass: "**Approve this write-list and tree PR**". Approval covers the writes below and one tree PR.
 
-On mgd43b's list: nothing to do here. One open question, flagged under the 4.14 create: it would add a new requirement to epic 4 if taken up.
+The pass proposes four creates, four parent links, three new blockers for #26, two body edits, labels on the four new issues, and two completions. The backlog label comes off each completed issue.
 
-## Creates (in this order; milestone "Orchestration control plane"; no assignee)
-| # | Entry | Type | Title | Parent | Blocked by | Labels |
-|---|---|---|---|---|---|---|
-| 1 | 1.21 | bug | The stdio proxy can send its bearer to a listener it has not authenticated | #1 | #16 | bug, backlog, risk:high |
-| 2 | 1.22 | bug | An https bearer connection ignores configured CA trust | #1 | #16 | bug, backlog, risk:medium |
-| 3 | 1.23 | bug | Token revoke can report a failure after it has revoked | #1 | #16 | bug, backlog, risk:medium |
-| 4 | 4.14 | bug | The clerk's gate merges without completed review evidence | #4 | — | bug, backlog, risk:medium |
+## Creates
 
-- 1.21 groups four of the review's seven findings. 1.22 and 1.23 take one each. That leaves one finding unplaced until the review text comes back: it goes to #26 if it is only a test-strength gap.
-- 4.14 is bootstrap maintenance on the copied clerk skill. Its open question: plotroom's own gate gets no matching rule unless epic 4 gains a requirement for one.
+Create with title and body from the ticket file. Mirror all four new IDs and URLs in the tree before adding relations or labels.
 
-## Body edits (body from the entry's or epic's file; each read first for tracker-side changes)
-| Issue | Entry | What changed |
-|---|---|---|
-| #1 | epic 1 | The port-file Decision line records the published bound host and the bearer rule since #16 (PR #134) |
-| #26 | 1.12 | Scope gains the port-file early-unpublication test (Kodus review of PR #135); after gains 21, 22, 23 |
+| Order | Entry | Title | Parent | Labels |
+|---|---|---|---|---|
+| 1 | 1.21 ([#138](https://github.com/mgd43b/plotroom/issues/138)) | Bind local stdio credentials to the intended daemon | #1 | bug, backlog, risk:high |
+| 2 | 1.22 ([#139](https://github.com/mgd43b/plotroom/issues/139)) | Honor configured CA trust for explicit HTTPS bearer connections | #1 | bug, backlog, risk:medium |
+| 3 | 1.23 ([#140](https://github.com/mgd43b/plotroom/issues/140)) | Report and retry local cleanup after token revocation | #1 | bug, backlog, risk:medium |
+| 4 | 4.14 ([#141](https://github.com/mgd43b/plotroom/issues/141)) | The clerk's gate merges without completed review evidence | #4 | bug, backlog, risk:medium |
+
+Add all four to the existing Orchestration control plane milestone. The three Epic 1 bugs use the implementation in PR #134 as their baseline and can proceed while #16 awaits its real-client observations. Dispatch 1.21 first and sequence work on the shared stdio proxy with the coordinator. Entry 4.14 covers the copied bootstrap clerk gate.
 
 ## Relations
-- Each new issue: parent is its epic's issue (#1 or #4).
-- new 1.21 blocked by #16
-- new 1.22 blocked by #16
-- new 1.23 blocked by #16
-- #26 blocked by new 1.21, new 1.22 and new 1.23
 
-## Labels, comments, closes
-- #129: remove `backlog`; close as completed. PR #135 merged at d45517c6, main CI is green, and the coordinator verified it. The tree already says done.
-- No comments.
+- Link each new issue to the parent in the table.
+- Add the three new Epic 1 issues as blockers for #26.
 
-## Not on this list, on purpose
-- #16 stays open, assigned to mgd43b, until their two real-client 401 observations are in epic 1's Notes.
-- No P0–P3 labels: no issue uses them yet. Dispatch order is the coordinator's.
+## Body edits
+
+- Update #1 from Epic 1's Notes to record the bound IP address, port, and Host behavior in the local daemon discovery path.
+- Update #26 from entry 1.12 with five regression checks and its three new blockers. The checks cover port-file unpublication during HTTP shutdown, a digest mismatch for an existing token record, concurrent local-token updates for separate instances, receipt replay after a write rule is withdrawn, and HTTP snapshot refusal for the drain role.
+
+## Verified completions
+
+- Remove the backlog label from #129 and close it as completed. PR #135 merged at d45517c6. The coordinator verified teardown, and both Python jobs passed in [main CI](https://github.com/mgd43b/plotroom/actions/runs/45113032427).
+- Remove the backlog label from #130 and close it as completed. PR #137 merged at 9a4db649. The worker passed 21 focused tests, and both Python jobs passed in [main CI](https://github.com/mgd43b/plotroom/actions/runs/45117133037).
+
+#16 stays open for Matt's Claude Code and Codex observations of a bare 401. Route any Kodus prerequisite for Plotroom's merge controller through the coordinator for separate scope review.

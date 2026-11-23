@@ -1,19 +1,6 @@
 # Entries of the Merge controller epic, in build order. Ids are permanent; table order is build order.
 
 [[entry]]
-id = 14
-type = "bug"
-title = "The clerk's gate merges without completed review evidence"
-description = "Bootstrap maintenance, found by the coordinator. The copied clerk gate (.claude/skills/clerk/scripts/safemerge.sh) does not check that the configured Kody GitHub app has finished reviewing the PR's head. The clerk enforces this by hand today. The fix makes the gate fail closed per PR unless it reads completed review evidence from the configured Kody app for the pinned head. A skipped result alone or a progress comment is not enough, and a completed run with no findings passes. The existing pinned-head CI, thread and main checks stay as they are. This is a project-specific edit to the copied skill, which coordination/README.md allows when a rule really differs here."
-verify = "Under ORCH_DRY=1 on test PRs, the gate refuses a PR with no Kody review of its head, with only a skipped result, or with only a progress comment. It passes a PR with a completed Kody run, with findings resolved or with none. Its CI, thread and main refusals are unchanged."
-covers = []
-after = []
-hitl = false
-risk = "medium"
-references = [".claude/skills/clerk/scripts/safemerge.sh", ".claude/skills/clerk/scripts/lib.sh", "coordination/README.md"]
-notes = ["Open question for the coordinator: safemerge.sh is epic 4's reference (R1, R2), and plotroom's own gate gains no matching rule unless one is added. Adding one is a new requirement on epic 4.", "Follow-up outside this repository: the same change may belong upstream in mgd43b/prompts."]
-
-[[entry]]
 id = 1
 type = "story"
 title = "Tracer: merge_gate(pr) judges checks like the clerk's gate"
@@ -25,6 +12,19 @@ hitl = false
 risk = "high"
 references = [".claude/skills/clerk/scripts/safemerge.sh", ".claude/skills/clerk/scripts/lib.sh", "architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-11"]
 notes = ["Decision: 2026-11-22, the owner chose the clerk's gate as the reference spec ('Copy the clerk's gate'); where safemerge.sh, lib.sh or sweep.sh settle a detail, the gate copies it.", "Check beyond its criteria: with a revoked PAT the projection goes stale and every verdict refuses, never passes."]
+
+[[entry]]
+id = 14
+type = "bug"
+title = "The clerk's gate merges without completed review evidence"
+description = "The copied bootstrap clerk gate must require completed review evidence from the configured Kody GitHub App for every PR. Use completed review on the current head, or the completed opening review when the configured cadence skips a later head and all review threads are answered and resolved. The gate must still check CI on the current pinned head."
+verify = "Use dry-run fixtures to confirm that the gate refuses missing or unreadable evidence, progress-only evidence, a skip without a completed opening review, and unresolved review threads. A completed Kody review with no findings passes. A completed opening review plus a valid later cadence skip passes after review threads are answered and resolved, with current-head CI and main checks passing."
+covers = []
+after = []
+hitl = false
+risk = "medium"
+references = [".claude/skills/clerk/scripts/safemerge.sh", ".claude/skills/clerk/scripts/lib.sh", "coordination/README.md"]
+notes = ["This ticket applies to the copied bootstrap clerk gate. Route a corresponding requirement for Plotroom's merge controller through the coordinator for separate scope review."]
 
 [[entry]]
 id = 11
