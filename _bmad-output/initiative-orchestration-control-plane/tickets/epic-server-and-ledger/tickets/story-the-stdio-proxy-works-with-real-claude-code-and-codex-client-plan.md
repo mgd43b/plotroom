@@ -3,7 +3,7 @@ title: 'The stdio proxy works with real Claude Code and Codex clients'
 type: feature
 ticket: 3
 created: '2026-11-22'
-status: in-review
+status: built
 baseline_revision: 'ec2d985e2170a09be12d71159845374a7f0118d0'
 route: full
 route_source: auto
