@@ -16,7 +16,7 @@ from pathlib import Path
 from plotroom.app.config import ConfigError, load_config
 from plotroom.app.lock import LockError
 from plotroom.app.logging import setup_logging
-from plotroom.app.tokens import TokenError, TokenRegistry, select_local_token
+from plotroom.app.tokens import LocalCleanupError, TokenError, TokenRegistry, select_local_token
 
 EXIT_FAILURE = 1
 EXIT_CONFIG = 2
@@ -109,6 +109,18 @@ def _token(args: argparse.Namespace) -> int:
             print(json.dumps({"token_id": issued.token_id, "token": issued.bearer}))
         else:
             registry.revoke(args.token_id, local=not args.no_local)
+    except LocalCleanupError as exc:
+        invalid = isinstance(exc.failure, TokenError)
+        reason = str(exc.failure) if invalid else "cannot update the local token store"
+        log.error(
+            "%s",
+            exc,
+            extra={
+                "reason": reason,
+                "hint": "retry the same revoke command after fixing the local store",
+            },
+        )
+        return EXIT_CONFIG if invalid else EXIT_FAILURE
     except (ConfigError, TokenError) as exc:
         log.error("cannot manage token", extra={"reason": str(exc)})
         return EXIT_CONFIG
