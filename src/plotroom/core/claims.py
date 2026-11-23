@@ -49,6 +49,25 @@ class Claim:
         return asdict(self)
 
 
+def _path_components(pattern: str) -> list[str]:
+    parts: list[str] = []
+    start = index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[" and (bracket := _BRACKET.match(pattern, index)):
+            index = bracket.end()
+            continue
+        if char == "/":
+            parts.append(pattern[start:index])
+            start = index + 1
+        index += 1
+    parts.append(pattern[start:])
+    return parts
+
+
 def normalize_glob(pattern: str) -> str:
     # Git ignores unescaped trailing spaces. Preserve an escaped space and the
     # leading slash on a single component, which makes it root-relative.
@@ -56,10 +75,11 @@ def normalize_glob(pattern: str) -> str:
     pattern = re.sub(r"(?<!\\)((?:\\\\)*)\\/", r"\1/", pattern)
     if pattern.startswith("!") or any(ord(char) < 32 for char in pattern):
         raise LedgerError("invalid", "claim glob cannot be negated or contain control characters")
-    parts = [part for part in pattern.split("/") if part not in {"", "."}]
+    parts = [part for part in _path_components(pattern) if part not in {"", "."}]
     if not parts or ".." in parts or any(_TRAILING_ESCAPE.search(part) for part in parts):
         raise LedgerError("invalid", "claim glob must be a valid repository path pattern")
-    root = "/" if len(parts) == 1 and "/" in pattern.rstrip("/") else ""
+    anchored = parts[0].startswith("!") or (len(parts) == 1 and "/" in pattern.rstrip("/"))
+    root = "/" if anchored else ""
     directory = "/" if pattern.endswith("/") else ""
     return root + "/".join(parts) + directory
 
@@ -160,7 +180,7 @@ class PathGlob:
 def compile_glob(pattern: str) -> PathGlob:
     """Compile a normalized gitignore-style glob for repository file paths."""
     path = pattern.removeprefix("/").removesuffix("/")
-    components = path.split("/")
+    components = _path_components(path)
     if not pattern.startswith("/") and len(components) == 1:
         components.insert(0, "**")
     matchers: list[re.Pattern[bytes] | None] = []

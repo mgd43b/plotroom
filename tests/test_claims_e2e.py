@@ -50,10 +50,9 @@ class Repository:
         state: str = "open",
         repository: str = REPO,
     ) -> None:
-        assert previous is None or len(paths) == 1
         rows = [{"filename": path, "status": "modified"} for path in paths]
         if previous is not None:
-            rows = [{"filename": paths[0], "status": "renamed", "previous_filename": previous}]
+            rows[0] = {"filename": paths[0], "status": "renamed", "previous_filename": previous}
         self.files[number] = rows
         self.pulls[number] = {
             "number": number,
@@ -282,6 +281,15 @@ async def test_ticket_tree_move_lists_editing_prs_first(
         repository.pull(20, "bob", f"{TREE}/alternative.md", previous=STORY, version=3)
         await repository.refresh()
         assert await items(orch, TICKET_TREE_MOVE) == []
+
+        first, second = f"{TREE}/first.md", f"{TREE}/second.md"
+        repository.pull(70, "first", f"{TREE}/first-new.md", second, previous=first)
+        repository.pull(80, "second", f"{TREE}/second-new.md", first, previous=second)
+        await repository.refresh()
+        cycle = await items(orch, TICKET_TREE_MOVE)
+        assert {entry["context"]["moving_pr"] for entry in cycle} == {70, 80}
+        assert all(entry["context"]["coordination_required"] for entry in cycle)
+        assert all(entry["context"]["suggested_order"] == [] for entry in cycle)
 
 
 async def test_conflicting_claim_reported_when_made(tmp_path: Path, repository: Repository) -> None:

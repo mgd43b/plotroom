@@ -33,17 +33,26 @@ AT = "2026-11-22T12:00:00Z"
         ("src/[[:digit:]].py", "src/[[:digit:]].py", "src/", "src/2.py", "src/x.py"),
         ("src/[!x]file", "src/[!x]file", "src/", "src/bfile", "src/xfile"),
         ("src/[]]", "src/[]]", "src/", "src/]", "src/x"),
+        ("src/[!/]", "src/[!/]", "src/", "src/x", "other/x"),
         ("src/??", "src/??", "src/", "src/é", "src/z"),
         ("src/é", "src/é", "src/é/", "src/é", "src/e"),
         (r"src\/file", "src/file", "src/file/", "src/file", "src/other"),
         (r"src/\*.txt", r"src/\*.txt", "src/*.txt/", "src/*.txt", "src/a.txt"),
         (r"\!config", r"\!config", "", "nested/!config", "nested/config"),
+        (
+            "/!generated/schema.json",
+            "/!generated/schema.json",
+            "!generated/schema.json/",
+            "!generated/schema.json",
+            "other/!generated/schema.json",
+        ),
     ],
 )
 def test_glob_normalization_and_gitignore_boundaries(
     pattern: str, normalized: str, prefix: str, matched: str, unmatched: str
 ) -> None:
     assert normalize_glob(pattern) == normalized
+    assert normalize_glob(normalized) == normalized
     assert literal_prefix(normalized) == prefix
     matcher = compile_glob(normalized)
     assert matcher.matches(matched)

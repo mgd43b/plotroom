@@ -116,7 +116,9 @@ def build_catalog(
     owner = (*orchestrator, WriterRule("worker", owns_lane))
     catalog.register_item(ItemKind(CLAIM_OVERLAP, 10, True, ("Coordinate the lane claims",)))
     catalog.register_item(ItemKind(PR_CLAIM_OVERLAP, 10, True, ("Coordinate the PR and claim",)))
-    catalog.register_item(ItemKind(TICKET_TREE_MOVE, 10, True, ("Merge the editing PRs first",)))
+    catalog.register_item(
+        ItemKind(TICKET_TREE_MOVE, 10, True, ("Coordinate the move with the editing PRs",))
+    )
     globs = FieldSpec("globs", "array")
     catalog.commands.register(
         Command(

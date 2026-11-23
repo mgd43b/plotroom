@@ -87,13 +87,26 @@ async def _reconcile_pr_claims(
     await sync_items(uow, PR_CLAIM_OVERLAP, desired)
 
 
+def _depends_on_itself(number: int, dependencies: dict[int, set[int]]) -> bool:
+    pending = list(dependencies[number])
+    visited: set[int] = set()
+    while pending:
+        editor = pending.pop()
+        if editor == number:
+            return True
+        if editor not in visited:
+            visited.add(editor)
+            pending.extend(dependencies.get(editor, ()))
+    return False
+
+
 async def _reconcile_moves(uow: UnitOfWork, pulls: list[_PullFiles]) -> None:
     by_number = {pull.number: pull for pull in pulls}
     by_path: dict[str, set[int]] = defaultdict(set)
     for pull in pulls:
         for path in pull.edits:
             by_path[path].add(pull.number)
-    desired: dict[str, dict[str, object]] = {}
+    conflicts: dict[int, dict[str, list[int]]] = {}
     for pull in pulls:
         edits = {
             path: sorted(by_path[path] - {pull.number})
@@ -101,18 +114,29 @@ async def _reconcile_moves(uow: UnitOfWork, pulls: list[_PullFiles]) -> None:
             if by_path[path] - {pull.number}
         }
         if edits:
-            editors = sorted({number for numbers in edits.values() for number in numbers})
-            prs = [*editors, pull.number]
-            desired[str(pull.number)] = {
-                "lanes": sorted(
-                    {lane for number in prs if (lane := by_number[number].lane) is not None}
-                ),
-                "prs": sorted(prs),
-                "moving_pr": pull.number,
-                "editing_prs": editors,
-                "edits": edits,
-                "suggested_order": prs,
-            }
+            conflicts[pull.number] = edits
+    dependencies = {
+        mover: {number for numbers in edits.values() for number in numbers}
+        for mover, edits in conflicts.items()
+    }
+    desired: dict[str, dict[str, object]] = {}
+    for mover, edits in conflicts.items():
+        editors = sorted(dependencies[mover])
+        prs = [*editors, mover]
+        cyclic = _depends_on_itself(mover, dependencies)
+        context: dict[str, object] = {
+            "lanes": sorted(
+                {lane for number in prs if (lane := by_number[number].lane) is not None}
+            ),
+            "prs": sorted(prs),
+            "moving_pr": mover,
+            "editing_prs": editors,
+            "edits": edits,
+            "suggested_order": [] if cyclic else prs,
+        }
+        if cyclic:
+            context["coordination_required"] = True
+        desired[str(mover)] = context
     await sync_items(uow, TICKET_TREE_MOVE, desired)
 
 

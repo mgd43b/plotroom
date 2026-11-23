@@ -3,7 +3,7 @@ title: 'Epic 5 local claims and overlaps'
 type: feature
 ticket: 1
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: 'e09371505fef2d84711108c044f7ed7bfe862236'
 route: full
 route_source: auto
@@ -50,12 +50,12 @@ Use the existing role and lane bindings, writer, projections, next items, BMad t
 
 **Execution:**
 
-- [ ] #76 Add `src/plotroom/core/claims.py` and migration `0013` on current local `0011`; normalize nonnegated gitignore-style paths, persist reason and stable identity, reconcile one item per unordered lane pair, and clear claims on archive. Reuse `owns_lane`. Make no-op updates stable. Cover normalization, path boundaries and ownership in focused tests.
-- [ ] #77 Reconcile one PR/claiming-lane item in the transaction on claim mutations, PR state/head, complete file facts, and changed lane bindings. Include relevant rename paths. Reuse open pull targets and deterministic stable item context. No labels required.
-- [ ] #78 Reconcile one item per moving PR, aggregate relevant exact paths and distinct editing PR numbers; put editing PRs first in the suggested order. Ignore moves outside the configured tree and clear when the conflict ends.
-- [ ] #79 Expose `claim`, `release`, `claims`, and `overlaps` in `src/plotroom/adapters/mcp/server.py`. Claims follow lane visibility. Overlaps preserve next-item visibility, filter to exactly one lane or PR before paging, and identify involved lanes and PRs. Snapshot counts use the same visible projections. Update exact transport assertions as needed.
-- [ ] #80 Review deferred findings from the Epic 5 plans and review; patch in-scope findings and report genuine future work for ticketer routing. Do not add speculative changes.
-- [ ] #81 Add `tests/test_claims_e2e.py` using the daemon and in-process fixture repository API, one test per Epic 5 Done-when line. Add focused tests for input, stale observations, lifecycle, deduplication, and populated migration.
+- [x] #76 Add `src/plotroom/core/claims.py` and migration `0013` on current local `0011`; normalize nonnegated gitignore-style paths, persist reason and stable identity, reconcile one item per unordered lane pair, and clear claims on archive. Reuse `owns_lane`. Make no-op updates stable. Cover normalization, path boundaries and ownership in focused tests.
+- [x] #77 Reconcile one PR/claiming-lane item in the transaction on claim mutations, PR state/head, complete file facts, and changed lane bindings. Include relevant rename paths. Reuse open pull targets and deterministic stable item context. No labels required.
+- [x] #78 Reconcile one item per moving PR, aggregate relevant exact paths and distinct editing PR numbers; put editing PRs first in the suggested order. Ignore moves outside the configured tree and clear when the conflict ends.
+- [x] #79 Expose `claim`, `release`, `claims`, and `overlaps` in `src/plotroom/adapters/mcp/server.py`. Claims follow lane visibility. Overlaps preserve next-item visibility, filter to exactly one lane or PR before paging, and identify involved lanes and PRs. Snapshot counts use the same visible projections. Update exact transport assertions as needed.
+- [x] #80 Review deferred findings from the Epic 5 plans and review; patch in-scope findings and report genuine future work for ticketer routing. Do not add speculative changes.
+- [x] #81 Add `tests/test_claims_e2e.py` using the daemon and in-process fixture repository API, one test per Epic 5 Done-when line. Add focused tests for input, stale observations, lifecycle, deduplication, and populated migration.
 
 **Acceptance Criteria:**
 
@@ -81,8 +81,14 @@ Claims and conflicts are distinct reads. Claims use lane visibility. Overlaps us
 - High, patched. The legacy trigger fixture seeds facts on its pre-trigger schema before current reconciliation is enabled. The transport matrix supplies required claim and release arguments for drain authorization checks.
 - Medium, patched. Daemon startup clears persisted PR-derived items if GitHub has been disabled. The populated upgrade test restarts in both configurations.
 - Medium, patched. Claim-pair evidence stores each participating claim once, keeping the item size proportional to the number of claims.
+- Medium, patched. Anchored paths starting with a literal exclamation mark retain their anchor so the stored normalized value can be used to release the claim.
+- Low, patched. Normalize and compile bracket expressions before splitting path components. A slash inside a character class does not split the glob.
+- Medium, patched. Moves participating in cyclic edit dependencies show the involved PRs and request coordination without a contradictory merge order.
+- Medium, referred to the ticketer. The existing PR projection confirms file lists by head SHA. Detecting a retarget with an unchanged head and an unavailable refresh needs a base identity in that projection.
 
 ## Verification
 
 - `uv run python -m pytest -q tests/test_claims_e2e.py tests/test_migrations.py tests/test_transport_contract.py`
 - Use the lint, type, and full test commands defined in `.github/workflows/ci.yml`.
+
+- The integrated local matrix passed 582 tests on Python 3.14 and 3.15 before the last review corrections. The last corrections passed the targeted 54-test claims, migration, and transport run.
