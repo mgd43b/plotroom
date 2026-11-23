@@ -10,7 +10,7 @@ hitl: false
 risk: medium
 tracker_id: "141"
 remote: "https://github.com/mgd43b/plotroom/issues/141"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # The clerk's gate merges without completed review evidence

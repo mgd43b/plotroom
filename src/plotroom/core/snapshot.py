@@ -1,4 +1,4 @@
-"""Budgeted rendering of the project board and next-item pages (AD-13)."""
+"""Budgeted rendering of project board, next-item and search pages (AD-13)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from plotroom.core.events import LedgerError
 from plotroom.core.github import GitHubSummary
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
+from plotroom.ports.search import SearchPage
 
 DEFAULT_SNAPSHOT_BUDGET = 2000
 MIN_BOARD_BUDGET = 256
@@ -37,6 +38,25 @@ def _add(
         return True
     rows.pop()
     return False
+
+
+def render_search(page: SearchPage, budget: int) -> dict[str, Any]:
+    hits: list[dict[str, Any]] = []
+    data = {"hits": hits, "omitted": page.total}
+    if not _fits(data, budget):
+        raise LedgerError("unavailable", "search reply exceeds the configured token budget")
+    for hit in page.hits:
+        data["omitted"] = page.total - len(hits) - 1
+        row = asdict(hit)
+        if _add(data, hits, row, budget):
+            continue
+        if not hits and len(hit.excerpt) > 80:
+            row["excerpt"] = hit.excerpt[:80] + "…"
+            if _add(data, hits, row, budget):
+                continue
+        data["omitted"] += 1
+        break
+    return data
 
 
 def render_snapshot(

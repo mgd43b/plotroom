@@ -17,10 +17,12 @@ from types import FrameType
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 import uvicorn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from plotroom.adapters.claude_desktop import ClaudeDesktopReader
+from plotroom.adapters.embedding_http import HttpEmbedder
 from plotroom.adapters.github import (
     GitHubPoller,
     LocalGitHubCredential,
@@ -36,7 +38,7 @@ from plotroom.adapters.switchboard import Switchboard
 from plotroom.adapters.work_items_bmad import BmadTicketTree, read_ticket_body, read_ticket_tree
 from plotroom.adapters.work_items_github_issues import GitHubIssuesWorkItems
 from plotroom.app.clock import SystemClock
-from plotroom.app.config import Config, ConfigError
+from plotroom.app.config import Config, ConfigError, EmbedderConfig
 from plotroom.app.lock import DataDirLock
 from plotroom.app.portfile import (
     DirectoryIdentity,
@@ -58,12 +60,21 @@ from plotroom.core.actions import SWITCHBOARD_SEND
 from plotroom.core.catalog import build_catalog
 from plotroom.core.ledger import Ledger
 from plotroom.core.routing import seed_routes
+from plotroom.core.search import follow_message_embeddings
 from plotroom.ports import Clock
 from plotroom.ports.github_write import FixtureGitHubMerge
+from plotroom.ports.search import EmbeddingIndex
 from plotroom.ports.usage_meter import UsageMeter
 from plotroom.ports.work_items import WorkItemSource
 
 log = logging.getLogger("plotroom.serve")
+
+
+async def _run_embeddings(ledger: Ledger, index: EmbeddingIndex, config: EmbedderConfig) -> None:
+    async with httpx.AsyncClient(trust_env=False) as client:
+        await follow_message_embeddings(
+            ledger, index, HttpEmbedder(client, config.url, config.model)
+        )
 
 
 def _require_directory(data_dir: Path, identity: DirectoryIdentity) -> None:
@@ -317,6 +328,7 @@ class Daemon:
                 unavailable=problem,
                 snapshot_budget=config.snapshot_budget,
                 next_budget=config.next_budget,
+                search_budget=config.search_budget,
             )
             uvicorn_config = uvicorn.Config(
                 app,
@@ -412,6 +424,7 @@ class Daemon:
                 merge_clerk=partial(tokens.has_role, project_id, "clerk") if live_merge else None,
                 fixture_merge_enabled=fixture_write is not None,
                 fixture_branch_updates=fixture_write is not None,
+                search=project.store,
             )
             project.ledger.start()
             if route_seeds := self._config.routes.get(project_id):
@@ -425,6 +438,9 @@ class Daemon:
                 else None
             )
             inputs = [switchboard.run] if switchboard is not None else []
+            if (embedder := self._config.embedders.get(project_id)) is not None:
+                index = project.store.embedding_index(embedder.model)
+                inputs.append(partial(_run_embeddings, project.ledger, index, embedder))
             if desktop is not None:
                 intake = SessionIntake(
                     project.ledger,
