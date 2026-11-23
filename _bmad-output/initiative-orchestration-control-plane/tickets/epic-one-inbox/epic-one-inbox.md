@@ -32,7 +32,7 @@ Every signal the orchestrator used to collect from four channels arrives in one 
 - R5 (parent R24; spine AD-10): `plotroom bridge` runs on the switchboard's machine and carries both directions between the switchboard and a hosted instance with a `bridge` token.
 - R6 (parent R26; spine AD-2): `ingest` accepts only `claude.*` events from orchestrator, clerk and worker tokens, a worker's forced to its current lane, and the same turn sent twice is stored once.
 - R7 (parent R26): A `SessionReader` port exists, and a time-boxed spike decides whether a local reader implements it; with none, `ingest` alone carries R26.
-- R8 (parent R7; spine AD-17; decision 2026-11-22): The `WorkItemSource` mirror is also supplied from GitHub, read-only: a BMad repo-store tree on the default branch, and a BMad github-store tree of issues.
+- R8 (parent R7; spine AD-17; decision 2026-11-22): The `WorkItemSource` mirror can also be supplied from GitHub, read-only: a BMad repo-store tree on the default branch, or a BMad github-store tree of issues; each project's config names exactly one work-item source, so readiness never comes from two places.
 - R9 (parent R7; decision 2026-11-22): Deploy status comes from GitHub Deployments and from a deploy lane's own reports, read-only, as typed events.
 - R10 (parent R7, R3, R8): An unhandled message from a worker, or a Claude turn report, raises a next item that `ack` closes and that wakes `plotroom watch`.
 - R11 (parent R7; spine AD-16): Each inbound event names its lane when one can be inferred: from a PR's branch, or from a switchboard sender's configured channel address.
@@ -52,6 +52,7 @@ Every signal the orchestrator used to collect from four channels arrives in one 
 - GitHub Issues tickets shaped like this repository's and a BMad tree on the default branch both appear in the work-item mirror of the test repository, and nothing is written back.
 - A GitHub deployment and a lane's deploy report each appear once as deploy events.
 - An inbound message from a worker raises an item that wakes `plotroom watch`.
+- A PR event and a switchboard message sent with no lane each land on the lane inferred from the PR's branch and the sender's channel address.
 
 ## Boundaries
 

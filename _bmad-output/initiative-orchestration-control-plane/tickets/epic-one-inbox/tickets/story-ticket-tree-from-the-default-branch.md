@@ -16,7 +16,7 @@ tracker_status: backlog
 
 ## Description
 
-A WorkItemSource adapter reads a BMad repo-store ticket tree from the repository's default branch through entry 2's credential provider into the same read-only mirror as epic 1's local reader, refreshed on ticks. Hands on: the mirror to epic 5's tree-move checks.
+A WorkItemSource adapter reads a BMad repo-store ticket tree from the repository's default branch through entry 2's credential provider into the read-only mirror when the project's config names the default-branch tree as its one work-item source, refreshed on ticks. Hands on: the mirror to epic 5's tree-move checks.
 
 ## Requirements
 

@@ -16,7 +16,7 @@ tracker_status: backlog
 
 ## Description
 
-Fetchers add milestones, sub-issues, blocked-by relations and issue labels to the projection, and a WorkItemSource adapter reads a BMad github-store tree from them into the same read-only work-item mirror, with readiness from the github store's mapping (the starter config plus the project's store config) as tickets.py next defines ready_to_start, so plotroom can see a project's own GitHub Issues tickets. Uses entry 2's credential provider.
+Fetchers add milestones, sub-issues, blocked-by relations and issue labels to the projection, and a WorkItemSource adapter reads a BMad github-store tree from them into the read-only work-item mirror when the project's config names GitHub Issues as its one work-item source (each project has exactly one: a local tree, a tree on the default branch, or GitHub Issues), with readiness from the github store's mapping (the starter config plus the project's store config) as tickets.py next defines ready_to_start, so plotroom can see a project's own GitHub Issues tickets. Uses entry 2's credential provider.
 
 ## Requirements
 
