@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractAsyncContextManager
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from plotroom.core.actions import Action
 from plotroom.core.events import Event
@@ -11,6 +11,10 @@ from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullReq
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
+
+if TYPE_CHECKING:
+    from plotroom.core.outbox import OutboxLease, OutboxMessage, OutboxReadiness
+    from plotroom.core.triggers import Trigger
 
 type Board = tuple[int, list[Item], dict[str, int], list[Lane]]
 
@@ -51,6 +55,22 @@ class Transaction(Protocol):
     async def insert_action(self, action: Action) -> None: ...
 
     async def update_action(self, action: Action) -> None: ...
+
+    async def insert_outbox(self, message: OutboxMessage) -> None: ...
+
+    async def lease_outbox(
+        self, lease_id: str, now: str, expires_at: str
+    ) -> OutboxLease | None: ...
+
+    async def complete_outbox(self, lease_id: str, now: str) -> str | None: ...
+
+    async def find_trigger(self, trigger_id: str) -> Trigger | None: ...
+
+    async def open_triggers(self) -> list[Trigger]: ...
+
+    async def save_trigger(self, trigger: Trigger) -> None: ...
+
+    async def first_matching_pull(self, repository: str, pattern: str) -> int | None: ...
 
     async def find_lane(self, lane_id: str) -> Lane | None: ...
 
@@ -115,6 +135,12 @@ class Store(Protocol):
         self, role: str, repository: str
     ) -> tuple[Board, GitHubSummary]: ...
 
+    async def read_snapshot_board(
+        self, role: str, repository: str | None
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int]]: ...
+
+    async def list_triggers(self, lane: str | None) -> list[Trigger]: ...
+
     async def pull_request(self, repository: str, number: int) -> PullRequest | None: ...
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None: ...
@@ -130,6 +156,8 @@ class Store(Protocol):
     ) -> tuple[int, dict[str, Any] | None]: ...
 
     async def pending_action(self) -> Action | None: ...
+
+    async def outbox_readiness(self, now: str) -> OutboxReadiness: ...
 
     async def ready_work_items(self) -> tuple[WorkItem, ...]: ...
 

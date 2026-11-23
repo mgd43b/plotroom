@@ -11,6 +11,7 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -20,11 +21,20 @@ from plotroom.core.catalog import Catalog
 from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
-from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, GitHubSummary, PullRequest
+from plotroom.core.github import (
+    PR_KINDS,
+    PULL_REQUESTS,
+    FetchCursor,
+    FetchRetry,
+    GitHubSummary,
+    PullRequest,
+)
 from plotroom.core.lanes import Lane, with_projected_pr
 from plotroom.core.ledger import Ledger
 from plotroom.core.next_items import Item, visible
+from plotroom.core.outbox import OutboxLease, OutboxMessage, OutboxReadiness
 from plotroom.core.roles import WriterRule
+from plotroom.core.triggers import Trigger
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.ports.store import Board
 from plotroom.ports.work_items import WorkItem
@@ -71,6 +81,10 @@ class _MemoryTransaction:
         self.changes: list[Item] = []
         self.receipts: dict[tuple[str, str], dict[str, Any]] = {}
         self.actions: dict[str, Action] = {}
+        self.outbox: dict[str, OutboxMessage] = {}
+        self.leases: dict[str, OutboxLease] = {}
+        self.delivered: set[str] = set()
+        self.triggers: dict[str, Trigger] = {}
         self.lanes: dict[str, Lane] = {}
         self.work_items: tuple[WorkItem, ...] = ()
         self.claude_turns: dict[tuple[str, str], set[str]] = {}
@@ -197,6 +211,60 @@ class _MemoryTransaction:
         self._live()
         self.actions[action.key] = copy.deepcopy(action)
 
+    async def insert_outbox(self, message: OutboxMessage) -> None:
+        self._live()
+        self.outbox.setdefault(message.action_key, message)
+
+    async def lease_outbox(self, lease_id: str, now: str, expires_at: str) -> OutboxLease | None:
+        self._live()
+        for key, message in self.outbox.items():
+            if key not in self.delivered and (
+                key not in self.leases or self.leases[key].expires_at <= now
+            ):
+                lease = OutboxLease(message, lease_id, expires_at)
+                self.leases[key] = lease
+                return lease
+        return None
+
+    async def complete_outbox(self, lease_id: str, now: str) -> str | None:
+        self._live()
+        for key, lease in self.leases.items():
+            if key not in self.delivered and lease.act_id == lease_id and lease.expires_at > now:
+                self.delivered.add(key)
+                return key
+        return None
+
+    async def find_trigger(self, trigger_id: str) -> Trigger | None:
+        self._live()
+        return copy.deepcopy(self.triggers.get(trigger_id))
+
+    async def open_triggers(self) -> list[Trigger]:
+        self._live()
+        return [copy.deepcopy(t) for t in self.triggers.values() if t.state == "open"]
+
+    async def save_trigger(self, trigger: Trigger) -> None:
+        self._live()
+        self.triggers[trigger.id] = copy.deepcopy(trigger)
+
+    async def first_matching_pull(self, repository: str, pattern: str) -> int | None:
+        self._live()
+        matches = {
+            pull.number: pull.branch
+            for pull in self.pulls.values()
+            if pull.repository == repository and pull.complete and fnmatchcase(pull.branch, pattern)
+        }
+        for event in self.events:
+            number = event.fields.get("number")
+            if (
+                event.kind in PR_KINDS
+                and event.fields.get("repository") == repository
+                and isinstance(number, int)
+                and number in matches
+                and event.fields.get("branch") == matches[number]
+            ):
+                return number
+        return next(iter(matches), None)
+
     async def insert_event(self, event: StoredEvent) -> None:
         self._live()
         await asyncio.sleep(0)
@@ -260,6 +328,10 @@ class MemoryStore:
         self._changes: list[Item] = []
         self._receipts: dict[tuple[str, str], dict[str, Any]] = {}
         self._actions: dict[str, Action] = {}
+        self._outbox: dict[str, OutboxMessage] = {}
+        self._leases: dict[str, OutboxLease] = {}
+        self._delivered: set[str] = set()
+        self._triggers: dict[str, Trigger] = {}
         self._lanes: dict[str, Lane] = {}
         self._work_items: tuple[WorkItem, ...] = ()
         self._claude_turns: dict[tuple[str, str], set[str]] = {}
@@ -289,6 +361,10 @@ class MemoryStore:
         tx.changes = self._changes.copy()
         tx.receipts = copy.deepcopy(self._receipts)
         tx.actions = copy.deepcopy(self._actions)
+        tx.outbox = self._outbox.copy()
+        tx.leases = self._leases.copy()
+        tx.delivered = self._delivered.copy()
+        tx.triggers = copy.deepcopy(self._triggers)
         tx.lanes = self._lanes.copy()
         tx.work_items = self._work_items
         tx.claude_turns = {key: ids.copy() for key, ids in self._claude_turns.items()}
@@ -305,6 +381,8 @@ class MemoryStore:
             self._changes = tx.changes
             self._receipts = tx.receipts
             self._actions = tx.actions
+            self._outbox, self._leases, self._delivered = tx.outbox, tx.leases, tx.delivered
+            self._triggers = tx.triggers
             self._lanes = tx.lanes
             self._work_items = tx.work_items
             self._claude_turns = tx.claude_turns
@@ -318,6 +396,19 @@ class MemoryStore:
 
     async def head_seq(self) -> int:
         return self._seq
+
+    async def outbox_readiness(self, now: str) -> OutboxReadiness:
+        ready: list[int] = []
+        expiries: list[str] = []
+        for key, message in self._outbox.items():
+            if key in self._delivered:
+                continue
+            lease = self._leases.get(key)
+            if lease is None or lease.expires_at <= now:
+                ready.append(message.seq)
+            else:
+                expiries.append(lease.expires_at)
+        return OutboxReadiness(self._seq, min(ready, default=None), min(expiries, default=None))
 
     async def events_after(self, seq: int, limit: int = 100) -> list[StoredEvent]:
         return [copy.deepcopy(e) for e in self._events if e.seq > seq][: max(limit, 0)]
@@ -355,6 +446,19 @@ class MemoryStore:
         return (seq, items, counts, projected), GitHubSummary(
             opened, cursor.as_of if cursor else None
         )
+
+    async def read_snapshot_board(
+        self, role: str, repository: str | None
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int]]:
+        board, github = (
+            (await self.read_board(role), None)
+            if repository is None
+            else await self.read_github_board(role, repository)
+        )
+        return board, github, dict(Counter(t.state for t in self._triggers.values()))
+
+    async def list_triggers(self, lane: str | None) -> list[Trigger]:
+        return [copy.deepcopy(t) for t in self._triggers.values() if lane is None or t.lane == lane]
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return self._pulls.get((repository, number))

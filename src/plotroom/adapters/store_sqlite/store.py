@@ -7,7 +7,7 @@ import contextlib
 from collections.abc import AsyncGenerator, Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import URL, Connection, event
@@ -15,7 +15,7 @@ from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import ConnectionPoolEntry
 
-from plotroom.adapters.store_sqlite import github_sql
+from plotroom.adapters.store_sqlite import github_sql, outbox_sql, triggers_sql
 from plotroom.adapters.store_sqlite.actions_sql import pending_action
 from plotroom.adapters.store_sqlite.items_sql import first_change, open_item, open_items
 from plotroom.adapters.store_sqlite.lanes_sql import board_lanes, lane_counts
@@ -33,6 +33,10 @@ from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullReq
 from plotroom.core.next_items import Item
 from plotroom.ports.store import Board
 from plotroom.ports.work_items import WorkItem
+
+if TYPE_CHECKING:
+    from plotroom.core.outbox import OutboxReadiness
+    from plotroom.core.triggers import Trigger
 
 BEGIN_OPTION = "plotroom_begin"
 
@@ -181,11 +185,29 @@ class SqliteStore:
 
     async def read_github_board(self, role: str, repository: str) -> tuple[Board, GitHubSummary]:
         async with self._engine.connect() as connection:
-            cursor, items, counts, lanes = await self._board(connection, role)
-            projected = await github_sql.project_lane_heads(connection, repository, lanes)
-            return (cursor, items, counts, projected), await github_sql.summary(
-                connection, repository
+            return await self._github_board(connection, role, repository)
+
+    async def _github_board(
+        self, connection: AsyncConnection, role: str, repository: str
+    ) -> tuple[Board, GitHubSummary]:
+        cursor, items, counts, lanes = await self._board(connection, role)
+        projected = await github_sql.project_lane_heads(connection, repository, lanes)
+        return (cursor, items, counts, projected), await github_sql.summary(connection, repository)
+
+    async def read_snapshot_board(
+        self, role: str, repository: str | None
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int]]:
+        async with self._engine.connect() as connection:
+            board, github = (
+                (await self._board(connection, role), None)
+                if repository is None
+                else await self._github_board(connection, role, repository)
             )
+            return board, github, await triggers_sql.trigger_counts(connection)
+
+    async def list_triggers(self, lane: str | None) -> list[Trigger]:
+        async with self._engine.connect() as connection:
+            return await triggers_sql.list_triggers(connection, lane)
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         async with self._engine.connect() as connection:
@@ -220,6 +242,11 @@ class SqliteStore:
     async def pending_action(self) -> Action | None:
         async with self._engine.connect() as connection:
             return await pending_action(connection)
+
+    async def outbox_readiness(self, now: str) -> OutboxReadiness:
+        async with self._engine.connect() as connection:
+            head = int((await connection.execute(HEAD_SEQ)).scalar_one())
+            return await outbox_sql.readiness(connection, head, now)
 
     async def close(self) -> None:
         writer, self._writer = self._writer, None

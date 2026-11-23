@@ -18,6 +18,7 @@ from plotroom.adapters.claude_desktop import SESSION_ID
 from plotroom.adapters.github import github_secret_name
 from plotroom.core.roles import role_family
 from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, MIN_BOARD_BUDGET
+from plotroom.core.trigger_actions import DeliveryRoute
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -96,6 +97,7 @@ class Config:
     switchboards: Mapping[str, SwitchboardConfig] = field(default_factory=lambda: {})
     session_readers: Mapping[str, SessionReaderConfig] = field(default_factory=lambda: {})
     github: Mapping[str, GitHubConfig] = field(default_factory=lambda: {})
+    delivery_routes: Mapping[str, Mapping[str, DeliveryRoute]] = field(default_factory=lambda: {})
 
     @property
     def url(self) -> str:
@@ -155,6 +157,8 @@ def load_config(
     projects = _projects(env.get("PLOTROOM_PROJECTS"), raw.get("projects"))
     drain_sessions = _drain_sessions(projects, raw.get("projects"))
     workers = _workers(projects, raw.get("projects"))
+    switchboards = _switchboards(projects, raw.get("projects"))
+    worker_sessions = _worker_sessions(projects, raw.get("projects"), drain_sessions)
     if require_projects and not projects:
         raise ConfigError(
             "no projects configured: add a [projects.<id>] table to the config file "
@@ -182,9 +186,10 @@ def load_config(
         workers=workers,
         ticket_trees=_ticket_trees(projects, raw.get("projects"), base),
         watchers=_watchers(projects, raw.get("projects"), drain_sessions),
-        switchboards=_switchboards(projects, raw.get("projects")),
-        session_readers=_session_readers(projects, raw.get("projects"), base),
+        switchboards=switchboards,
+        session_readers=_session_readers(projects, raw.get("projects"), base, worker_sessions),
         github=_github_projects(projects, raw.get("projects"), base),
+        delivery_routes=_delivery_routes(projects, switchboards, worker_sessions, drain_sessions),
         wait_cap=_integer("wait_cap", raw.get("wait_cap", 240), minimum=1),
         snapshot_budget=_integer(
             "snapshot_budget",
@@ -350,7 +355,7 @@ def _switchboards(projects: tuple[str, ...], table: Any) -> dict[str, Switchboar
 
 
 def _session_readers(
-    projects: tuple[str, ...], table: Any, base: Path
+    projects: tuple[str, ...], table: Any, base: Path, sessions: Mapping[str, dict[str, str]]
 ) -> dict[str, SessionReaderConfig]:
     entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
     configured: dict[str, SessionReaderConfig] = {}
@@ -370,18 +375,52 @@ def _session_readers(
             base / Path(_string(f"{label}.app_support", settings.get("app_support"))).expanduser()
         )
         interval = _integer(f"{label}.poll_seconds", settings.get("poll_seconds", 1), minimum=1)
-        sessions: dict[str, str] = {}
-        for worker, worker_settings in project.get("workers", {}).items():
-            if "claude_session" in worker_settings:
-                session = _string(
-                    f"{label} session for {worker}", worker_settings["claude_session"]
-                )
-                if not SESSION_ID.fullmatch(session) or session in sessions:
-                    raise ConfigError(f"{label} session IDs must be valid and unique")
-                sessions[session] = worker
         configured[project_id] = SessionReaderConfig(
-            home.resolve(), support.resolve(), sessions, interval
+            home.resolve(), support.resolve(), sessions[project_id], interval
         )
+    return configured
+
+
+def _worker_sessions(
+    projects: tuple[str, ...], table: Any, drains: Mapping[str, str]
+) -> dict[str, dict[str, str]]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, dict[str, str]] = {}
+    for project_id in projects:
+        sessions: dict[str, str] = {}
+        project = entries.get(project_id, {})
+        if "session_reader" not in project and project_id not in drains:
+            continue
+        for worker, settings in project.get("workers", {}).items():
+            if "claude_session" not in settings:
+                continue
+            label = f"projects.{project_id}.workers.{worker}.claude_session"
+            session = _string(label, settings["claude_session"])
+            if not SESSION_ID.fullmatch(session) or session in sessions:
+                raise ConfigError(f"{label}: Claude session IDs must be valid and unique")
+            sessions[session] = worker
+        configured[project_id] = sessions
+    return configured
+
+
+def _delivery_routes(
+    projects: tuple[str, ...],
+    switchboards: Mapping[str, SwitchboardConfig],
+    sessions: Mapping[str, dict[str, str]],
+    drains: Mapping[str, str],
+) -> dict[str, Mapping[str, DeliveryRoute]]:
+    configured: dict[str, Mapping[str, DeliveryRoute]] = {}
+    for project_id in projects:
+        relay = switchboards.get(project_id)
+        routes = {
+            worker: DeliveryRoute("switchboard", address)
+            for address, worker in (relay.senders.items() if relay is not None else ())
+        }
+        if project_id in drains:
+            for session, worker in sessions[project_id].items():
+                # An explicit relay address takes precedence over a session reader mapping.
+                routes.setdefault(worker, DeliveryRoute("claude", session))
+        configured[project_id] = routes
     return configured
 
 
