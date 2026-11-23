@@ -8,6 +8,7 @@ from datetime import timedelta
 
 from plotroom.core.actions import (
     BRANCH_UPDATE,
+    CONTROLLER_MERGE,
     SWITCHBOARD_SEND,
     Action,
     finish_action,
@@ -21,7 +22,14 @@ from plotroom.core.branch_updates import (
 )
 from plotroom.core.events import NewEvent, format_time
 from plotroom.core.ledger import Ledger
-from plotroom.core.merge_gate import GateSnapshot, load_gate_snapshot
+from plotroom.core.merge_controller import MERGE_READY
+from plotroom.core.merge_gate import (
+    GateSnapshot,
+    authorized_label,
+    determine_main_verdict,
+    evaluate_gate,
+    load_gate_snapshot,
+)
 from plotroom.core.outbox import OutboxMessage
 from plotroom.core.trigger_actions import (
     MARK,
@@ -34,7 +42,7 @@ from plotroom.core.trigger_actions import (
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.work_items import refresh_idle_workers
 from plotroom.ports.clock import Clock
-from plotroom.ports.github_write import FixtureGitHubWrite
+from plotroom.ports.github_write import FixtureGitHubMerge, FixtureGitHubWrite
 from plotroom.ports.work_items import WorkItem, WorkItemSource
 
 type ActionHandler = Callable[[Action], Awaitable[None]]
@@ -43,6 +51,10 @@ log = logging.getLogger("plotroom.runtime")
 
 class _BranchUpdateDeferred(Exception):
     """Roll back a no-op without waking the action runner again."""
+
+
+class _FixtureMergeDeferred(Exception):
+    """Keep an unready action queued without spinning on a no-op transaction."""
 
 
 class ProjectRuntime:
@@ -59,6 +71,7 @@ class ProjectRuntime:
         work_items: WorkItemSource | None = None,
         inputs: tuple[Callable[[], Awaitable[None]], ...] = (),
         fixture_github_write: FixtureGitHubWrite | None = None,
+        fixture_github_merge: FixtureGitHubMerge | None = None,
     ) -> None:
         self.ledger = ledger
         self.clock = clock
@@ -71,6 +84,9 @@ class ProjectRuntime:
         self.work_items = work_items
         self.inputs = inputs
         self.fixture_github_write = fixture_github_write
+        self._fixture_github_merge = (
+            fixture_github_merge if ledger.merge_gate_policy.controller_merges is True else None
+        )
         self._action_lock = asyncio.Lock()
         self._tasks: list[asyncio.Task[None]] = []
 
@@ -97,6 +113,7 @@ class ProjectRuntime:
                 await uow.replace_work_items(items)
             await refresh_idle_workers(uow, self.workers)
             await self.ledger.watchers.reconcile(uow)
+            uow.all_merge_pulls = True
 
         await self.ledger.run("system", tick)
         # Keep the cadence after delays without replaying a burst of stale ticks.
@@ -109,7 +126,9 @@ class ProjectRuntime:
             after = 0
             while True:
                 page = await self.ledger.pending_actions(
-                    after=after, skip_branch_updates=self.fixture_github_write is None
+                    after=after,
+                    skip_branch_updates=self.fixture_github_write is None,
+                    skip_controller_merges=self._fixture_github_merge is None,
                 )
                 if not page:
                     return False
@@ -119,14 +138,15 @@ class ProjectRuntime:
                 after = page[-1].position
 
     async def _run_action(self, action: Action) -> bool:
-        if action.attempts >= self.action_attempts and action.kind != BRANCH_UPDATE:
+        pinned = action.kind in (BRANCH_UPDATE, CONTROLLER_MERGE)
+        if action.attempts >= self.action_attempts and not pinned:
             await self.ledger.run("system", lambda uow: finish_action(uow, action, "failed"))
             return True
         failed = False
         try:
             if await self._dispatch(action):
                 return True
-        except _BranchUpdateDeferred:
+        except _BranchUpdateDeferred, _FixtureMergeDeferred:
             return False
         except Exception:
             # Action payloads and exception text may be sensitive. The item points to the key.
@@ -139,7 +159,7 @@ class ProjectRuntime:
                 await finish_action(uow, completed, "done")
             # A fixture response may have been lost on the last allowed attempt.
             elif completed.attempts >= self.action_attempts and (
-                action.kind != BRANCH_UPDATE or action.attempts >= self.action_attempts
+                not pinned or action.attempts >= self.action_attempts
             ):
                 await finish_action(uow, completed, "failed")
 
@@ -213,10 +233,91 @@ class ProjectRuntime:
 
         await self.ledger.run("system", dispatch)
 
+    async def _dispatch_fixture_merge(self, action: Action) -> None:
+        port = self._fixture_github_merge
+        policy = self.ledger.merge_gate_policy
+        repository, number = action.payload["repository"], action.payload["number"]
+        head, main = action.payload["head_sha"], action.payload["main_sha"]
+        method = action.payload["method"]
+        effect_key = action.payload["effect_key"]
+        if port is None or repository != self.ledger.github_repository:
+            raise _FixtureMergeDeferred
+
+        async def dispatch(uow: UnitOfWork) -> None:
+            local = self.ledger.gate_availability(await load_gate_snapshot(uow, repository, number))
+            evidence = await port.merge_evidence(
+                repository=repository,
+                number=number,
+                action_key=effect_key,
+            )
+            if evidence.applied is True:
+                await finish_action(uow, action, "done")
+                return
+
+            pull = local.pull
+            if pull is None or pull.state != "open" or pull.head_sha != head:
+                await finish_action(uow, action, "done")
+                return
+            item = await uow.active_item(MERGE_READY, str(number))
+            if (
+                item is None
+                or item.id != action.payload["item_id"]
+                or method != policy.merge_method
+            ):
+                await finish_action(uow, action, "done")
+                return
+            now = uow.now()
+            actual = evidence.snapshot
+            if (
+                self.ledger.github_error is not None
+                or item.state != "open"
+                or (item.context["head_sha"], item.context["main_sha"]) != (head, main)
+                or actual is None
+                or not evidence.revision
+                or actual.pull is None
+                or (actual.pull.repository, actual.pull.number) != (repository, number)
+            ):
+                raise _FixtureMergeDeferred
+
+            for snapshot in (local, actual):
+                if (
+                    evaluate_gate(
+                        snapshot,
+                        policy,
+                        now,
+                        expected_head_sha=head,
+                        expected_main_sha=main,
+                    ).verdict
+                    != "MERGE"
+                    or determine_main_verdict(snapshot, policy, now).kind != "green"
+                    or authorized_label(snapshot, policy, now, policy.fix_label) is not None
+                ):
+                    raise _FixtureMergeDeferred
+
+            if action.attempts >= self.action_attempts:
+                await finish_action(uow, action, "failed")
+                return
+            if not await port.merge(
+                repository=repository,
+                number=number,
+                action_key=effect_key,
+                expected_head_sha=head,
+                expected_main_sha=main,
+                method=policy.merge_method,
+                evidence_revision=evidence.revision,
+            ):
+                raise _FixtureMergeDeferred
+            await finish_action(uow, await record_attempt(uow, action), "done")
+
+        await self.ledger.run("system", dispatch)
+
     async def _dispatch(self, action: Action) -> bool:
         """Dispatch the effect. Local effects record their attempt in the same commit."""
         if action.kind == BRANCH_UPDATE:
             await self._dispatch_branch_update(action)
+            return True
+        if action.kind == CONTROLLER_MERGE:
+            await self._dispatch_fixture_merge(action)
             return True
         if action.kind == SEND:
             worker = action.payload["worker"]

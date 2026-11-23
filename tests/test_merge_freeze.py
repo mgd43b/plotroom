@@ -13,6 +13,7 @@ from plotroom.core.github_projection import (
     CHECKS,
     MAIN,
     MAIN_CI,
+    PULL_TEXT,
     THREADS,
     GitHubRecord,
     GitHubResource,
@@ -104,6 +105,21 @@ async def test_freeze_persists_and_unfreeze_restores_each_verdict(tmp_path: Path
                     THREADS,
                     str(number),
                     GitHubResource((), attributes=pin, as_of=observed_at),
+                )
+                await tx.save_github_resource(
+                    REPOSITORY,
+                    PULL_TEXT,
+                    str(number),
+                    GitHubResource(
+                        (),
+                        attributes={
+                            **pin,
+                            "body": "",
+                            "commit_count": 1,
+                            "commit_messages": ["Update fixture branch"],
+                        },
+                        as_of=observed_at,
+                    ),
                 )
                 await tx.save_github_resource(
                     REPOSITORY,

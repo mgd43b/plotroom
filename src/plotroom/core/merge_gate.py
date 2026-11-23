@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -15,6 +16,7 @@ from plotroom.core.github_projection import (
     MAIN,
     MAIN_CI,
     MAIN_CI_WINDOW,
+    PULL_TEXT,
     THREADS,
     GitHubRecord,
     GitHubResource,
@@ -23,6 +25,7 @@ from plotroom.core.github_projection import (
 )
 from plotroom.core.merge_flakes import FAILURES as MAIN_FAILURES
 from plotroom.core.merge_flakes import EventLookup, main_check_is_flake
+from plotroom.core.merge_lane import MergeLaneIndex, merge_lane_evidence
 from plotroom.core.merge_overlap import (
     ALLOW_OVERLAP,
     PULL_COMPARISON,
@@ -31,6 +34,7 @@ from plotroom.core.merge_overlap import (
 )
 
 if TYPE_CHECKING:
+    from plotroom.core.lanes import Lane
     from plotroom.core.unit_of_work import UnitOfWork
     from plotroom.ports.store import Transaction
 
@@ -44,6 +48,11 @@ _PENDING_STATUSES = frozenset(
 _PASS_CONCLUSIONS = frozenset({"success", "neutral", "cancelled", "skipped"})
 _FAIL_CONCLUSIONS = frozenset({"action_required", "error", "failure", "timed_out"})
 _MAIN_JOB_CONCLUSIONS = _PASS_CONCLUSIONS | _FAIL_CONCLUSIONS | {"stale", "startup_failure"}
+# Match the clerk's word boundary and literal space with ASCII keyword case folding.
+_CLOSING_KEYWORD = re.compile(
+    r"(?ai:\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)) #[0-9]+"
+)
+KEYWORDS_OK = "keywords-ok"
 
 
 @dataclass(frozen=True)
@@ -55,6 +64,9 @@ class GatePolicy:
     ci_workflow: str | None = None
     fix_label: str | None = None
     authorized_label_logins: tuple[str, ...] = ()
+    skip_label: str | None = None
+    merge_method: Literal["merge", "squash", "rebase"] = "merge"
+    controller_merges: bool = False
 
 
 @dataclass(frozen=True)
@@ -70,6 +82,10 @@ class GateSnapshot:
     freeze_reason: str | None = None
     main: GitHubResource | None = None
     comparison: GitHubResource | None = None
+    lane: Lane | None = None
+    earlier_pull: int | None = None
+    ambiguous_lane: bool = False
+    pull_text: GitHubResource | None = None
 
 
 @dataclass(frozen=True)
@@ -265,7 +281,11 @@ async def read_main_flakes(
 
 
 async def load_gate_snapshot(
-    reader: Transaction | UnitOfWork, repository: str | None, number: int
+    reader: Transaction | UnitOfWork,
+    repository: str | None,
+    number: int,
+    *,
+    lane_index: MergeLaneIndex | None = None,
 ) -> GateSnapshot:
     """Read all gate inputs from one consistent transaction."""
     freeze_reason = await reader.deploy_freeze()
@@ -280,6 +300,11 @@ async def load_gate_snapshot(
         else None
     )
     main_ci = await reader.github_resource(repository, MAIN_CI, "")
+    lane, earlier_pull, ambiguous_lane = (
+        lane_index.evidence(pull)
+        if lane_index is not None
+        else await merge_lane_evidence(reader, pull)
+    )
     return GateSnapshot(
         pull,
         checks,
@@ -291,6 +316,10 @@ async def load_gate_snapshot(
         freeze_reason=freeze_reason,
         main=await reader.github_resource(repository, MAIN, ""),
         comparison=await reader.github_resource(repository, PULL_COMPARISON, scope),
+        lane=lane,
+        earlier_pull=earlier_pull,
+        ambiguous_lane=ambiguous_lane,
+        pull_text=await reader.github_resource(repository, PULL_TEXT, scope),
     )
 
 
@@ -346,6 +375,20 @@ def determine_main_verdict(
     return MainVerdict("none", "no completed CI run with a verdict", branch, tip)
 
 
+def _bound_pull_evidence(
+    resource: GitHubResource, pull: PullRequest, policy: GatePolicy, now: datetime
+) -> bool:
+    attributes = resource.attributes
+    return (
+        resource.complete
+        and fresh(resource.as_of, now, policy.max_age)
+        and attributes.get("head_sha") == pull.head_sha
+        and type(attributes.get("pull_version")) is int
+        and attributes["pull_version"] == pull.version
+        and attributes.get("pull_updated_at") == pull.updated_at
+    )
+
+
 def current_label_evidence(
     snapshot: GateSnapshot, policy: GatePolicy, now: datetime
 ) -> GitHubResource | None:
@@ -353,11 +396,7 @@ def current_label_evidence(
     if (
         pull is None
         or labels is None
-        or not labels.complete
-        or not fresh(labels.as_of, now, policy.max_age)
-        or labels.attributes.get("head_sha") != pull.head_sha
-        or labels.attributes.get("pull_version") != pull.version
-        or labels.attributes.get("pull_updated_at") != pull.updated_at
+        or not _bound_pull_evidence(labels, pull, policy, now)
         or not isinstance(labels.attributes.get("labels"), dict)
         or not isinstance(labels.attributes.get("label_provenance"), dict)
     ):
@@ -442,11 +481,60 @@ def _rule_overlap(snapshot: GateSnapshot, policy: GatePolicy, now: datetime) -> 
     return GateReason(STALE_CI, "\n".join((detail, *(f"  {path}" for path in paths))), 3)
 
 
+def _rule_closing_keywords(
+    snapshot: GateSnapshot, policy: GatePolicy, now: datetime
+) -> GateReason | None:
+    pull, text = snapshot.pull, snapshot.pull_text
+    unreadable = GateReason("pull_text_unreadable", "could not read the PR body and commits")
+    if pull is None or text is None or not _bound_pull_evidence(text, pull, policy, now):
+        return unreadable
+    body = text.attributes.get("body")
+    expected = text.attributes.get("commit_count")
+    messages = text.attributes.get("commit_messages")
+    if (
+        not isinstance(body, str)
+        or not isinstance(messages, list)
+        or type(expected) is not int
+        or expected < 1
+        or len(cast("list[object]", messages)) != expected
+        or any(not isinstance(message, str) for message in cast("list[object]", messages))
+    ):
+        return unreadable
+    has_closing_keyword = _CLOSING_KEYWORD.search(body) is not None or any(
+        _CLOSING_KEYWORD.search(message) for message in cast("list[str]", messages)
+    )
+    if has_closing_keyword and authorized_label(snapshot, policy, now, KEYWORDS_OK) is None:
+        return GateReason("closing_keywords", "closing keywords would close issues", 4)
+    return None
+
+
 type GateRule = Callable[[GateSnapshot, GatePolicy, datetime], GateReason | None]
-GATE_RULES: tuple[GateRule, ...] = (_rule_checks, _rule_review_threads, _rule_main, _rule_overlap)
+GATE_RULES: tuple[GateRule, ...] = (
+    _rule_checks,
+    _rule_review_threads,
+    _rule_main,
+    _rule_overlap,
+    _rule_closing_keywords,
+)
 
 
-def evaluate_gate(snapshot: GateSnapshot, policy: GatePolicy, now: datetime) -> GateVerdict:
+def active_skip_label(snapshot: GateSnapshot, policy: GatePolicy, now: datetime) -> bool:
+    labels = current_label_evidence(snapshot, policy, now)
+    return (
+        policy.skip_label is not None
+        and labels is not None
+        and (policy.skip_label in labels.attributes["labels"])
+    )
+
+
+def evaluate_gate(
+    snapshot: GateSnapshot,
+    policy: GatePolicy,
+    now: datetime,
+    *,
+    expected_head_sha: str | None = None,
+    expected_main_sha: str | None = None,
+) -> GateVerdict:
     """Return the first refusal in clerk order and the oldest included observation."""
     pull, cursor, checks = snapshot.pull, snapshot.pull_cursor, snapshot.checks
     head = (pull.head_sha or None) if pull is not None else None
@@ -461,6 +549,7 @@ def evaluate_gate(snapshot: GateSnapshot, policy: GatePolicy, now: datetime) -> 
             snapshot.labels,
             snapshot.main,
             snapshot.comparison,
+            snapshot.pull_text,
         )
         if observation is not None
         if (timestamp := observation_time(observation.as_of)) is not None
@@ -472,7 +561,35 @@ def evaluate_gate(snapshot: GateSnapshot, policy: GatePolicy, now: datetime) -> 
         return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
     if (reason := _projection_reason(snapshot, policy, now)) is not None:
         return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
+    if expected_head_sha is not None and head != expected_head_sha:
+        reason = GateReason("head_moved", "the pull request head moved")
+        return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
+    if pull is not None and pull.draft:
+        reason = GateReason("draft_pr", "the pull request is a draft")
+        return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
+    if active_skip_label(snapshot, policy, now):
+        reason = GateReason("skip_label", "the pull request has the skip label")
+        return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
+    if expected_main_sha is not None and (
+        determine_main_verdict(snapshot, policy, now).head_sha != expected_main_sha
+    ):
+        reason = GateReason("main_moved", "the default branch moved", 1)
+        return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
     for rule in GATE_RULES:
         if (reason := rule(snapshot, policy, now)) is not None:
             return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
+    if policy.skip_label is not None and current_label_evidence(snapshot, policy, now) is None:
+        reason = GateReason("skip_label_unreadable", "could not read the skip label")
+        return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
+    if pull is not None and pull.draft is None:
+        reason = GateReason("draft_unreadable", "could not read the pull request draft state")
+        return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
+    if snapshot.ambiguous_lane:
+        reason = GateReason("ambiguous_merge_lane", "multiple lanes match the pull request branch")
+        return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
+    if snapshot.earlier_pull is not None:
+        reason = GateReason(
+            "duplicate_lane_pr", f"PR #{snapshot.earlier_pull} is already open for this lane"
+        )
+        return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
     return GateVerdict("MERGE", (), 0, head, as_of)

@@ -96,6 +96,14 @@ EVENTS_AFTER = text(
     "SELECT seq, id, source, kind, upstream_id, lane_id, fields, body, observed_at "
     "FROM events WHERE seq > :seq ORDER BY seq LIMIT max(:limit, 0)"
 )
+LATEST_MERGE_VERDICT = text("""
+    SELECT events.* FROM merge_verdicts JOIN events ON events.seq = merge_verdicts.event_seq
+    WHERE merge_verdicts.repository = :repository AND merge_verdicts.number = :number
+""")
+SAVE_MERGE_VERDICT = text("""
+    INSERT INTO merge_verdicts (repository, number, event_seq) VALUES (:repository, :number, :seq)
+    ON CONFLICT (repository, number) DO UPDATE SET event_seq = excluded.event_seq
+""")
 DEPLOY_FREEZE = text("SELECT value FROM project_meta WHERE key = 'merge.deploy_freeze'")
 SAVE_DEPLOY_FREEZE = text("""
     INSERT INTO project_meta (key, value) VALUES ('merge.deploy_freeze', :reason)
@@ -141,6 +149,19 @@ class SqliteTransaction:
         )
         row = result.first()
         return None if row is None else event_from_row(row)
+
+    async def latest_merge_verdict(self, repository: str, number: int) -> Event | None:
+        row = (
+            await self._live().execute(
+                LATEST_MERGE_VERDICT, {"repository": repository, "number": number}
+            )
+        ).first()
+        return None if row is None else event_from_row(row)
+
+    async def save_merge_verdict(self, repository: str, number: int, seq: int) -> None:
+        await self._live().execute(
+            SAVE_MERGE_VERDICT, {"repository": repository, "number": number, "seq": seq}
+        )
 
     async def latest_event(
         self,
@@ -248,6 +269,9 @@ class SqliteTransaction:
 
     async def branch_lane(self, branch: str) -> Lane | None:
         return await lanes_sql.branch_lane(self._live(), branch)
+
+    async def active_lanes(self) -> list[Lane]:
+        return await lanes_sql.board_lanes(self._live(), "orchestrator")
 
     async def lane_claims(self, lane: str | None = None) -> list[Claim]:
         return await claims_sql.read_claims(self._live(), "orchestrator", lane)

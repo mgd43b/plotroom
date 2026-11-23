@@ -219,7 +219,7 @@ async def fetch_main(
     image_jobs: tuple[str, ...],
     previous: GitHubResource | None,
 ) -> GitHubResource:
-    branch, sha = await _main_head(api, client, token)
+    branch, sha = await fetch_default_branch_head(api, client, token)
     old = (
         {row.key: row for row in previous.records}
         if previous and previous.attributes.get("branch") == branch
@@ -287,7 +287,7 @@ async def _workflow_run(
     return replace(record, details={**record.details, "main_branch_run": main_branch_run})
 
 
-async def _main_head(
+async def fetch_default_branch_head(
     api: GitHubReadClient, client: httpx.AsyncClient, token: str
 ) -> tuple[str, str]:
     metadata = obj(await api.get(client, token, ""))
@@ -307,7 +307,7 @@ async def fetch_main_ci(
     branch, sha = (
         (main.attributes["branch"], main.attributes["head_sha"])
         if main is not None
-        else await _main_head(api, client, token)
+        else await fetch_default_branch_head(api, client, token)
     )
     if not branch or not sha:
         raise ValueError("GitHub returned an invalid default branch")
