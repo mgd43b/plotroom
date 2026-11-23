@@ -14,7 +14,13 @@ import httpx
 import pytest
 from mcp_types import PROTOCOL_VERSION_META_KEY
 
-from plotroom.adapters.mcp.proxy import EndpointError, StdioProxy, check_endpoint, envelope_headers
+from plotroom.adapters.mcp.proxy import (
+    EndpointError,
+    StdioProxy,
+    UpstreamStartError,
+    check_endpoint,
+    envelope_headers,
+)
 
 MODERN = "2026-07-28"
 
@@ -753,3 +759,262 @@ async def test_refusals_stay_bounded_while_a_cancelled_write_is_stuck() -> None:
     await asyncio.wait_for(proxy.run(), timeout=30)
     # one orphaned write plus one refusal reach the limit of 2 * max_pending; the rest are dropped
     assert [m["id"] for m in stdout.messages() if "error" in m] == [2]
+
+
+# --- starting the server on demand ---------------------------------------------------------
+
+
+def ok_handler(http_request: httpx.Request) -> httpx.Response:
+    body = json.loads(http_request.content)
+    return httpx.Response(
+        200, content=result_for(body), headers={"content-type": "application/json"}
+    )
+
+
+async def test_requests_arriving_together_start_the_server_once_and_wait_for_it() -> None:
+    release = asyncio.Event()
+    both_dispatched = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    starts: list[int] = []
+    sent: list[int] = []
+
+    async def ensure() -> None:
+        starts.append(1)
+        await release.wait()
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(http_request.content)["id"])
+        return ok_handler(http_request)
+
+    class Stdin:
+        """Two requests, then end of input. Reading the end means both are already dispatched."""
+
+        def __init__(self) -> None:
+            self._script = [modern("tools/list", 1, {}), modern("tools/list", 2, {})]
+
+        def readline(self) -> bytes:
+            if self._script:
+                return json.dumps(self._script.pop(0)).encode() + b"\n"
+            loop.call_soon_threadsafe(both_dispatched.set)
+            return b""
+
+    stdout = Output()
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=Stdin(),  # pyright: ignore[reportArgumentType]
+        stdout=stdout,
+        http=client_for(handler),
+        ensure=ensure,
+    )
+    running = asyncio.ensure_future(proxy.run())
+    await asyncio.wait_for(both_dispatched.wait(), timeout=30)
+    for _ in range(20):  # loop turns, not time: a gate that let a request through would show by now
+        await asyncio.sleep(0)
+    assert sent == [], "nothing is forwarded before the server is up"
+    release.set()
+    await asyncio.wait_for(running, timeout=30)
+    assert starts == [1]
+    assert sorted(m["id"] for m in stdout.messages()) == [1, 2]
+
+
+async def test_a_server_that_cannot_start_answers_each_request_with_the_reason() -> None:
+    attempts: list[int] = []
+
+    async def ensure() -> None:
+        attempts.append(1)
+        raise UpstreamStartError("data directory is locked: pid 42")
+
+    stdout = Output()
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(modern("tools/list", 1, {}), request("notifications/initialized", None)),
+        stdout=stdout,
+        http=client_for(ok_handler),
+        ensure=ensure,
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    (reply,) = stdout.messages()
+    assert reply["id"] == 1
+    assert "data directory is locked: pid 42" in reply["error"]["message"]
+    assert attempts, "every request after a failure tries the start again"
+
+
+async def test_a_refused_connection_restarts_the_server_and_retries_the_request_once() -> None:
+    starts: list[int] = []
+    posts: list[int] = []
+
+    async def ensure() -> None:
+        starts.append(1)
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        posts.append(1)
+        if len(posts) == 1:
+            raise httpx.ConnectError("refused", request=http_request)
+        return ok_handler(http_request)
+
+    stdout = Output()
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(modern("tools/list", 1, {})),
+        stdout=stdout,
+        http=client_for(handler),
+        ensure=ensure,
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    assert starts == [1, 1], "once at the first request, once after the refusal"
+    assert posts == [1, 1]
+    assert [m["id"] for m in stdout.messages()] == [1]
+
+
+async def test_a_refusal_after_the_restart_is_an_error_and_not_a_loop() -> None:
+    starts: list[int] = []
+
+    async def ensure() -> None:
+        starts.append(1)
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=http_request)
+
+    stdout = Output()
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(modern("tools/list", 1, {})),
+        stdout=stdout,
+        http=client_for(handler),
+        ensure=ensure,
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    assert starts == [1, 1]
+    (reply,) = stdout.messages()
+    assert "cannot reach plotroom" in reply["error"]["message"]
+
+
+async def test_without_a_starter_a_refused_connection_is_not_retried() -> None:
+    posts: list[int] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        posts.append(1)
+        raise httpx.ConnectError("refused", request=http_request)
+
+    stdout = Output()
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(modern("tools/list", 1, {})),
+        stdout=stdout,
+        http=client_for(handler),
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    assert posts == [1]
+    assert len(stdout.messages()) == 1
+
+
+async def test_a_notifications_empty_202_is_not_logged_as_an_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(202)
+
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(request("notifications/initialized", None)),
+        stdout=Output(),
+        http=client_for(handler),
+    )
+    with caplog.at_level("ERROR", logger="plotroom.proxy"):
+        await asyncio.wait_for(proxy.run(), timeout=30)
+    assert caplog.records == []
+
+
+# --- the client going away ------------------------------------------------------------------
+
+
+async def test_closing_stdin_cancels_a_listen_stream_but_lets_other_calls_finish() -> None:
+    never = asyncio.Event()
+    answer_listen_done = asyncio.Event()
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        body = json.loads(http_request.content)
+        if body["method"] == "subscriptions/listen":
+            answer_listen_done.set()
+            await never.wait()
+        else:
+            await answer_listen_done.wait()
+        return httpx.Response(
+            200, content=result_for(body), headers={"content-type": "application/json"}
+        )
+
+    stdout = Output()
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(modern("subscriptions/listen", 1, {}), modern("tools/list", 2, {})),
+        stdout=stdout,
+        http=client_for(handler),
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    assert [m["id"] for m in stdout.messages()] == [2], "the call finished; the stream was ended"
+
+
+async def test_a_vanished_client_stops_every_pending_call() -> None:
+    never = asyncio.Event()
+    started = asyncio.Event()
+    canceled: list[int] = []
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        body = json.loads(http_request.content)
+        if body["id"] == 1:
+            await started.wait()  # answered only once the second call is pending
+            return httpx.Response(
+                200, content=result_for(body), headers={"content-type": "application/json"}
+            )
+        started.set()
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            canceled.append(body["id"])
+            raise
+        return httpx.Response(200)
+
+    class Gone(io.BytesIO):
+        def write(self, data: Any) -> int:
+            raise BrokenPipeError
+
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(modern("tools/list", 1, {}), modern("tools/list", 2, {})),
+        stdout=Gone(),
+        http=client_for(handler),
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    assert canceled == [2]
+
+
+async def test_requests_refused_together_share_one_restart() -> None:
+    starts: list[int] = []
+    refused = 0
+    all_refused = asyncio.Event()
+
+    async def ensure() -> None:
+        starts.append(1)
+
+    async def handler(http_request: httpx.Request) -> httpx.Response:
+        nonlocal refused
+        if len(starts) == 1:  # the daemon is down until the restart
+            refused += 1
+            if refused == 3:
+                all_refused.set()
+            await all_refused.wait()  # each of the three is refused before any restarts
+            raise httpx.ConnectError("refused", request=http_request)
+        return ok_handler(http_request)
+
+    stdout = Output()
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=lines(*(modern("tools/list", n, {}) for n in (1, 2, 3))),
+        stdout=stdout,
+        http=client_for(handler),
+        ensure=ensure,
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    assert starts == [1, 1], "one start at first use and one shared restart, not one per request"
+    assert sorted(m["id"] for m in stdout.messages()) == [1, 2, 3]
+    assert all("result" in m for m in stdout.messages())
