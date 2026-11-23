@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "41"
 remote: "https://github.com/mgd43b/plotroom/issues/41"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Switchboard adapter: send

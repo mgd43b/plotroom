@@ -9,7 +9,7 @@ hitl: false
 risk: high
 tracker_id: "30"
 remote: "https://github.com/mgd43b/plotroom/issues/30"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Switchboard adapter: receive and acknowledge as an MCP client

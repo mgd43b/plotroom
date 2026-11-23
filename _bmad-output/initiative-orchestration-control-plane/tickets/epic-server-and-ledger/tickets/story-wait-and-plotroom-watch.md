@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "21"
 remote: "https://github.com/mgd43b/plotroom/issues/21"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # wait() and plotroom watch

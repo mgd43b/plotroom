@@ -10,7 +10,7 @@ hitl: false
 risk: high
 tracker_id: "138"
 remote: "https://github.com/mgd43b/plotroom/issues/138"
-tracker_status: backlog
+tracker_status: done
 status: built
 ---
 

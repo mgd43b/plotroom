@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "43"
 remote: "https://github.com/mgd43b/plotroom/issues/43"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Claude intake through ingest(), the SessionReader port and inbound-message items

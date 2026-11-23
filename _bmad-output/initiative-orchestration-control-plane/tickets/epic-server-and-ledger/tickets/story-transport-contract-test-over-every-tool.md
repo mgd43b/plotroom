@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "24"
 remote: "https://github.com/mgd43b/plotroom/issues/24"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Transport contract test over every tool
