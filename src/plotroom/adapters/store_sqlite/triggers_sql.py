@@ -18,10 +18,12 @@ _COUNTS = text("SELECT state, count(*) AS total FROM triggers GROUP BY state")
 _SAVE = text("""
     INSERT INTO triggers
       (id, lane, repository, predicate, action_kind, action_payload, state, bindings,
-       created_seq, fired_seq, action_key, mode, was_true, event_floors)
+       created_seq, fired_seq, action_key, mode, was_true, event_floors,
+       import_note, notify_on_fire)
     VALUES
       (:id, :lane, :repository, :predicate, :action_kind, :action_payload, :state, :bindings,
-       :created_seq, :fired_seq, :action_key, :mode, :was_true, :event_floors)
+       :created_seq, :fired_seq, :action_key, :mode, :was_true, :event_floors,
+       :import_note, :notify_on_fire)
     ON CONFLICT(id) DO UPDATE SET state = excluded.state, bindings = excluded.bindings,
       fired_seq = excluded.fired_seq, action_key = excluded.action_key,
       was_true = excluded.was_true, event_floors = excluded.event_floors
@@ -51,6 +53,8 @@ def _from_row(row: Row[Any]) -> Trigger:
         row.mode,
         bool(row.was_true),
         json.loads(row.event_floors),
+        row.import_note,
+        bool(row.notify_on_fire),
     )
 
 
@@ -94,6 +98,8 @@ async def save_trigger(connection: AsyncConnection, trigger: Trigger) -> None:
             "mode": trigger.mode,
             "was_true": trigger.was_true,
             "event_floors": json.dumps(trigger.event_floors),
+            "import_note": trigger.import_note,
+            "notify_on_fire": trigger.notify_on_fire,
         },
     )
 

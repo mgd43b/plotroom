@@ -279,6 +279,14 @@ async def _ready_endpoint(location: DaemonLocation, within: float) -> LocalEndpo
     return None
 
 
+async def require_daemon(location: DaemonLocation, *, within: float) -> LocalEndpoint:
+    """Reach an already-running daemon without starting another process."""
+    endpoint = await _ready_endpoint(location, within)
+    if endpoint is None:
+        raise UpstreamStartError("no verified local daemon is running")
+    return endpoint
+
+
 async def ensure_daemon(
     location: DaemonLocation,
     config_path: Path | None,

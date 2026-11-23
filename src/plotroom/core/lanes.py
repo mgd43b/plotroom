@@ -34,6 +34,8 @@ class Lane:
     head_sha: str | None = None
     branch_pattern: str | None = None
     checklist: Checklist | None = None
+    imported_channel: str | None = None
+    imported_trigger_id: str | None = None
 
     def with_checklist(self, checklist: Checklist | None) -> Lane:
         if checklist is None or checklist.state == "invalidated":
@@ -60,6 +62,10 @@ class Lane:
         }
         if self.checklist is not None:
             result["checklist"] = self.checklist.render()
+        if self.imported_channel is not None:
+            result["imported_channel"] = self.imported_channel
+        if self.imported_trigger_id is not None:
+            result["imported_trigger_id"] = self.imported_trigger_id
         return result
 
 
@@ -87,7 +93,12 @@ async def owns_lane(view: OwnershipView, args: dict[str, Any]) -> bool:
 
 
 async def start_lane(
-    uow: UnitOfWork, args: dict[str, Any], *, workers: frozenset[str]
+    uow: UnitOfWork,
+    args: dict[str, Any],
+    *,
+    workers: frozenset[str],
+    imported_channel: str | None = None,
+    imported_trigger_id: str | None = None,
 ) -> dict[str, Any]:
     lane_id: str = args["lane"]
     worker: str = args["worker"]
@@ -108,7 +119,15 @@ async def start_lane(
         raise LedgerError("conflict", "worker already has a lane")
     if work_items and not set(work_items).isdisjoint(await uow.claimed_work_items()):
         raise LedgerError("conflict", "one or more work items are already assigned")
-    lane = Lane(lane_id, worker, tuple(work_items), branch, branch_pattern=branch_pattern)
+    lane = Lane(
+        lane_id,
+        worker,
+        tuple(work_items),
+        branch,
+        branch_pattern=branch_pattern,
+        imported_channel=imported_channel,
+        imported_trigger_id=imported_trigger_id,
+    )
     await uow.save_lane(lane)
     uow.pull_overlaps_changed()
     await refresh_idle_workers(uow, workers)
@@ -201,6 +220,28 @@ async def archive_lane(
 async def checklist_done(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
     lane = await _current(uow, args["lane"])
     return await complete_checklist_step(uow, lane.id, args["step"], args.get("ref"))
+
+
+async def checklist_import(
+    uow: UnitOfWork, args: dict[str, Any], *, repository: str | None
+) -> dict[str, Any]:
+    """Attach legacy post-merge work to the lane's complete, unambiguous projected PR."""
+    lane = await _current(uow, args["lane"])
+    pull = await uow.open_branch_pull(repository, lane.branch) if repository is not None else None
+    if pull is None or not pull.complete or pull.repository != pull.head_repository:
+        raise LedgerError("conflict", "checklist import requires a complete open projected PR")
+    current = await uow.find_checklist(lane.id)
+    if current is not None:
+        raise LedgerError("conflict", "the lane already has a checklist")
+    await ready_lane(
+        uow,
+        {"lane": lane.id, "pr": pull.number, "head_sha": pull.head_sha, "checklist": args["rows"]},
+        repository=repository,
+    )
+    imported = await uow.find_checklist(lane.id)
+    if imported is None:
+        raise RuntimeError("a declared checklist must exist in the writer transaction")
+    return imported.render()
 
 
 async def mark_lane(uow: UnitOfWork, action: Action, *, repository: str | None) -> None:

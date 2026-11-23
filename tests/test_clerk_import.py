@@ -1,0 +1,343 @@
+"""The local clerk import preserves template facts and uses the normal board lifecycle."""
+
+from collections.abc import AsyncIterator
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from fakes import FixedClock
+from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.app.clerk_import import parse_ledger, parse_triggers
+from plotroom.core.catalog import build_catalog
+from plotroom.core.events import LedgerError
+from plotroom.core.github import PULL_REQUESTS, ObservedPull, apply_pull_poll
+from plotroom.core.ledger import Ledger
+from plotroom.core.trigger_actions import DeliveryRoute
+from plotroom.core.triggers import TRIGGER_FIRED
+
+REPO = "fixture/project"
+FIXTURES = Path(__file__).parent / "fixtures" / "clerk_import"
+STAMP = "2026-11-23T12:01:00Z"
+PULLS = (
+    ObservedPull(41, "fixture/projected", "a" * 40, REPO, "open", STAMP, ""),
+    ObservedPull(42, "fixture/peer", "b" * 40, REPO, "open", STAMP, ""),
+    ObservedPull(43, "fixture/absent", "c" * 40, REPO, "open", STAMP, ""),
+)
+
+
+def inputs() -> dict[str, Any]:
+    repository, pulls, skips = parse_ledger((FIXTURES / "ledger.md").read_text())
+    triggers = parse_triggers((FIXTURES / "triggers.md").read_text())
+    return {"ledger_repository": repository, "pulls": pulls, "skips": skips, "triggers": triggers}
+
+
+async def observe(ledger: Ledger, pulls: tuple[ObservedPull, ...]) -> None:
+    cursor = await ledger.fetch_cursor(REPO, PULL_REQUESTS)
+    assert await ledger.run(
+        "system", lambda uow: apply_pull_poll(uow, REPO, cursor, pulls, "2026-11-23T12:02:00Z")
+    )
+
+
+@pytest.fixture
+async def board(tmp_path: Path) -> AsyncIterator[tuple[Ledger, SqliteStore]]:
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    catalog = build_catalog(
+        frozenset({"fixture", "peer"}),
+        github_repository=REPO,
+        delivery_routes={"fixture": DeliveryRoute("switchboard", "fixture-worker")},
+    )
+    ledger = Ledger(store, catalog, FixedClock(), github_repository=REPO)
+    ledger.start()
+    try:
+        await observe(ledger, PULLS)
+        yield ledger, store
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+def test_recognizes_exact_forms_and_preserves_unrecognized_prose() -> None:
+    args = inputs()
+    exact, fired, bind = args["triggers"]
+    assert (exact["predicate"], exact["channel"], exact["notify"], exact["fired"]) == (
+        {"pr_merged": {"number": 41}},
+        "relay:fixture-worker",
+        True,
+        False,
+    )
+    assert fired["predicate"] == {"pr_merged": {"branch_glob": "fixture/completed*"}}
+    assert fired["fired"]
+    assert bind["predicate"] is None
+    assert "repairs the fixture" in bind["source"]
+    assert [row["pr"] for row in args["pulls"]] == [41, 42, 43]
+    assert args["pulls"][1]["after_merge"] == "Verify artifact | runbook"
+
+    text = """# Clerk triggers
+```markdown
+## T99: #99 merges
+- Tell the coordinator: "A quoted example."
+```
+## T7: #7 merges
+- Tell the coordinator: "This says FIRED 2026-11-23 12:00Z abcdef1."
+## T8: #8 merges
+- Tell the coordinator: "A canceled instruction."
+- CANCELED
+## T9: #9 merges
+- Tell the coordinator: "Has an undocumented step."
+- Execute a command.
+"""
+    recognized = parse_triggers(text)
+    assert [row["label"] for row in recognized] == ["T7", "T8", "T9"]
+    assert recognized[0]["predicate"]
+    assert not recognized[0]["fired"]
+    assert [row["predicate"] for row in recognized[1:]] == [None, None]
+
+
+def test_refuses_rows_that_do_not_match_the_template() -> None:
+    text = (FIXTURES / "ledger.md").read_text()
+    for broken in (
+        text.replace("Owner (lane)", "Unofficial owner"),
+        text.replace("#42", "#invalid"),
+    ):
+        with pytest.raises(ValueError, match=r"column|number"):
+            parse_ledger(broken)
+    with pytest.raises(ValueError, match="conflicting entries"):
+        parse_triggers("## T1: #10 merges\n## T1: #11 merges")
+
+
+async def test_import_states_lane_links_checklist_items_and_replay(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, store = board
+    arguments = inputs()
+    first = await ledger.execute("orchestrator", "clerk_import", "snapshot", arguments)
+    data = first.result
+    assert set(data["triggers"]) == {"T1", "T2"}
+    assert set(data["lanes"]) == {"41", "42"}
+    assert set(data["items"]) == {"trigger:T3", "pull:43", "skip:44", "skip:45"}
+    active = await ledger.list_triggers("orchestrator", None)
+    by_id = {row["id"]: row for row in active}
+    opened = by_id[data["triggers"]["T1"]]
+    historical = by_id[data["triggers"]["T2"]]
+    assert (opened["state"], historical["state"]) == ("open", "fired")
+    assert "[sha8]" in opened["import_note"]
+    assert "[N]" in opened["import_note"]
+    assert historical["fired_seq"] is not None
+    assert historical["action_key"] is None
+    assert not [event for event in await ledger.events_after(0) if event.kind == TRIGGER_FIRED]
+    assert await store.pending_action() is None
+    list_board, *_ = await ledger.snapshot_summary(
+        "orchestrator", checklist_lane=data["lanes"]["42"]
+    )
+    lanes = {lane.id: lane.render() for lane in list_board[3]}
+    linked = lanes[data["lanes"]["41"]]
+    checklisted = lanes[data["lanes"]["42"]]
+    assert (linked["branch"], linked["imported_channel"], linked["imported_trigger_id"]) == (
+        PULLS[0].branch,
+        "relay:fixture-worker",
+        opened["id"],
+    )
+    assert checklisted["branch"] == PULLS[1].branch
+    assert checklisted["imported_channel"] == "coordinator-only"
+    assert checklisted["checklist"]["steps"][0]["step"] == "Verify artifact | runbook"
+
+    await ledger.execute("orchestrator", "ack", "ack-bind", {"item": data["items"]["trigger:T3"]})
+    before = await ledger.events_after(0)
+    repeat = await ledger.execute("orchestrator", "clerk_import", "snapshot", arguments)
+    assert repeat.replayed
+    assert repeat.result == data
+    assert await ledger.events_after(0) == before
+    _, current = await store.read_next("orchestrator", 0, 50)
+    assert data["items"]["trigger:T3"] not in {item.id for item in current}
+    overlapping = await ledger.execute(
+        "orchestrator",
+        "clerk_import",
+        "overlapping",
+        {"triggers": [arguments["triggers"][2]], "pulls": [], "skips": []},
+    )
+    assert overlapping.result["items"] == {"trigger:T3": data["items"]["trigger:T3"]}
+    _, current = await store.read_next("orchestrator", 0, 50)
+    assert data["items"]["trigger:T3"] not in {item.id for item in current}
+    assert await ledger.list_triggers("orchestrator", None) == active
+    assert await store.pending_action() is None
+
+    # A separately requested ledger import can reuse triggers already registered in this project.
+    another = await ledger.execute(
+        "orchestrator", "clerk_import", "ledger-only", {**arguments, "triggers": []}
+    )
+    assert another.result["lanes"] == data["lanes"]
+    assert another.result["items"] == {
+        name: item for name, item in data["items"].items() if name != "trigger:T3"
+    }
+
+    merged = replace(PULLS[0], state="merged", updated_at="2026-11-23T12:01:30Z")
+    await observe(ledger, (merged, *PULLS[1:]))
+    await observe(ledger, (merged, *PULLS[1:]))
+    [fired] = [event for event in await ledger.events_after(0) if event.kind == TRIGGER_FIRED]
+    assert fired.fields["trigger_id"] == opened["id"]
+    post = next(
+        row for row in await ledger.list_triggers("orchestrator", None) if row["id"] == opened["id"]
+    )
+    assert post["action"]["send"]["text"] == "Fixture #[N] at [sha8]. Literal $(fixture-only)."
+    assert post["state"] == "fired"
+    actions = [row.action for row in await store.pending_actions(after=0, limit=10)]
+    message = post["action"]["send"]["text"]
+    assert len(actions) == 2
+    assert {action.cause_id for action in actions} == {fired.id}
+    assert {action.kind: action.payload for action in actions} == {
+        "send": {"worker": "fixture", "text": message},
+        "notify_orchestrator": {"text": message},
+    }
+
+
+async def test_import_commands_are_orchestrator_only(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, store = board
+    operations: tuple[tuple[str, dict[str, Any]], ...] = (
+        ("clerk_import", inputs()),
+        ("checklist_import", {"lane": "any", "rows": []}),
+        (
+            "trigger",
+            {
+                "predicate": {"pr_merged": {"number": 41}},
+                "action": {"notify_orchestrator": {"text": "fixture"}},
+                "imported_fired": True,
+            },
+        ),
+    )
+    for role in ("clerk", "worker:fixture", "bridge", "drain"):
+        for command, args in operations:
+            with pytest.raises(LedgerError, match="may not execute"):
+                await ledger.execute(role, command, "refused", args)
+    assert await ledger.list_triggers("orchestrator", None) == []
+    assert await store.pending_action() is None
+
+
+def test_does_not_activate_markdown_examples_or_unrecognized_qualifiers() -> None:
+    assert (
+        parse_triggers(
+            "# Clerk triggers\n<!--\n## T3: #41 merges\n"
+            '- Tell the coordinator: "Retired."\n## Notes\n-->\n'
+        )
+        == []
+    )
+    text = (FIXTURES / "ledger.md").read_text()
+    with pytest.raises(ValueError, match="unexpected Markdown table"):
+        parse_ledger(text.replace("## Open PRs\n", "## Open PRs\n```markdown\n"))
+    [qualified] = parse_triggers(
+        '## T1: #41 merges (unless #42 is open)\n- Tell the coordinator: "Wait."\n'
+    )
+    assert qualified["predicate"] is None
+    [quoted] = parse_triggers(
+        '## T1: #41 merges\n- Tell the coordinator: "Quote `<!-- fixture -->` literally."\n'
+    )
+    assert quoted["text"] == "Quote `<!-- fixture -->` literally."
+    assert quoted["predicate"] == {"pr_merged": {"number": 41}}
+    indented = "\n".join(
+        f"    {line}" if line.startswith("|") else line for line in text.splitlines()
+    )
+    with pytest.raises(ValueError, match="unexpected Markdown table"):
+        parse_ledger(indented)
+
+
+async def test_ledger_repository_mismatch_leaves_no_partial_import(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, store = board
+    before = await ledger.events_after(0)
+    with pytest.raises(LedgerError, match="repository does not match"):
+        await ledger.execute(
+            "orchestrator",
+            "clerk_import",
+            "wrong-repository",
+            {**inputs(), "ledger_repository": "fixture/other"},
+        )
+    assert await ledger.events_after(0) == before
+    assert await ledger.list_triggers("orchestrator", None) == []
+    assert await store.pending_action() is None
+
+
+async def test_conflicting_trigger_label_does_not_link_a_historical_trigger(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, _ = board
+    first = await ledger.execute(
+        "orchestrator",
+        "clerk_import",
+        "triggers-only",
+        {"triggers": inputs()["triggers"], "pulls": [], "skips": []},
+    )
+    [conflict] = parse_triggers(
+        '## T1: #41 merges\n- Tell the coordinator: "Different exact message."\n'
+    )
+    second = await ledger.execute(
+        "orchestrator",
+        "clerk_import",
+        "conflicting-label",
+        {**inputs(), "triggers": [conflict]},
+    )
+    assert "trigger:T1" in second.result["items"]
+    lane_id = second.result["lanes"]["41"]
+    snapshot, *_ = await ledger.snapshot_summary("orchestrator", checklist_lane=lane_id)
+    lane = next(lane for lane in snapshot[3] if lane.id == lane_id)
+    assert lane.imported_trigger_id is None
+    assert lane.checklist is not None
+    assert [step.step for step in lane.checklist.steps] == ["Trigger T1"]
+    old = await ledger.list_triggers("orchestrator", None)
+    assert {row["id"] for row in old} == set(first.result["triggers"].values())
+
+
+async def test_updated_hold_context_reuses_the_single_pr_item(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, store = board
+    original: dict[str, Any] = {**inputs(), "triggers": [], "pulls": []}
+    first = await ledger.execute("orchestrator", "clerk_import", "holds", original)
+    item_id = first.result["items"]["skip:44"]
+    await ledger.execute("orchestrator", "ack", "seen-hold", {"item": item_id})
+    updated = {
+        **original,
+        "skips": [{"pr": 44, "reason": "Owner updated the fixture hold"}],
+    }
+    second = await ledger.execute("orchestrator", "clerk_import", "revised-hold", updated)
+    assert second.result["items"]["skip:44"] == item_id
+    _, current = await store.read_next("orchestrator", 0, 50)
+    [hold] = [item for item in current if item.id == item_id]
+    assert hold.context["reason"] == "Owner updated the fixture hold"
+    assert hold.state == "open"
+
+
+async def test_a_prior_bind_also_reserves_the_trigger_label(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, _ = board
+    [prose] = parse_triggers(
+        '## T1: the fixture work merges\n- Tell the coordinator: "Old handoff."\n'
+    )
+    empty: dict[str, Any] = {"pulls": [], "skips": []}
+    first = await ledger.execute(
+        "orchestrator", "clerk_import", "bind-first", {**empty, "triggers": [prose]}
+    )
+    assert "trigger:T1" in first.result["items"]
+    second = await ledger.execute(
+        "orchestrator",
+        "clerk_import",
+        "same-label",
+        {**empty, "triggers": [inputs()["triggers"][0]]},
+    )
+    assert "trigger:T1" in second.result["items"]
+    assert second.result["triggers"] == {}
+
+    later = await ledger.execute(
+        "orchestrator", "clerk_import", "ledger-after-binding", {**inputs(), "triggers": []}
+    )
+    lane_id = later.result["lanes"]["41"]
+    snapshot, *_ = await ledger.snapshot_summary("orchestrator", checklist_lane=lane_id)
+    lane = next(lane for lane in snapshot[3] if lane.id == lane_id)
+    assert lane.imported_trigger_id is None
+    assert lane.checklist is not None
+    assert [step.step for step in lane.checklist.steps] == ["Trigger T1"]
