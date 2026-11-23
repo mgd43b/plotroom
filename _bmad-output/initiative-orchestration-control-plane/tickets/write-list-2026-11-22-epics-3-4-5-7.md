@@ -2,14 +2,14 @@
 
 Status: HELD, waiting for mgd43b's go-ahead, typed in the ticketer's session. Nothing below has been done.
 
-Summary: 38 new issues, 18 body edits, 38 parent links, 110 blocked-by relations on new issues and 3 on existing epics, 2 label removals, 2 comments and 2 closes (#13, #31).
+Summary: 38 new issues, 18 body edits, 38 parent links, 111 blocked-by relations on new issues and 3 on existing epics, 2 label removals, 2 comments and 2 closes (#13, #31).
 
 ## Creates (in this order; milestone "Orchestration control plane"; no assignee)
 | # | Entry | Type | Title | Parent | Blocked by | Labels |
 |---|---|---|---|---|---|---|
 | 1 | 3.1 | story | Tracer: a pr_merged trigger notifies the orchestrator once | #3 | #17, #18, #29 | story, backlog, risk:high |
 | 2 | 3.5 | story | Exactly once across restarts, and branch-glob binding | #3 | new 3.1 | story, backlog, risk:high |
-| 3 | 3.8 | story | Listing and cancelling triggers | #3 | new 3.5 | story, backlog, risk:low |
+| 3 | 3.8 | story | Listing and canceling triggers | #3 | new 3.5 | story, backlog, risk:low |
 | 4 | 3.11 | story | Composition and predicate validation | #3 | new 3.8 | story, backlog, risk:medium |
 | 5 | 3.2 | story | PR-state leaves | #3 | new 3.11, #33, #34, #36 | story, backlog, risk:low |
 | 6 | 3.3 | story | Run reports, run_finished and main_green_with_images | #3 | new 3.2, #19, #33 | story, backlog, risk:medium |
@@ -28,7 +28,7 @@ Summary: 38 new issues, 18 body edits, 38 parent links, 110 blocked-by relations
 | 19 | 4.13 | story | Rule 6, live evaluation and the merge log | #4 | new 4.3, new 4.4, new 4.11, new 4.12 | story, backlog, risk:medium |
 | 20 | 4.5 | story | MERGE items, observed merges and refusals the lane sees | #4 | new 4.13, new 4.2, new 4.3, #19, #21 | story, backlog, risk:medium |
 | 21 | 4.7 | story | One open PR per lane | #4 | new 4.13, #35, #19 | story, backlog, risk:low |
-| 22 | 4.8 | story | Controller-run merges, built off | #4 | new 4.5, new 4.3 | story, backlog, risk:medium |
+| 22 | 4.8 | story | Controller-run merges, built off | #4 | new 4.5, new 4.3, new 4.7 | story, backlog, risk:medium |
 | 23 | 4.9 | story | Refactor sweep | #4 | new 4.1, new 4.11, new 4.6, new 4.2, new 4.3, new 4.12, new 4.4, new 4.13, new 4.5, new 4.7, new 4.8 | story, backlog, risk:low |
 | 24 | 4.10 | story | End-to-end suite over the epic's Done when | #4 | new 4.9 | story, backlog, risk:low |
 | 25 | 5.1 | story | Tracer: a conflicting claim raises an overlap item | #5 | #19 | story, backlog, risk:medium |
@@ -135,6 +135,7 @@ Summary: 38 new issues, 18 body edits, 38 parent links, 110 blocked-by relations
 - new 4.7 blocked by #19
 - new 4.8 blocked by new 4.5
 - new 4.8 blocked by new 4.3
+- new 4.8 blocked by new 4.7
 - new 4.9 blocked by new 4.1
 - new 4.9 blocked by new 4.11
 - new 4.9 blocked by new 4.6

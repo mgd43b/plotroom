@@ -20,7 +20,7 @@ Implements the SessionReader port with the mechanism entry 1 found, writing the 
 
 ## Requirements
 
-Verify: On a machine running the Claude desktop app, a lane's turn end appears once whether it arrives through the reader, through ingest, or both.
+Verify: On a machine running the Claude desktop app, a lane's turn end appears once whether it arrives through the reader, through ingest with or without turn_index, or both, in either order.
 
 ## References
 

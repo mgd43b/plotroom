@@ -28,9 +28,9 @@ notes = ["Check beyond its criteria: replaying the recorded inputs after a resta
 [[entry]]
 id = 8
 type = "story"
-title = "Listing and cancelling triggers"
-description = "Adds triggers(lane?) and cancel(trigger_id) (orchestrator only), cancelled triggers never firing, and trigger counts by state in snapshot()."
-verify = "triggers() lists open, fired and cancelled triggers with their bindings and triggers(lane) only that lane's; a cancelled trigger whose predicate then holds does not fire; a clerk or worker token's cancel is refused; snapshot() shows the counts."
+title = "Listing and canceling triggers"
+description = "Adds triggers(lane?) and cancel(trigger_id) (orchestrator only), canceled triggers never firing, and trigger counts by state in snapshot()."
+verify = "triggers() lists open, fired and canceled triggers with their bindings and triggers(lane) only that lane's; a canceled trigger whose predicate then holds does not fire; a clerk or worker token's cancel is refused; snapshot() shows the counts."
 covers = ["R5", "R7"]
 after = [5]
 hitl = false
