@@ -354,13 +354,14 @@ class Daemon:
             workers = self._config.workers.get(project_id, frozenset())
             source = self._config.ticket_trees.get(project_id)
             github = self._config.github.get(project_id)
+            repository = github.repository if github is not None else None
             project.ledger = Ledger(
                 project.store,
-                build_catalog(workers),
+                build_catalog(workers, github_repository=repository),
                 self._clock,
                 watcher_roles=self._config.watchers.get(project_id, ()),
                 wait_cap=self._config.wait_cap,
-                github_repository=github.repository if github is not None else None,
+                github_repository=repository,
             )
             project.ledger.start()
             relay = self._config.switchboards.get(project_id)

@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,6 +22,50 @@ log = logging.getLogger("plotroom.github")
 
 class GitHubUnavailable(Exception):
     """A provider error with a message safe to expose to the project."""
+
+
+class GitHubRateLimited(GitHubUnavailable):
+    def __init__(self, headers: httpx.Headers) -> None:
+        super().__init__("GitHub rate limit reached")
+        self._retry_after = headers.get("Retry-After")
+        self._reset = (
+            headers.get("X-RateLimit-Reset")
+            if headers.get("X-RateLimit-Remaining") == "0"
+            else None
+        )
+
+    def retry_at(self, now: datetime, fallback: int) -> datetime:
+        if self._retry_after is not None:
+            try:
+                if self._retry_after.isdecimal():
+                    return now + timedelta(seconds=max(1, int(self._retry_after)))
+                parsed = parsedate_to_datetime(self._retry_after)
+                return max(now + timedelta(seconds=1), parsed.replace(tzinfo=parsed.tzinfo or UTC))
+            except ValueError, OverflowError:
+                pass
+        if self._reset is not None:
+            try:
+                return max(
+                    now + timedelta(seconds=1), datetime.fromtimestamp(int(self._reset), tz=UTC)
+                )
+            except ValueError, OverflowError, OSError:
+                pass
+        return now + timedelta(seconds=fallback)
+
+
+def _rate_limited(response: httpx.Response) -> bool:
+    if response.status_code == 429:
+        return True
+    if response.status_code != 403:
+        return False
+    if response.headers.get("X-RateLimit-Remaining") == "0" or "Retry-After" in response.headers:
+        return True
+    try:
+        payload: Any = response.json()
+    except ValueError, UnicodeError:
+        return False
+    message = cast("dict[str, Any]", payload).get("message") if isinstance(payload, dict) else None
+    return isinstance(message, str) and "rate limit" in message.lower()
 
 
 def github_secret_name(project_id: str) -> str:
@@ -92,23 +137,21 @@ class PullRequestFetcher:
         self._endpoint = httpx.URL(f"{api_url}/repos/{repository}/pulls")
 
     async def fetch(self, client: httpx.AsyncClient, token: str) -> tuple[ObservedPull, ...]:
-        url = self._endpoint.copy_merge_params(
-            {"state": "all", "sort": "updated", "direction": "desc", "per_page": "100"}
-        )
-        seen_pages: set[httpx.URL] = set()
+        query = {"state": "all", "sort": "updated", "direction": "desc", "per_page": "100"}
+        page = 1
         pulls: dict[int, ObservedPull] = {}
         while True:
-            if url in seen_pages:
-                raise GitHubUnavailable("GitHub returned repeated pagination")
-            seen_pages.add(url)
             response = await client.get(
-                url,
+                self._endpoint,
+                params={**query, "page": str(page)},
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/vnd.github+json",
                     "X-GitHub-Api-Version": "2026-03-10",
                 },
             )
+            if _rate_limited(response):
+                raise GitHubRateLimited(response.headers)
             if response.status_code in (401, 403, 404):
                 raise GitHubUnavailable("GitHub denied access to the configured repository")
             if response.status_code != 200:
@@ -131,9 +174,15 @@ class PullRequestFetcher:
             link = response.links.get("next")
             if link is None:
                 return tuple(pulls.values())
-            url = response.url.join(link["url"])
-            if url.copy_with(query=None) != self._endpoint:
-                raise GitHubUnavailable("GitHub pagination left the configured repository endpoint")
+            # GitHub can use its numeric repository route in Link. Only the page number
+            # is needed, so every authenticated request stays on the configured endpoint.
+            try:
+                next_page = int(httpx.URL(link["url"]).params["page"])
+            except KeyError, ValueError, httpx.InvalidURL:
+                raise GitHubUnavailable("GitHub returned invalid pull request pagination") from None
+            if next_page != page + 1:
+                raise GitHubUnavailable("GitHub returned invalid pull request pagination")
+            page = next_page
 
 
 class GitHubPoller:
@@ -152,13 +201,20 @@ class GitHubPoller:
         self._credential = credential
         self._fetcher = fetcher
         self._seconds = seconds
+        self._retry_at: datetime | None = None
+        self._backoff = 60
 
     async def poll(self, client: httpx.AsyncClient) -> bool:
+        if self._retry_at is not None and self._clock.now() < self._retry_at:
+            return False
         baseline = await self._ledger.fetch_cursor(self._repo, PULL_REQUESTS)
         try:
             token = await self._credential.token()
             pulls = await self._fetcher.fetch(client, token)
         except (GitHubUnavailable, httpx.RequestError) as exc:
+            if isinstance(exc, GitHubRateLimited):
+                self._retry_at = exc.retry_at(self._clock.now(), self._backoff)
+                self._backoff = min(self._backoff * 2, 900)
             reason = str(exc) if isinstance(exc, GitHubUnavailable) else "GitHub request failed"
             if self._ledger.github_error != reason:
                 log.warning(reason, extra={"project": self._ledger.project_id})
@@ -170,10 +226,16 @@ class GitHubPoller:
         )
         if committed:
             self._ledger.github_error = None
+            self._retry_at = None
+            self._backoff = 60
         return committed
 
     async def run(self) -> None:
         async with httpx.AsyncClient(timeout=15, follow_redirects=False, trust_env=False) as client:
             while True:
                 await self.poll(client)
-                await asyncio.sleep(self._seconds)
+                if self._retry_at is None:
+                    delay = self._seconds
+                else:
+                    delay = max(self._seconds, (self._retry_at - self._clock.now()).total_seconds())
+                await asyncio.sleep(delay)

@@ -92,10 +92,26 @@ async def update_lane(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
     return await _save(uow, replace(lane, waiting_on=args["waiting_on"] or None))
 
 
-async def ready_lane(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
+async def ready_lane(
+    uow: UnitOfWork, args: dict[str, Any], *, repository: str | None
+) -> dict[str, Any]:
     lane = await _current(uow, args["lane"])
     if not 0 < args["pr"] <= 2**63 - 1 or not args["head_sha"].strip():
         raise LedgerError("invalid", "pr must be positive and head_sha must be non-empty")
+    if repository is not None:
+        pr = await uow.pull_request(repository, args["pr"])
+        if (
+            pr is None
+            or pr.state != "open"
+            or not pr.complete
+            or pr.branch != lane.branch
+            or pr.head_sha != args["head_sha"]
+        ):
+            raise LedgerError("conflict", "the PR and head must match the open GitHub projection")
+        result = await _save(
+            uow, replace(lane, state="ready", waiting_on=None, pr=None, head_sha=None)
+        )
+        return {**result, "pr": pr.number, "head_sha": pr.head_sha}
     return await _save(
         uow, replace(lane, state="ready", waiting_on=None, pr=args["pr"], head_sha=args["head_sha"])
     )

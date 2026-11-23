@@ -14,6 +14,10 @@ if TYPE_CHECKING:
 PULL_REQUESTS = "pull_requests"
 PR_OPENED = "github.pr_opened"
 PR_MERGED = "github.pr_merged"
+PR_CLOSED = "github.pr_closed"
+PR_REOPENED = "github.pr_reopened"
+PR_HEAD_CHANGED = "github.pr_head_changed"
+PR_KINDS = (PR_OPENED, PR_MERGED, PR_CLOSED, PR_REOPENED, PR_HEAD_CHANGED)
 PR_FIELDS = (
     FieldSpec("repository", "str"),
     FieldSpec("number", "int"),
@@ -42,6 +46,9 @@ class PullRequest:
     head_sha: str
     state: str
     updated_at: str
+    as_of: str
+    complete: bool
+    version: int
 
 
 @dataclass(frozen=True)
@@ -67,7 +74,7 @@ async def apply_pull_poll(
     if await uow.fetch_cursor(repository, PULL_REQUESTS) != baseline:
         return False
     for observed in pulls:
-        await _project_pull(uow, repository, observed)
+        await _project_pull(uow, repository, observed, as_of)
     watermark = max((pull.updated_at for pull in pulls), default="")
     if baseline is not None:
         watermark = max(baseline.watermark, watermark)
@@ -79,17 +86,33 @@ async def apply_pull_poll(
     return True
 
 
-async def _project_pull(uow: UnitOfWork, repository: str, observed: ObservedPull) -> None:
+def _changes(current: PullRequest | None, observed: ObservedPull) -> tuple[str, ...]:
+    by_state = {
+        "open": PR_OPENED if current is None else PR_REOPENED,
+        "closed": PR_CLOSED,
+        "merged": PR_MERGED,
+    }
+    if current is None:
+        return (by_state[observed.state],)
+    changes: list[str] = []
+    if (current.branch, current.head_sha) != (observed.branch, observed.head_sha):
+        changes.append(PR_HEAD_CHANGED)
+    if current.state != observed.state:
+        changes.append(by_state[observed.state])
+    return tuple(changes)
+
+
+async def _project_pull(
+    uow: UnitOfWork, repository: str, observed: ObservedPull, as_of: str
+) -> None:
     current = await uow.pull_request(repository, observed.number)
-    if current is not None and current.updated_at > observed.updated_at:
+    if current is not None and (
+        current.updated_at > observed.updated_at
+        or (current.state == "merged" and observed.state != "merged")
+    ):
         return
-    kind: str | None = None
-    if observed.state == "open" and current is None:
-        kind = PR_OPENED
-    elif observed.state == "merged" and (current is None or current.state != "merged"):
-        kind = PR_MERGED
-    if kind is None:
-        return
+    changes = _changes(current, observed)
+    previous_version = current.version if current is not None else 0
     projected = PullRequest(
         repository,
         observed.number,
@@ -97,7 +120,14 @@ async def _project_pull(uow: UnitOfWork, repository: str, observed: ObservedPull
         observed.head_sha,
         observed.state,
         observed.updated_at,
+        as_of,
+        True,
+        previous_version + len(changes),
     )
+    if not changes:
+        if current != projected:
+            await uow.save_pull_request(projected)
+        return
     lane_id = await infer_lane(uow, branch=projected.branch)
     fields = {
         "repository": repository,
@@ -107,7 +137,7 @@ async def _project_pull(uow: UnitOfWork, repository: str, observed: ObservedPull
         "state": projected.state,
         "updated_at": projected.updated_at,
     }
-    uid = f"{repository}#{projected.number}@{projected.updated_at}/{projected.head_sha}"
-    result = await uow.append(NewEvent("github", kind, uid, fields, observed.body, lane_id))
-    if result.created:
-        await uow.save_pull_request(projected)
+    for version, kind in enumerate(changes, start=previous_version + 1):
+        uid = f"{repository}#{projected.number}@{version}:{projected.updated_at}"
+        await uow.append(NewEvent("github", kind, uid, fields, observed.body, lane_id))
+    await uow.save_pull_request(projected)

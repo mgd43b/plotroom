@@ -181,7 +181,9 @@ class SqliteStore:
 
     async def read_github_board(self, role: str, repository: str) -> tuple[Board, GitHubSummary]:
         async with self._engine.connect() as connection:
-            return await self._board(connection, role), await github_sql.summary(
+            cursor, items, counts, lanes = await self._board(connection, role)
+            projected = await github_sql.project_lane_heads(connection, repository, lanes)
+            return (cursor, items, counts, projected), await github_sql.summary(
                 connection, repository
             )
 

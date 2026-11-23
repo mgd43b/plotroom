@@ -8,7 +8,7 @@ from functools import partial
 from plotroom.core.actions import ACTION_FIELDS, FAILED_ACTION
 from plotroom.core.commands import Command, CommandRegistry
 from plotroom.core.events import EventKind, EventRegistry, FieldSpec
-from plotroom.core.github import PR_FIELDS, PR_MERGED, PR_OPENED
+from plotroom.core.github import PR_FIELDS, PR_KINDS
 from plotroom.core.intake import (
     CLAUDE_APPENDERS,
     INBOUND_MESSAGE,
@@ -47,7 +47,9 @@ class Catalog:
         return self.events.writer_rules
 
 
-def build_catalog(workers: frozenset[str] = frozenset()) -> Catalog:
+def build_catalog(
+    workers: frozenset[str] = frozenset(), *, github_repository: str | None = None
+) -> Catalog:
     """Every kind and command the server knows."""
     events = EventRegistry()
     catalog = Catalog(events, CommandRegistry(events))
@@ -67,7 +69,7 @@ def build_catalog(workers: frozenset[str] = frozenset()) -> Catalog:
     )
     catalog.register_item(ItemKind(FAILED_ACTION, 10, False, ("Inspect the failed action",)))
     events.register(EventKind("core.tick", (), frozenset({"system"})))
-    for kind in (PR_OPENED, PR_MERGED):
+    for kind in PR_KINDS:
         events.register(EventKind(kind, PR_FIELDS, frozenset({"system"})))
     events.register(
         EventKind("switchboard.message", (FieldSpec("sender", "str"),), frozenset({"system"}))
@@ -105,7 +107,9 @@ def build_catalog(workers: frozenset[str] = frozenset()) -> Catalog:
     )
     catalog.commands.register(
         Command(
-            "lane_ready", (lane, FieldSpec("pr", "int"), FieldSpec("head_sha", "str")), ready_lane
+            "lane_ready",
+            (lane, FieldSpec("pr", "int"), FieldSpec("head_sha", "str")),
+            partial(ready_lane, repository=github_repository),
         ),
         rules=owner,
     )
