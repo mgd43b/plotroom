@@ -39,9 +39,10 @@ Given an unlocked file that records a live PID, when `lock_owner` runs, then it 
 - Native Codex review against `origin/main` completed with zero actionable findings. It traced PID validation, published listener trust, and timeout reporting. Sixteen focused tests passed in its sandbox. The repository runs covered the socket-based tests outside the sandbox.
 - BMad quick review identified two retained risks. Readiness can briefly take the kernel lock when both stale files name the same live PID. Retained the existing kernel check under the coordinator's scope decision so a live PID alone cannot establish listener trust.
 - BMad quick review also identified a pre-existing gap between daemon lock acquisition and PID publication. The old and new ownership checks can both see a held lock and the previous PID during that gap. The coordinator assigned daemon identity follow-up separately from #130.
+- Kodus identified that a plain read of a named pipe can block the proxy past its startup timeout. The probe now opens read-only and nonblocking, checks the type of the opened file, and rejects records longer than 64 bytes. Added regressions for a named pipe with no writer and an oversized record containing a live PID.
 
 ## Verification
 
 - `uv run --locked --python 3.14 python -m pytest tests/test_lock.py tests/test_daemon_start.py`
 - On Python 3.14 and 3.15, run locked dependency installation, `ruff check src tests`, `ruff format --check src tests`, `pyright --pythonversion` for the matching version, `python tests/depcheck.py`, and `python -m pytest`.
-- The focused run passed 77 tests. Both repository runs passed all 416 tests and every static check.
+- Before the Kodus follow-up, the focused run passed 77 tests and both repository runs passed all 416 tests. After the follow-up, all 79 focused tests and the static checks on both Python versions passed.

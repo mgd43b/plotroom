@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -34,6 +35,7 @@ log = logging.getLogger("plotroom.daemon_start")
 LOG_FILE_NAME = "plotroom-serve.log"
 _POLL_SECONDS = 0.05
 _PROBE_TIMEOUT = 2.0
+_MAX_PID_RECORD_BYTES = 64
 
 # What a daemon started for a client inherits: enough to run, nothing of the client's own
 # environment (its tokens, its session variables). The PLOTROOM_* names are the config loader's
@@ -182,7 +184,17 @@ def logged_reason(log_path: Path, since: int) -> str | None:
 def lock_owner(data_dir: Path) -> int | None:
     """Read the recorded PID if it is live, even when the file is stale."""
     try:
-        pid = int((data_dir / LOCK_FILE_NAME).read_text(encoding="utf-8"))
+        with open(
+            data_dir / LOCK_FILE_NAME,
+            "rb",
+            opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK),
+        ) as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            record = handle.read(_MAX_PID_RECORD_BYTES + 1)
+        if len(record) > _MAX_PID_RECORD_BYTES:
+            return None
+        pid = int(record.decode("utf-8"))
     except OSError, ValueError:
         return None
     return pid if pid > 0 and _pid_alive(pid) else None

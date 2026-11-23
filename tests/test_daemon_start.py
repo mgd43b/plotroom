@@ -563,6 +563,23 @@ def test_lock_owner_does_not_create_a_missing_lock_file(tmp_path: Path) -> None:
     assert not data_dir.exists()
 
 
+def test_lock_owner_does_not_wait_for_a_fifo_writer(tmp_path: Path) -> None:
+    os.mkfifo(tmp_path / LOCK_FILE_NAME)
+    program = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from plotroom.app.daemon_start import lock_owner\n"
+        "assert lock_owner(Path(sys.argv[1])) is None\n"
+    )
+    subprocess.run([sys.executable, "-c", program, str(tmp_path)], check=True, timeout=WAIT)
+
+
+def test_lock_owner_ignores_an_oversized_record_with_a_live_pid(tmp_path: Path) -> None:
+    lock_file = tmp_path / LOCK_FILE_NAME
+    lock_file.write_text(f"{os.getpid()}" + " " * 64, encoding="utf-8")
+    assert lock_owner(tmp_path) is None
+
+
 @pytest.mark.parametrize("contents", [b"", b"not a PID", b"\xff", b"0", b"-1", b"1000000000000"])
 def test_lock_owner_ignores_invalid_pids(tmp_path: Path, contents: bytes) -> None:
     (tmp_path / LOCK_FILE_NAME).write_bytes(contents)
