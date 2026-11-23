@@ -58,7 +58,8 @@ def daemon_env(env: Mapping[str, str]) -> dict[str, str]:
 
 
 def serve_command(config_path: Path | None) -> list[str]:
-    command = [sys.executable, "-m", "plotroom", "serve"]
+    # -P: the daemon runs in the data directory, which must not shadow the installed package
+    command = [sys.executable, "-P", "-m", "plotroom", "serve"]
     if config_path is not None:
         command += ["--config", str(config_path.expanduser().resolve())]
     return command
@@ -82,26 +83,50 @@ def start_daemon(
         )
 
 
-async def speaks_mcp(url: str) -> bool:
+PROBE_ID = "probe"
+
+
+def answers_ping(body: str) -> bool:
+    """Whether ``body`` (JSON, or an event stream) holds the result for the probe's ping."""
+    candidates = [line[5:].strip() for line in body.splitlines() if line.startswith("data:")]
+    for text in candidates or [body]:
+        try:
+            decoded: Any = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(decoded, dict):
+            reply = cast("dict[str, Any]", decoded)
+            if reply.get("jsonrpc") == "2.0" and reply.get("id") == PROBE_ID and "result" in reply:
+                return True
+    return False
+
+
+async def speaks_mcp(url: str, *, within: float = _PROBE_TIMEOUT) -> bool:
     """Whether something at ``url`` answers a JSON-RPC ``ping``: an MCP server, not any program.
 
-    A bare TCP connect would take any program on the port for the daemon.
+    A bare TCP connect would take any program on the port for the daemon. ``within`` bounds the
+    whole probe, not each read.
     """
-    ping = {"jsonrpc": "2.0", "id": "probe", "method": "ping"}
-    headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
-    try:
-        async with (
-            httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as http,
-            http.stream("POST", url, json=ping, headers=headers) as response,
-        ):
-            first = b""
-            async for chunk in response.aiter_bytes():
-                first += chunk
-                if b"jsonrpc" in first or len(first) > 4096:
-                    break
-    except httpx.HTTPError, OSError:
+    if within <= 0:
         return False
-    return b"jsonrpc" in first
+    ping = {"jsonrpc": "2.0", "id": PROBE_ID, "method": "ping"}
+    headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+    body = b""
+    try:
+        async with asyncio.timeout(min(within, _PROBE_TIMEOUT)):
+            async with (
+                httpx.AsyncClient() as http,
+                http.stream("POST", url, json=ping, headers=headers) as response,
+            ):
+                if not response.is_success:
+                    return False
+                async for chunk in response.aiter_bytes():
+                    body += chunk
+                    if answers_ping(body.decode("utf-8", errors="replace")) or len(body) > 8192:
+                        break
+    except httpx.HTTPError, OSError, TimeoutError:
+        return False
+    return answers_ping(body.decode("utf-8", errors="replace"))
 
 
 def logged_reason(log_path: Path, since: int) -> str | None:
@@ -180,7 +205,6 @@ async def ensure_daemon(
     argv = list(command) if command is not None else serve_command(config_path)
     deadline = time.monotonic() + wait
     reason: str | None = None
-    locked_out = False
     while True:
         offset = log_path.stat().st_size if log_path.exists() else 0
         try:
@@ -192,36 +216,32 @@ async def ensure_daemon(
         log.info(
             "started plotroom serve", extra={"pid": child.pid, "data_dir": str(config.data_dir)}
         )
+        exited = False
         # Wait on this child. When it loses the lock it waits for the winner to listen, and starts
         # again only if that winner went away (a daemon still shutting down keeps the lock a while).
-        while time.monotonic() < deadline:
-            if await speaks_mcp(config.url):
+        while (remaining := deadline - time.monotonic()) > 0:
+            if await speaks_mcp(config.url, within=remaining):
                 return
             code = child.poll()
             if code is not None:
-                reason = logged_reason(log_path, offset)
-                if code != EXIT_LOCKED:
-                    raise UpstreamStartError(
-                        f"plotroom serve could not start: {reason or f'exited with code {code}'}"
-                    )
-                locked_out = True
+                if not exited:  # read the log once per child, off the event loop
+                    exited = True
+                    reason = await asyncio.to_thread(logged_reason, log_path, offset)
+                    if code != EXIT_LOCKED:
+                        why = reason or f"exited with code {code}"
+                        raise UpstreamStartError(f"plotroom serve could not start: {why}")
                 if not await asyncio.to_thread(holds_lock, config.data_dir):
                     break  # the owner is gone: try again
             await asyncio.sleep(_POLL_SECONDS)
         else:
             break
     owner = await asyncio.to_thread(lock_owner, config.data_dir)
-    if owner is not None and owner != child.pid and not (locked_out and reason):
+    if owner is not None and owner != child.pid:
         raise UpstreamStartError(
             f"another plotroom serve owns {config.data_dir} (pid {owner}), and nothing answers at "
             f"{config.url}; that server uses another address than this config's"
         )
-    if locked_out and reason:
-        raise UpstreamStartError(
-            f"{reason}, and nothing answers at {config.url}; "
-            "that server uses another address than this config's"
-        )
     raise UpstreamStartError(
         f"plotroom serve did not start listening at {config.url} within {wait:g}s"
-        + (f" ({reason})" if reason else "")
+        + (f" (earlier: {reason})" if reason else "")
     )

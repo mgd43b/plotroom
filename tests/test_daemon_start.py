@@ -23,9 +23,12 @@ from plotroom.app.cli import main
 from plotroom.app.config import load_config
 from plotroom.app.daemon_start import (
     LOG_FILE_NAME,
+    answers_ping,
     daemon_env,
     ensure_daemon,
     logged_reason,
+    serve_command,
+    speaks_mcp,
     start_daemon,
 )
 from plotroom.app.lock import LOCK_FILE_NAME, DataDirLock, LockError
@@ -149,6 +152,10 @@ def test_the_daemon_environment_keeps_the_runtime_and_config_names_and_nothing_e
     assert "client-secret" not in "".join(clean.values())
 
 
+def test_the_daemon_command_keeps_the_working_directory_off_the_module_path() -> None:
+    assert serve_command(None)[:3] == [sys.executable, "-P", "-m"]
+
+
 def test_a_started_daemon_runs_detached_with_only_the_clean_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -197,6 +204,70 @@ def test_the_last_logged_error_after_an_offset_is_the_reason(tmp_path: Path) -> 
     assert logged_reason(tmp_path / "missing.log", 0) is None
 
 
+# --- the readiness probe ------------------------------------------------------------------
+
+PING_RESULT = '{"jsonrpc":"2.0","id":"probe","result":{}}'
+
+
+def test_only_the_result_for_the_probes_own_ping_counts_as_an_answer() -> None:
+    assert answers_ping(PING_RESULT)
+    assert answers_ping(f"event: message\ndata: {PING_RESULT}\n\n")
+    assert not answers_ping('{"jsonrpc":"2.0","id":"probe","error":{"code":-32601,"message":"x"}}')
+    assert not answers_ping('{"jsonrpc":"2.0","id":"other","result":{}}')
+    assert not answers_ping("<html>jsonrpc</html>")
+    assert not answers_ping("")
+
+
+async def answer_with(raw: bytes, *, then_stall: bool = False) -> tuple[asyncio.Server, str]:
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(raw)
+        await writer.drain()
+        if then_stall:
+            await asyncio.sleep(WAIT)  # trickles nothing more, until the test ends
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    return server, f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/mcp"
+
+
+def http_reply(status: str, body: str, content_type: str = "application/json") -> bytes:
+    payload = body.encode()
+    head = f"HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {len(payload)}"
+    return f"{head}\r\nconnection: close\r\n\r\n".encode() + payload
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        (http_reply("200 OK", PING_RESULT), True),
+        (http_reply("200 OK", f"data: {PING_RESULT}\n\n", "text/event-stream"), True),
+        (http_reply("500 Internal Server Error", PING_RESULT), False),
+        (http_reply("200 OK", '{"jsonrpc":"2.0","id":"x","result":{}}'), False),
+        (http_reply("200 OK", "<html>hello</html>", "text/html"), False),
+    ],
+)
+async def test_the_probe_accepts_only_a_successful_ping_answer(
+    reply: bytes, expected: bool
+) -> None:
+    server, url = await answer_with(reply)
+    try:
+        assert await speaks_mcp(url) is expected
+    finally:
+        server.close()
+
+
+async def test_the_probe_is_bounded_in_total_not_per_read() -> None:
+    partial = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n: keepalive\n"
+    server, url = await answer_with(partial, then_stall=True)
+    try:
+        started = time.monotonic()
+        assert await speaks_mcp(url, within=0.3) is False
+        assert time.monotonic() - started < 5
+    finally:
+        server.close()
+
+
 # --- starting on demand --------------------------------------------------------------------
 
 
@@ -211,6 +282,16 @@ async def test_a_client_gets_snapshot_with_the_daemon_started_on_demand(
     assert tool_json(result) == {"ok": True, "data": EMPTY_BOARD_DATA}
     assert is_locked(data_dir), "the daemon outlives the proxy that started it"
     assert len(serving_lines(data_dir)) == 1
+
+
+async def test_a_package_in_the_data_directory_cannot_shadow_plotroom(
+    tmp_path: Path, data_dir: Path
+) -> None:
+    (data_dir / "plotroom").mkdir(parents=True)
+    (data_dir / "plotroom" / "__init__.py").write_text("raise SystemExit(99)\n", encoding="utf-8")
+    config = write_fixed_config(tmp_path, free_port())
+    async with Client(proxy_params(config), mode="auto") as client:
+        assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
 
 
 @pytest.mark.parametrize("mode", MODES)

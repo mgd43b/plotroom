@@ -81,10 +81,13 @@ async def test_closing_stdin_ends_the_proxy_even_with_a_listen_stream_open(
         "notifications": {"toolsListChanged": True},
         "_meta": listen["params"]["_meta"],
     }
-    proxy.send(listen)
-    async with asyncio.timeout(POLL_TIMEOUT):
-        while not any("subscriptionId" in str(m) for m in proxy.messages):
-            proxy.changed.clear()
-            await proxy.changed.wait()
-    await proxy.close()  # waits for the process to exit, which a held-open stream would prevent
+    try:
+        proxy.send(listen)
+        async with asyncio.timeout(POLL_TIMEOUT):
+            while not any("subscriptionId" in str(m) for m in proxy.messages):
+                proxy.changed.clear()
+                await proxy.changed.wait()
+    finally:
+        # waits for the process to exit, which a held-open stream would prevent, and kills it if not
+        await proxy.close()
     assert proxy.process.returncode == 0
