@@ -264,12 +264,14 @@ def build_app(
         kinds: list[str] | None = None,
         limit: int = DEFAULT_SEARCH_LIMIT,
     ) -> dict[str, Any]:
-        """Find a word or phrase in the current project's committed Switchboard messages."""
+        """Find a word or phrase in the current project's visible committed records."""
         try:
             caller = board_access(ctx)
             if caller.ledger is None:
                 raise LedgerError("unavailable", "the project ledger is unavailable")
-            page = await caller.ledger.search(text, None if kinds is None else tuple(kinds), limit)
+            page = await caller.ledger.search(
+                text, None if kinds is None else tuple(kinds), limit, role=caller.identity.role
+            )
             return ok(render_search(page, search_budget))
         except LedgerError as exc:
             return err(exc.code, exc.message)

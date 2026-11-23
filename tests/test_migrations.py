@@ -206,6 +206,61 @@ async def test_search_upgrade_preserves_existing_messages(tmp_path: Path) -> Non
         await store.close()
 
 
+async def test_search_records_migration_preserves_populated_fts(tmp_path: Path) -> None:
+    prior = alembic_config(_migrations_at(tmp_path / "before-search-records", "0021"))
+    store = SqliteStore("demo", tmp_path)
+    ledger = Ledger(store, build_catalog(), FixedClock())
+    try:
+        await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
+        ledger.start()
+        original = (
+            await ledger.append(
+                "system",
+                NewEvent(
+                    "switchboard",
+                    "switchboard.message",
+                    "old",
+                    {"sender": "fixture"},
+                    "legacy\x00needle",
+                ),
+            )
+        ).event
+        await ledger.stop()
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.execute(
+                "INSERT INTO message_fts (rowid, body) VALUES (?, ?)",
+                (original.seq, "legacy needle"),
+            )
+            db.execute(
+                "INSERT INTO embedding_cursors (model, dimension, index_seq) VALUES (?, ?, ?)",
+                ("fixture", 1, original.seq),
+            )
+            db.execute(
+                "INSERT INTO message_vectors (model, dimension, record_id, vector) "
+                "VALUES (?, ?, ?, ?)",
+                ("fixture", 1, original.id, bytes(4)),
+            )
+        await store.migrate()
+        assert await store.revision() == head_revision()
+        assert script_heads() == [head_revision()]
+        page = await store.query("demo", "needle", None, 10)
+        assert page.total == 1
+        assert [(hit.id, hit.kind, hit.excerpt) for hit in page.hits] == [
+            (original.id, original.kind, "legacy needle")
+        ]
+        with closing(sqlite3.connect(store.path)) as db:
+            assert db.execute(
+                "SELECT seq, kind, record_id, body FROM search_records"
+            ).fetchall() == [(original.seq, original.kind, original.id, original.body)]
+            assert db.execute("SELECT index_seq FROM embedding_cursors").fetchone() == (
+                original.seq,
+            )
+            assert db.execute("SELECT record_id FROM message_vectors").fetchone() == (original.id,)
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
 async def test_populated_claims_upgrade_reconciles_existing_tree_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

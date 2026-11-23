@@ -43,8 +43,15 @@ from plotroom.core.merge_overlap import PULL_COMPARISON
 from plotroom.core.next_items import Item, ItemKind
 from plotroom.core.pull_overlaps import reconcile_pull_overlaps
 from plotroom.core.roles import role_family
+from plotroom.core.search_sources import (
+    ask_record,
+    comment_record,
+    decision_record,
+    pull_body_record,
+    pull_text_record,
+)
 from plotroom.ports.clock import Clock
-from plotroom.ports.search import EmbeddedMessage, EmbeddingIndex, Search
+from plotroom.ports.search import EmbeddedMessage, EmbeddingIndex, Search, SearchRecord
 from plotroom.ports.store import Transaction
 from plotroom.ports.work_items import WorkItem
 
@@ -232,6 +239,15 @@ class UnitOfWork:
         self, repository: str, resource: str, scope: str, result: GitHubResource
     ) -> None:
         await self._tx.save_github_resource(repository, resource, scope, result)
+        if self._search is not None and result.complete:
+            if resource == COMMENTS:
+                for comment in result.records:
+                    if comment.key == scope and comment.kind == "issue_comment":
+                        await self.index_search_record(comment_record(repository, comment))
+            elif resource == PULL_TEXT:
+                pull = await self._tx.pull_request(repository, int(scope))
+                if pull is not None and (record := pull_text_record(pull, result)) is not None:
+                    await self.index_search_record(record)
         if resource in (MAIN, MAIN_CI):
             self.all_merge_pulls = True
         elif resource == CHECKS:
@@ -240,6 +256,15 @@ class UnitOfWork:
             self.merge_pull_numbers.add(int(scope))
         if resource in {ISSUES, COMMENTS, ASK_COMMENT_HISTORY}:
             self._ask_repositories.add(repository)
+
+    async def index_search_record(
+        self, record: SearchRecord, *, only_if_absent: bool = False
+    ) -> None:
+        if self._search is not None:
+            await self._search.index_record(self._tx, record, only_if_absent=only_if_absent)
+
+    async def index_pull_body(self, repository: str, number: int, body: str) -> None:
+        await self.index_search_record(pull_body_record(repository, number, body))
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         return await self._tx.fetch_cursor(repository, resource)
@@ -257,6 +282,7 @@ class UnitOfWork:
 
     async def save_ask(self, ask: Ask) -> None:
         await self._tx.save_ask(ask)
+        await self.index_search_record(ask_record(ask))
         self._ask_repositories.add(ask.repository)
 
     async def unsettled_asks(self, repository: str) -> list[Ask]:
@@ -328,6 +354,7 @@ class UnitOfWork:
 
     async def insert_decision(self, decision: Decision) -> None:
         await self._tx.insert_decision(decision)
+        await self.index_search_record(decision_record(decision))
 
     async def lease_outbox(self, lease_id: str, now: str, expires_at: str) -> OutboxLease | None:
         return await self._tx.lease_outbox(lease_id, now, expires_at)

@@ -1,4 +1,4 @@
-"""A project's searchable message index and its transaction-bound write path."""
+"""A project's searchable records and their transaction-bound write path."""
 
 from __future__ import annotations
 
@@ -12,6 +12,17 @@ DEFAULT_SEARCH_LIMIT = 20
 MAX_SEARCH_LIMIT = 100
 MAX_SEARCH_QUERY_LENGTH = 512
 MESSAGE_KIND = "switchboard.message"
+DECISION_KIND = "decision"
+ASK_KIND = "ask"
+ISSUE_COMMENT_KIND = "github.issue_comment"
+PR_BODY_KIND = "github.pr_body"
+
+
+@dataclass(frozen=True)
+class SearchRecord:
+    kind: str
+    id: str
+    body: str
 
 
 @dataclass(frozen=True)
@@ -33,6 +44,12 @@ class Search(Protocol):
 
     async def index(self, tx: Transaction, event: Event) -> None:
         """Project a new event using the same writer transaction that stored it."""
+        ...
+
+    async def index_record(
+        self, tx: Transaction, record: SearchRecord, *, only_if_absent: bool = False
+    ) -> None:
+        """Store the current source text, preserving a present record during backfill."""
         ...
 
     async def query(

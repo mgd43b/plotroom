@@ -44,7 +44,7 @@ from plotroom.adapters.store_sqlite.ledger_sql import (
     event_from_row,
 )
 from plotroom.adapters.store_sqlite.migrate import upgrade_to_head
-from plotroom.adapters.store_sqlite.search_sql import search_messages
+from plotroom.adapters.store_sqlite.search_sql import search_records
 from plotroom.adapters.store_sqlite.work_items_sql import ready_work_items
 from plotroom.core.actions import Action, QueuedAction
 from plotroom.core.ask_checks import Ask
@@ -55,13 +55,14 @@ from plotroom.core.github_projection import GitHubResource
 from plotroom.core.merge_gate import GateSnapshot, load_gate_snapshot
 from plotroom.core.next_items import Item
 from plotroom.core.search import pack_vector
+from plotroom.core.search_sources import EVENT_KINDS
 from plotroom.ports.search import (
     MAX_SEARCH_LIMIT,
-    MESSAGE_KIND,
     EmbeddedMessage,
     EmbeddingError,
     EmbeddingModel,
     SearchPage,
+    SearchRecord,
 )
 from plotroom.ports.store import Board, Transaction
 from plotroom.ports.work_items import WorkItem
@@ -258,20 +259,27 @@ class SqliteStore:
             return [event_from_row(row) for row in result]
 
     async def index(self, tx: Transaction, event: Event) -> None:
-        if event.kind == MESSAGE_KIND:
+        if event.kind in EVENT_KINDS:
             if not isinstance(tx, SqliteTransaction):
                 raise TypeError("the SQLite index requires a SQLite writer transaction")
-            await tx.index_message(self._engine, event)
+            await tx.index_event(self._engine, event)
+
+    async def index_record(
+        self, tx: Transaction, record: SearchRecord, *, only_if_absent: bool = False
+    ) -> None:
+        if not isinstance(tx, SqliteTransaction):
+            raise TypeError("the SQLite index requires a SQLite writer transaction")
+        await tx.index_record(self._engine, record, only_if_absent=only_if_absent)
 
     async def query(
         self, project: str, text: str, kinds: tuple[str, ...] | None, limit: int
     ) -> SearchPage:
         if project != self._project_id:
             raise LedgerError("forbidden", "search is restricted to the current project")
-        if kinds is not None and MESSAGE_KIND not in kinds:
+        if kinds == ():
             return SearchPage((), 0)
         async with self._engine.connect() as connection:
-            return await search_messages(connection, text, limit)
+            return await search_records(connection, text, kinds, limit)
 
     def embedding_index(self, model: EmbeddingModel) -> SqliteEmbeddingIndex:
         return SqliteEmbeddingIndex(self._engine, self._project_id, model)

@@ -570,6 +570,29 @@ async def test_every_registered_tool(endpoint: SearchEndpoint, transport: str, e
         assert decision["exact_words"] == "  Café\r\n"
         assert decision["decision_id"] == decision_id
         assert (await call("asks"))["asks"][0]["settled_by"] == decision_id
+        for phrase, kind, record_id in [
+            ("Café", "decision", decision_id),
+            ("Choose", "ask", ask_id),
+        ]:
+            page = await call("search", text=phrase, kinds=[kind], limit=1)
+            assert page["omitted"] == 0
+            [hit] = page["hits"]
+            assert (hit["kind"], hit["id"]) == (kind, record_id)
+        async with connection(replace(endpoint, token=endpoint.worker), transport, era) as worker:
+            for phrase, kind in [("Café", "decision"), ("Choose", "ask")]:
+                reply = await worker(
+                    message(
+                        era,
+                        next(request_ids),
+                        "tools/call",
+                        name="search",
+                        arguments={"text": phrase, "kinds": [kind]},
+                    )
+                )
+                assert json.loads(reply["result"]["content"][0]["text"])["data"] == {
+                    "hits": [],
+                    "omitted": 0,
+                }
         fired = await call(
             "trigger",
             predicate={"pr_merged": {"number": 2}},

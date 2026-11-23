@@ -150,6 +150,7 @@ async def _project_pull(
         or (current.state == "merged" and observed.state != "merged")
     ):
         return
+    await uow.index_pull_body(repository, observed.number, observed.body)
     changes = _changes(current, observed)
     previous_version = current.version if current is not None else 0
     projected = PullRequest(

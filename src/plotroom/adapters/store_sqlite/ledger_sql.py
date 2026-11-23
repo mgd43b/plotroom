@@ -33,7 +33,8 @@ from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
 from plotroom.core.github_projection import GitHubResource
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
-from plotroom.ports.search import EmbeddedMessage, EmbeddingModel
+from plotroom.core.search_sources import event_record
+from plotroom.ports.search import EmbeddedMessage, EmbeddingModel, SearchRecord
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
@@ -46,6 +47,7 @@ FIND_EVENT = text(
     "SELECT seq, id, source, kind, upstream_id, lane_id, fields, body, observed_at "
     "FROM events WHERE source = :source AND kind = :kind AND upstream_id = :uid"
 )
+FIND_INDEX_EVENT = text("SELECT * FROM events WHERE seq = :seq AND id = :id AND kind = :kind")
 LATEST_EVENT = text("""
     SELECT events.* FROM events
     WHERE kind = :kind AND seq > :after
@@ -220,11 +222,28 @@ class SqliteTransaction:
             },
         )
 
-    async def index_message(self, engine: AsyncEngine, event: Event) -> None:
+    async def index_event(self, engine: AsyncEngine, event: Event) -> None:
         connection = self._live()
         if connection.engine is not engine:
             raise RuntimeError("cannot index an event through another project's transaction")
-        await search_sql.insert_message(connection, event)
+        row = (
+            await connection.execute(
+                FIND_INDEX_EVENT, {"seq": event.seq, "id": event.id, "kind": event.kind}
+            )
+        ).first()
+        if row is None:
+            raise RuntimeError("cannot index an event without its matching local event")
+        await search_sql.index_record(
+            connection, event_record(event_from_row(row)), only_if_absent=True
+        )
+
+    async def index_record(
+        self, engine: AsyncEngine, record: SearchRecord, *, only_if_absent: bool
+    ) -> None:
+        connection = self._live()
+        if connection.engine is not engine:
+            raise RuntimeError("cannot index a record through another project's transaction")
+        await search_sql.index_record(connection, record, only_if_absent=only_if_absent)
 
     async def commit_embedding_batch(
         self,

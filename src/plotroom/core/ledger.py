@@ -31,6 +31,7 @@ from plotroom.core.merge_controller import ACTIVE_MERGE_ITEMS, reconcile_merge_c
 from plotroom.core.merge_gate import GatePolicy, GateSnapshot, GateVerdict, evaluate_gate
 from plotroom.core.next_items import Item
 from plotroom.core.roles import OwnershipView, role_family
+from plotroom.core.search_sources import PRIVATE_KINDS, SEARCH_KINDS
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.watchers import Watchers
 from plotroom.core.writer import ProjectWriter
@@ -132,7 +133,12 @@ class Ledger:
     def project_id(self) -> str:
         return self._store.project_id
 
-    async def search(self, text: str, kinds: tuple[str, ...] | None, limit: int) -> SearchPage:
+    async def search(
+        self, text: str, kinds: tuple[str, ...] | None, limit: int, *, role: str = "system"
+    ) -> SearchPage:
+        visible = SEARCH_KINDS
+        if _check_role(role) != "orchestrator":
+            visible -= PRIVATE_KINDS
         if self._search is None:
             raise LedgerError("unavailable", "the project search index is unavailable")
         if not text.strip() or len(text) > MAX_SEARCH_QUERY_LENGTH or "\x00" in text:
@@ -141,7 +147,11 @@ class Ledger:
             )
         if not 1 <= limit <= MAX_SEARCH_LIMIT:
             raise LedgerError("invalid", f"search limit must be between 1 and {MAX_SEARCH_LIMIT}")
-        return await self._search.query(self.project_id, text.strip(), kinds, limit)
+        if kinds is not None:
+            visible = visible.intersection(kinds)
+        return await self._search.query(
+            self.project_id, text.strip(), tuple(sorted(visible)), limit
+        )
 
     def start(self) -> None:
         self._stopping.clear()
