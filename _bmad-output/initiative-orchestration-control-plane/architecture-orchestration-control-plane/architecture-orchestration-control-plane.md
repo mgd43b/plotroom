@@ -210,6 +210,7 @@ plotroom/
     adapters/
       mcp/        # tool surface, HTTP, stdio proxy
       store_sqlite/
+        migrations/   # Alembic, one linear history, shipped in the wheel
       search_sqlite/
       github/     # poller and write adapter
       switchboard/
@@ -219,7 +220,7 @@ plotroom/
       usage/
       session_reader/
     app/          # config, CLI, project registry, action runner, bridge, wiring
-  migrations/     # Alembic, one linear history
+  alembic.ini     # points at the package's migrations
   deploy/         # Dockerfile, compose.yaml
   tests/
 ```
