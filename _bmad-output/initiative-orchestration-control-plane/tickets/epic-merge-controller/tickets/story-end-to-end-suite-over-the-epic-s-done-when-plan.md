@@ -1,9 +1,9 @@
 ---
-title: 'End to end suite over the epic s done when'
+title: "End-to-end suite over the epic's Done when"
 type: feature
 ticket: '10'
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: 'b9bb69382b42edec2a4112113e278dade63a3dd8'
 route: full
 route_source: auto
@@ -59,3 +59,4 @@ The shell comparison invokes the original clerk gate under `ORCH_DRY=1`. The com
 
 - `uv run python -m pytest -q tests/test_merge_controller_e2e.py tests/test_merge_freeze.py` — all four Epic 4 acceptance checks and three freeze regressions passed on Python 3.14.
 - `uv run python -m pytest -q tests` — acceptance and regression suite passes
+- Built: https://github.com/mgd43b/plotroom/pull/155

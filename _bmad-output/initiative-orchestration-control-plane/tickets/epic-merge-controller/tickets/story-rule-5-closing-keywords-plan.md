@@ -1,9 +1,9 @@
 ---
-title: 'Rule 5 closing keywords'
+title: "Rule 5: closing keywords"
 type: feature
 ticket: '4'
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: 'b9bb69382b42edec2a4112113e278dade63a3dd8'
 route: full
 route_source: auto
@@ -55,3 +55,4 @@ Preserve guard order, the deploy freeze, exact head and main evidence, and durab
 ## Verification
 
 - `uv run python -m pytest -q tests` — acceptance and regression suite passes
+- Built: https://github.com/mgd43b/plotroom/pull/155
