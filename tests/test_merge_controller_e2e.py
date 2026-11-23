@@ -3,6 +3,7 @@
 import asyncio
 import json
 import shlex
+import shutil
 import subprocess
 import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -436,6 +437,9 @@ def shell_reads(repository: Repository, pull: Pull) -> list[tuple[list[str], str
     def read(args: list[str], response: str = "", exit_code: int = 0) -> None:
         actions.append((args, response, exit_code))
 
+    def api_read(path: str, payload: Row) -> None:
+        read(["gh", "api", path], json.dumps(payload))
+
     number = str(pull.number)
     read(["git", "remote", "get-url", "origin"], f"./{REPO}.git\n")
     read(["git", "fetch", "-q", "origin"])
@@ -459,11 +463,70 @@ def shell_reads(repository: Repository, pull: Pull) -> list[tuple[list[str], str
         ],
         "" if pull.unreadable == "checks" else "\n".join(checks) + "\n",
     )
-    query = (
-        'query{repository(owner:"fixture",name:"epic4"){pullRequest(number:'
-        + number
-        + "){reviewThreads(first:100){totalCount nodes{isResolved}}}}}"
+    # Supply the bootstrap gate's additional proof so parity measures the shared rules.
+    run_id = pull.number
+    api_read(
+        f"repos/{REPO}/actions/workflows/{WORKFLOW}/runs"
+        f"?event=pull_request&head_sha={pull.head}&per_page=100",
+        counted(
+            "workflow_runs",
+            [
+                {
+                    **status(run_id, "ci", "success"),
+                    "head_sha": pull.head,
+                    "event": "pull_request",
+                    "created_at": NOW,
+                    "run_attempt": 1,
+                    "pull_requests": [{"number": pull.number}],
+                }
+            ],
+        ),
     )
+    api_read(
+        f"repos/{REPO}/actions/runs/{run_id}/attempts/1/jobs?per_page=100",
+        counted(
+            "jobs",
+            [
+                {
+                    **status(job_id, f"check (python {version})", "success"),
+                    "head_sha": pull.head,
+                    "run_id": run_id,
+                    "run_attempt": 1,
+                }
+                for job_id, version in enumerate(("3.14", "3.15"), start=1)
+            ],
+        ),
+    )
+    api_read(
+        f"repos/{REPO}/commits/{pull.head}/check-runs"
+        "?check_name=Kody%20Code%20Review&filter=latest&per_page=100",
+        counted(
+            "check_runs",
+            [
+                {
+                    **status(1, "Kody Code Review", "success"),
+                    "head_sha": pull.head,
+                    "app": {"id": 5822892, "slug": "kodus-mgd43b"},
+                    "pull_requests": [{"number": pull.number}],
+                    "output": {
+                        "summary": "Review finished successfully. Suggestions (if any) "
+                        "were posted as PR/file comments."
+                    },
+                }
+            ],
+        ),
+    )
+    query = """query($owner: String!, $repo: String!, $pr: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $pr) {
+        number headRefOid author { login }
+        reviewThreads(first: 100) {
+          totalCount pageInfo { hasNextPage }
+          nodes { isResolved comments(first: 10) { totalCount pageInfo { hasNextPage } nodes { author { __typename login } authorAssociation } } }
+        }
+      }
+    }
+  }"""
     read(
         [
             "gh",
@@ -471,10 +534,32 @@ def shell_reads(repository: Repository, pull: Pull) -> list[tuple[list[str], str
             "graphql",
             "-f",
             f"query={query}",
-            "--jq",
-            'if .data.repository.pullRequest.reviewThreads.totalCount > 100 then "many" else ([.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)]|length) end',
+            "-f",
+            "owner=fixture",
+            "-f",
+            "repo=epic4",
+            "-F",
+            f"pr={number}",
         ],
-        "" if pull.unreadable == "threads" else f"{pull.threads}\n",
+        ""
+        if pull.unreadable == "threads"
+        else json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "number": pull.number,
+                            "headRefOid": pull.head,
+                            "reviewThreads": {
+                                "totalCount": pull.threads,
+                                "pageInfo": {"hasNextPage": False},
+                                "nodes": [{"isResolved": False} for _ in range(pull.threads)],
+                            },
+                        }
+                    }
+                }
+            }
+        ),
     )
     read(
         [
@@ -545,6 +630,10 @@ def shell_gate(
     for utility in ("awk", "comm", "dirname", "grep", "sed", "sort", "tr"):
         (case / utility).unlink(missing_ok=True)
         (case / utility).symlink_to(f"/usr/bin/{utility}")
+    jq = shutil.which("jq")
+    assert jq is not None, "the clerk gate needs jq"
+    (case / "jq").unlink(missing_ok=True)
+    (case / "jq").symlink_to(jq)
     result = subprocess.run(
         ["/bin/bash", str(SHELL_GATE), str(pull.number)],
         env={
