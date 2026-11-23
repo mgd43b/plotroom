@@ -29,6 +29,8 @@ def fixture_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
         *,
         github_repository: str | None = None,
         delivery_routes: Mapping[str, DeliveryRoute] | None = None,
+        image_jobs: tuple[str, ...] = (),
+        lane_idle_minutes: int = 15,
     ) -> Catalog:
         return Fixture().catalog
 

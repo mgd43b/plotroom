@@ -81,6 +81,21 @@ class UnitOfWork:
     async def find_event(self, source: str, kind: str, upstream_id: str) -> Event | None:
         return await self._tx.find_event(source, kind, upstream_id)
 
+    async def latest_event(
+        self,
+        kind: str,
+        *,
+        fields: Mapping[str, str | bool] | None = None,
+        after: int = 0,
+    ) -> Event | None:
+        return await self._tx.latest_event(kind, fields=fields, after=after)
+
+    async def latest_run_report(self, run_id: str) -> Event | None:
+        return await self._tx.latest_run_report(run_id)
+
+    async def lane_activity(self, lane: str) -> Event | None:
+        return await self._tx.lane_activity(lane)
+
     async def find_claude_turn(self, session: str, aliases: tuple[str, ...]) -> Event | None:
         return await self._tx.find_claude_turn(session, aliases)
 

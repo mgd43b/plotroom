@@ -43,7 +43,9 @@ from plotroom.core.merge_flakes import (
 )
 from plotroom.core.next_items import ItemKind, ack, owns_ack
 from plotroom.core.outbox import complete_outbox, lease_outbox
+from plotroom.core.reports import DEPLOY_ARGS, DEPLOY_FIELDS, DEPLOY_STATUS, deploy_report
 from plotroom.core.roles import WriterRule, WriterRules
+from plotroom.core.run_reports import RUN_FIELDS, RUN_ID, RUN_STATE, RUN_STATUS, run_report
 from plotroom.core.trigger_actions import (
     ARCHIVE_ITEM,
     MARK_FIELDS,
@@ -84,10 +86,12 @@ def build_catalog(
     *,
     github_repository: str | None = None,
     delivery_routes: Mapping[str, DeliveryRoute] | None = None,
+    image_jobs: tuple[str, ...] = (),
+    lane_idle_minutes: int = 15,
 ) -> Catalog:
     """Every kind and command the server knows."""
     events = EventRegistry()
-    leaves = build_leaf_registry()
+    leaves = build_leaf_registry(image_jobs=image_jobs, lane_idle_minutes=lane_idle_minutes)
     catalog = Catalog(events, CommandRegistry(events), trigger_leaves=leaves)
     catalog.commands.register(
         Command(
@@ -117,10 +121,20 @@ def build_catalog(
     for kind in PR_KINDS:
         events.register(EventKind(kind, PR_FIELDS, frozenset({"system"})))
     events.register(
-        EventKind("switchboard.message", (FieldSpec("sender", "str"),), frozenset({"system"}))
+        EventKind(
+            "switchboard.message",
+            (FieldSpec("sender", "str"), FieldSpec("worker", "str", required=False)),
+            frozenset({"system"}),
+        )
     )
     events.register(EventKind(TURN_REPORT, TURN_FIELDS, CLAUDE_APPENDERS))
-    events.register(EventKind(SESSION_MESSAGE, (SESSION_FIELD,), CLAUDE_APPENDERS))
+    events.register(
+        EventKind(
+            SESSION_MESSAGE,
+            (SESSION_FIELD, FieldSpec("worker", "str", required=False)),
+            CLAUDE_APPENDERS,
+        )
+    )
     catalog.register_item(
         ItemKind(INBOUND_MESSAGE, 20, False, ("Read and acknowledge the message",))
     )
@@ -138,6 +152,16 @@ def build_catalog(
     )
     catalog.commands.register(Command("unfreeze", (), unfreeze), rules=orchestrator)
     owner = (*orchestrator, WriterRule("worker", owns_lane))
+    events.register(EventKind(DEPLOY_STATUS, DEPLOY_FIELDS, frozenset({"system"})))
+    catalog.commands.register(
+        Command(
+            "deploy_report",
+            (lane, *DEPLOY_ARGS),
+            deploy_report,
+            record_if=lambda result: bool(result["created"]),
+        ),
+        rules=(WriterRule("worker", owns_lane),),
+    )
     catalog.register_item(ItemKind(CLAIM_OVERLAP, 10, True, ("Coordinate the lane claims",)))
     catalog.register_item(ItemKind(PR_CLAIM_OVERLAP, 10, True, ("Coordinate the PR and claim",)))
     catalog.register_item(
@@ -186,6 +210,11 @@ def build_catalog(
     catalog.commands.register(
         Command("lane_archive", (lane,), partial(archive_lane, workers=workers)), rules=orchestrator
     )
+    events.register(EventKind(RUN_STATUS, RUN_FIELDS, frozenset({"system"})))
+    catalog.commands.register(
+        Command("run_report", (lane, RUN_ID, RUN_STATE), run_report),
+        rules=(WriterRule("worker", owns_lane),),
+    )
     catalog.register_item(NOTIFICATION_ITEM)
     catalog.register_item(ARCHIVE_ITEM)
     events.register(EventKind("core.lane_marked", MARK_FIELDS, frozenset({"system"})))
@@ -194,6 +223,7 @@ def build_catalog(
         Command(
             "trigger",
             (
+                FieldSpec("mode", "str", required=False),
                 FieldSpec("predicate", "object"),
                 FieldSpec("action", "object"),
                 FieldSpec("lane", "str", required=False),
