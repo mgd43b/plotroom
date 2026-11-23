@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
@@ -393,6 +393,23 @@ def build_app(
         return await execute_command(ctx, "lane_archive", request_id, {"lane": lane})
 
     @server.tool()
+    async def deploy_report(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        lane: str,
+        environment: str,
+        sha: str,
+        state: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Report a deployment status for the calling worker's lane."""
+        return await execute_command(
+            ctx,
+            "deploy_report",
+            request_id,
+            {"lane": lane, "environment": environment, "sha": sha, "state": state},
+        )
+
+    @server.tool()
     async def claim(  # pyright: ignore[reportUnusedFunction]
         ctx: Context[Any, Request], lane: str, globs: list[str], reason: str, request_id: str
     ) -> dict[str, Any]:
@@ -409,14 +426,24 @@ def build_app(
         return await execute_command(ctx, "release", request_id, {"lane": lane, "globs": globs})
 
     @server.tool()
+    async def run_report(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], lane: str, run_id: str, state: str, request_id: str
+    ) -> dict[str, Any]:
+        """Record an observation of a run owned by the calling worker's lane."""
+        return await execute_command(
+            ctx, "run_report", request_id, {"lane": lane, "run_id": run_id, "state": state}
+        )
+
+    @server.tool()
     async def trigger(  # pyright: ignore[reportUnusedFunction]
         ctx: Context[Any, Request],
         predicate: dict[str, Any],
         action: dict[str, Any],
         request_id: str,
         lane: str | None = None,
+        mode: Literal["once", "every"] = "once",
     ) -> dict[str, Any]:
-        """Register a once trigger. A predicate can be {"pr_merged":{"number":42}} or use
+        """Register a once or every trigger. A predicate can be {"pr_merged":{"number":42}} or use
         branch_glob instead of number. all_of and any_of take arrays of predicates.
         An action object names one of notify_orchestrator (text), send (worker, text),
         mark (lane, state), or propose_archive (lane).
@@ -424,6 +451,8 @@ def build_app(
         args: dict[str, Any] = {"predicate": predicate, "action": action}
         if lane is not None:
             args["lane"] = lane
+        if mode != "once":
+            args["mode"] = mode
         return await execute_command(ctx, "trigger", request_id, args)
 
     @server.tool()

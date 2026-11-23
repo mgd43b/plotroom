@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -27,6 +28,17 @@ class Transaction(Protocol):
     async def find_event(self, source: str, kind: str, upstream_id: str) -> Event | None:
         """The stored event with this identity, or ``None``."""
         ...
+
+    async def latest_event(
+        self,
+        kind: str,
+        *,
+        lane: str | None = None,
+        fields: Mapping[str, str | bool] | None = None,
+        after: int = 0,
+    ) -> Event | None: ...
+
+    async def lane_activity(self, lane: str) -> Event | None: ...
 
     async def insert_event(self, event: Event) -> None:
         """Store a new event whose ``seq`` came from ``allocate_seq`` in this transaction."""

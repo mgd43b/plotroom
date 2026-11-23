@@ -104,7 +104,7 @@ async def test_switchboard_redelivery_after_interrupted_ack(tmp_path: Path) -> N
         assert original.kind == "switchboard.message"
         assert original.upstream_id == "fixture-board:7"
         assert original.lane_id == "fixture-lane"
-        assert original.fields == {"sender": "fixture-peer"}
+        assert original.fields == {"sender": "fixture-peer", "worker": "fixture"}
         assert original.body == "worker message"
         assert not (tmp_path / "acked").exists()
 

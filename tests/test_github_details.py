@@ -154,6 +154,7 @@ class Fixture:
             "/actions/runs/50/attempts/1/jobs": {"jobs": [status(70, "image", "success")]},
             "/actions/runs/50/attempts/2/jobs": {"jobs": [status(71, "image", None)]},
             "/pulls": [pr],
+            "/deployments": [],
             "/pulls/4": pr,
             "/pulls/4/files": [
                 {"filename": "new.py", "status": "renamed", "previous_filename": "old.py"}

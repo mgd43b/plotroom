@@ -100,6 +100,8 @@ class Repository:
             return httpx.Response(200, json={"commit": {"sha": "a" * 40}})
         if path == "/actions/runs":
             return httpx.Response(200, json={"workflow_runs": []})
+        if path == "/deployments":
+            return httpx.Response(200, json=[])
         assert path == "/issues" or path.startswith("/issues/"), path
         return httpx.Response(200, json=[])
 

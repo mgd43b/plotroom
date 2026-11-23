@@ -73,6 +73,8 @@ async def record_claude(
     if report.kind == SESSION_MESSAGE:
         if not report.upstream_id or report.turn_index is not None:
             raise LedgerError("invalid", "a session message needs upstream_id and no turn_index")
+        if role == "worker":
+            fields["worker"] = caller
         uid = json.dumps([report.session_id, report.upstream_id], separators=(",", ":"))
         result = await append_inbound(
             uow, NewEvent("claude", SESSION_MESSAGE, uid, fields, report.body, lane)

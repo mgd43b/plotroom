@@ -10,6 +10,7 @@ import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable, LocalGitHubCredential
 from plotroom.adapters.github.ci import fetch_checks, fetch_main
+from plotroom.adapters.github.deployments import poll_deployments
 from plotroom.adapters.github.issue_details import (
     fetch_comment_backfill,
     fetch_comments,
@@ -38,6 +39,14 @@ from plotroom.core.ledger import Ledger
 from plotroom.ports.clock import Clock
 
 log = logging.getLogger("plotroom.github")
+_READ_ERRORS = (
+    GitHubUnavailable,
+    httpx.RequestError,
+    KeyError,
+    ValueError,
+    TypeError,
+    OverflowError,
+)
 
 
 class GitHubDetailPoller:
@@ -146,16 +155,16 @@ class GitHubDetailPoller:
             watermark = f"{pull.updated_at}:{pull.version}" if complete else ""
             await self._record_pull_attempt(pull.number, watermark)
 
-        if not self.include_issue_tree:
-            return
-        if issues is not None:
-            await self._refresh(
-                ISSUE_TREE,
-                "",
-                lambda previous: fetch_issue_tree(api, client, token, issues, previous),
-            )
-        else:
-            await self._mark_incomplete(ISSUE_TREE, "")
+        if self.include_issue_tree:
+            if issues is not None:
+                await self._refresh(
+                    ISSUE_TREE,
+                    "",
+                    lambda previous: fetch_issue_tree(api, client, token, issues, previous),
+                )
+            else:
+                await self._mark_incomplete(ISSUE_TREE, "")
+        await poll_deployments(self.ledger, api, client, token, format_time(self.clock.now()))
 
     async def _record_pull_attempt(self, number: int, watermark: str) -> None:
         repository = self.api.repository
@@ -184,14 +193,7 @@ class GitHubDetailPoller:
                 comments, watermark = await fetch(self.api, client, token, position, numbers)
             except GitHubRateLimited:
                 raise
-            except (
-                GitHubUnavailable,
-                httpx.RequestError,
-                KeyError,
-                ValueError,
-                TypeError,
-                OverflowError,
-            ):
+            except _READ_ERRORS:
                 log.warning(
                     "GitHub issue comment refresh failed", extra={"project": self.ledger.project_id}
                 )
@@ -240,14 +242,7 @@ class GitHubDetailPoller:
         except GitHubRateLimited:
             await self._mark_incomplete(resource, scope, pulls)
             raise
-        except (
-            GitHubUnavailable,
-            httpx.RequestError,
-            KeyError,
-            ValueError,
-            TypeError,
-            OverflowError,
-        ):
+        except _READ_ERRORS:
             if previous is None or previous.complete:
                 log.warning(
                     "GitHub projection refresh failed",

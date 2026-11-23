@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,29 @@ FIND_EVENT = text(
     "SELECT seq, id, source, kind, upstream_id, lane_id, fields, body, observed_at "
     "FROM events WHERE source = :source AND kind = :kind AND upstream_id = :uid"
 )
+LATEST_EVENT = text("""
+    SELECT events.* FROM events
+    WHERE kind = :kind AND seq > :after AND (:lane IS NULL OR lane_id = :lane)
+      AND NOT EXISTS (
+        SELECT 1 FROM json_each(:fields) AS expected
+        WHERE json_extract(events.fields, '$.' || expected.key) IS NOT expected.value
+      )
+    ORDER BY seq DESC LIMIT 1
+""")
+LANE_ACTIVITY = text("""
+    WITH scoped AS (
+        SELECT * FROM events
+        WHERE lane_id = :lane AND kind NOT IN ('core.trigger_fired', 'core.lane_marked')
+        ORDER BY seq DESC LIMIT 1
+    ), receipts AS (
+        SELECT * FROM events
+        WHERE kind IN ('core.lane_start', 'core.lane_update', 'core.lane_ready',
+                       'core.lane_archive', 'core.claim', 'core.release')
+          AND json_extract(fields, '$.args.lane') = :lane
+        ORDER BY seq DESC LIMIT 1
+    )
+    SELECT * FROM scoped UNION ALL SELECT * FROM receipts ORDER BY seq DESC LIMIT 1
+""")
 INSERT_EVENT = text(
     "INSERT INTO events (seq, id, source, kind, upstream_id, lane_id, fields, body, observed_at) "
     "VALUES (:seq, :id, :source, :kind, :uid, :lane_id, :fields, :body, :observed_at)"
@@ -105,6 +129,25 @@ class SqliteTransaction:
             FIND_EVENT, {"source": source, "kind": kind, "uid": upstream_id}
         )
         row = result.first()
+        return None if row is None else event_from_row(row)
+
+    async def latest_event(
+        self,
+        kind: str,
+        *,
+        lane: str | None = None,
+        fields: Mapping[str, str | bool] | None = None,
+        after: int = 0,
+    ) -> Event | None:
+        result = await self._live().execute(
+            LATEST_EVENT,
+            {"kind": kind, "lane": lane, "after": after, "fields": json.dumps(fields or {})},
+        )
+        row = result.first()
+        return None if row is None else event_from_row(row)
+
+    async def lane_activity(self, lane: str) -> Event | None:
+        row = (await self._live().execute(LANE_ACTIVITY, {"lane": lane})).first()
         return None if row is None else event_from_row(row)
 
     async def insert_event(self, event: Event) -> None:

@@ -42,6 +42,7 @@ _TOP_LEVEL_KEYS = {
     "snapshot_budget",
     "next_budget",
     "tick_seconds",
+    "lane_idle_minutes",
     "action_attempts",
     "wait_cap",
 }
@@ -100,6 +101,7 @@ class Config:
     snapshot_budget: int = DEFAULT_SNAPSHOT_BUDGET
     next_budget: int = DEFAULT_SNAPSHOT_BUDGET
     tick_seconds: int = 60
+    lane_idle_minutes: int = 15
     action_attempts: int = 3
     wait_cap: int = 240
     watchers: Mapping[str, tuple[str, ...]] = field(default_factory=lambda: {})
@@ -216,6 +218,9 @@ def load_config(
             "next_budget", raw.get("next_budget", DEFAULT_SNAPSHOT_BUDGET), minimum=MIN_BOARD_BUDGET
         ),
         tick_seconds=_integer("tick_seconds", raw.get("tick_seconds", 60), minimum=1),
+        lane_idle_minutes=_integer(
+            "lane_idle_minutes", raw.get("lane_idle_minutes", 15), minimum=1
+        ),
         action_attempts=_integer("action_attempts", raw.get("action_attempts", 3), minimum=1),
     )
 
