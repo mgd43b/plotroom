@@ -38,7 +38,7 @@ Given the two Epic 6 Done-when lines, when the real local daemon receives their 
 
 ## Implementation Notes
 
-The local daemon fixture reads a materialized ticket tree and observes pull facts through the existing HTTP mock. Both Done-when tests passed over HTTP and stdio. The integrated project suite covered 820 tests before review follow-up.
+The local daemon fixture reads a materialized ticket tree and observes pull facts through the existing HTTP mock. Both Done-when tests passed over HTTP and stdio. The full integrated suite passed 829 tests before opening Kodus follow-up. The final-head fixture runs cover both touched epics and the populated migration chain.
 
 ## Plan Change Log
 
@@ -49,3 +49,4 @@ The local daemon fixture reads a materialized ticket tree and observes pull fact
 ## Verification
 
 - `rtk proxy uv run --locked python -m pytest`
+- [Built in PR #159](https://github.com/mgd43b/plotroom/pull/159)

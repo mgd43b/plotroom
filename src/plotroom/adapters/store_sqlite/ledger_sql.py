@@ -330,6 +330,13 @@ class SqliteTransaction:
     async def save_checklist(self, checklist: Checklist) -> None:
         await checklists_sql.save_checklist(self._live(), checklist)
 
+    async def set_checklist_step_completion(
+        self, lane: str, version: int, step: str, completion_ref: str
+    ) -> bool:
+        return await checklists_sql.set_checklist_step_completion(
+            self._live(), lane, version, step, completion_ref
+        )
+
     async def insert_action(self, action: Action) -> None:
         await actions_sql.insert_action(self._live(), action)
 

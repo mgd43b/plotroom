@@ -4,6 +4,7 @@ import asyncio
 import base64
 import re
 import tempfile
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ _MAX_FILE_BYTES = MAX_WORK_ITEM_BODY_BYTES
 _MAX_TREE_BYTES = 16 * 1024 * 1024
 _MAX_DIRECTORY_ENTRIES = 4096
 _BLOB_BATCH = 8
+_BODY_CACHE_ENTRIES = 16
 _FETCH_TIMEOUT = 60
 _SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 
@@ -221,6 +223,7 @@ class GitHubTicketTree:
         self._cooling_down = cooling_down
         self._report_rate_limit = report_rate_limit
         self._cached: tuple[str, tuple[WorkItem, ...]] | None = None
+        self._body_cache: OrderedDict[tuple[str, str], str] = OrderedDict()
         self._retry_until: datetime | None = None
 
     async def ready_items(self) -> tuple[WorkItem, ...]:
@@ -228,10 +231,20 @@ class GitHubTicketTree:
 
     async def body(self, ref: str) -> str | None:
         async def read(git: _GitObjects) -> str | None:
-            _, root_sha = await git.default_commit()
-            return await self._read_tree_at(
+            commit, root_sha = await git.default_commit()
+            key = (commit, ref)
+            if key in self._body_cache:
+                self._body_cache.move_to_end(key)
+                return self._body_cache[key]
+            body = await self._read_tree_at(
                 git, root_sha, lambda tree, root: self._read_body(tree, root, ref)
             )
+            if body is not None:
+                self._body_cache[key] = body
+                self._body_cache.move_to_end(key)
+                if len(self._body_cache) > _BODY_CACHE_ENTRIES:
+                    self._body_cache.popitem(last=False)
+            return body
 
         return await self._fetch(read)
 

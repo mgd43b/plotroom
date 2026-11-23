@@ -50,3 +50,4 @@ The feature uses one archive-proposal helper for completion and trigger actions.
 ## Verification
 
 - `rtk proxy uv run --locked ruff check src tests` and the Epic 6 focused suite
+- [Built in PR #159](https://github.com/mgd43b/plotroom/pull/159)

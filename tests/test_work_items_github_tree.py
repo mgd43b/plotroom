@@ -250,11 +250,20 @@ async def test_body_uses_the_current_pinned_commit_and_configured_scope(
     write(checkout, sibling_path, first)
     github.head = github.snapshot(checkout)
     assert await source.body("2.1") == first
+    assert any(request.startswith("/git/blobs/") for request in github.requests)
+    github.requests.clear()
+    assert await source.body("2.1") == first
+    assert github.requests == ["", "/branches/release/default"]
     assert await source.body("1.1") is None
 
     write(checkout, own_path, second)
     github.head = github.snapshot(checkout)
+    github.truncated = True
+    with pytest.raises(ValueError, match="incomplete ticket tree"):
+        await source.body("2.1")
+    github.truncated = False
     assert await source.body("2.1") == second
+    assert f"/git/blobs/{object_id(second.encode())}" in github.requests
 
 
 async def test_rate_limit_stops_requests_for_retry_window(

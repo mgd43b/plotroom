@@ -240,6 +240,11 @@ class UnitOfWork:
     async def save_checklist(self, checklist: Checklist) -> None:
         await self._tx.save_checklist(checklist)
 
+    async def set_checklist_step_completion(
+        self, lane: str, version: int, step: str, completion_ref: str
+    ) -> bool:
+        return await self._tx.set_checklist_step_completion(lane, version, step, completion_ref)
+
     async def enqueue_action(
         self,
         cause: Event,

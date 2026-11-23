@@ -46,7 +46,9 @@ Completion uses the declared ref unless the caller supplies a completion ref. Ow
 
 - High, patch. All three lenses identified an archive proposal that stayed snoozed when its checklist became actionable. The shared context changes when a completed version becomes eligible. Tests cover early proposals before a last-step completion and before an empty READY merge.
 - Medium, patch. Integration found that a completed nonfinal step left the idle predicate looking at older activity. The command receipt now records the lane after a real update. A duplicate step leaves its activity sequence unchanged.
+- Medium, patch. Opening Kodus found step completion rewrote sibling rows. A version-guarded SQLite update changes one row, and the same transaction still evaluates the final-step consequences. The fixture audits the actual row operations and checks stale and repeated completion.
 
 ## Verification
 
 - `rtk proxy uv run --locked python -m pytest tests/test_checklist_lifecycle.py tests/test_trigger_actions.py tests/test_lanes.py tests/test_transport_contract.py`
+- [Built in PR #159](https://github.com/mgd43b/plotroom/pull/159)

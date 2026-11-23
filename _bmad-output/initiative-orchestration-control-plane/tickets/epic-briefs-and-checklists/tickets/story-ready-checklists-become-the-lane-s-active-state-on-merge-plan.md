@@ -58,3 +58,4 @@ Use the single existing lane row and a separate checklist header with positive v
 
 - `rtk proxy uv run --locked python -m pytest tests/test_checklists.py tests/test_github.py tests/test_lanes.py tests/test_migrations.py tests/test_transport_contract.py`
 - Local run on Python 3.14.10 passed all 51 tests, including fixture HTTP and stdio, with single Alembic head `0017`. Ruff lint, formatting, and Pyright passed.
+- [Built in PR #159](https://github.com/mgd43b/plotroom/pull/159)

@@ -49,3 +49,4 @@ The versioned last-step event, action and trigger fire commit together. A focuse
 ## Verification
 
 - `rtk proxy uv run --locked python -m pytest tests/test_checklist_lifecycle.py tests/test_triggers.py tests/test_trigger_predicates.py tests/test_trigger_recovery.py`
+- [Built in PR #159](https://github.com/mgd43b/plotroom/pull/159)

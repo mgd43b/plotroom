@@ -128,16 +128,15 @@ async def complete_checklist_step(
         raise LedgerError("conflict", "the lane has no active checklist")
     if completion_ref is not None and not completion_ref.strip():
         raise LedgerError("invalid", "completion ref must be non-empty")
-    for index, step in enumerate(checklist.steps):
+    for step in checklist.steps:
         if step.step != name:
             continue
         if step.completion_ref is not None:
             return {"changed": False, **asdict(step)}
-        done = replace(step, completion_ref=completion_ref or step.ref)
-        steps = (*checklist.steps[:index], done, *checklist.steps[index + 1 :])
-        updated = replace(checklist, steps=steps)
-        await uow.save_checklist(updated)
-        if not updated.open_steps():
+        ref = completion_ref or step.ref
+        if not await uow.set_checklist_step_completion(lane, checklist.version, name, ref):
+            raise LedgerError("conflict", "the checklist step is no longer open for this version")
+        if checklist.open_steps() == (step,):
             await propose_lane_archive(uow, lane)
             await uow.append(
                 NewEvent(
@@ -148,5 +147,5 @@ async def complete_checklist_step(
                     lane_id=lane,
                 )
             )
-        return {"changed": True, **asdict(done)}
+        return {"changed": True, **asdict(replace(step, completion_ref=ref))}
     raise LedgerError("not_found", "checklist step not found")

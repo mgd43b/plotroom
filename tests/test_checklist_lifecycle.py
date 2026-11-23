@@ -1,5 +1,6 @@
 """Checklist completion and archive behavior on the normal ledger path."""
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,43 @@ async def prepare(ledger: Ledger, steps: list[dict[str, str]]) -> None:
 async def archive_ids(ledger: Ledger) -> list[str]:
     _, items, _, _ = await ledger.read_board("orchestrator")
     return [item.id for item in items if item.kind == "archive_lane" and item.subject_ref == LANE]
+
+
+async def test_completion_updates_only_the_selected_sqlite_step(tmp_path: Path) -> None:
+    async with open_ledger(tmp_path, FixedClock()) as ledger:
+        await prepare(ledger, STEPS)
+        await pull(ledger, 1)
+        database = tmp_path / "demo.db"
+        with sqlite3.connect(database) as db:
+            db.executescript("""
+                CREATE TABLE step_writes (operation TEXT, step TEXT);
+                CREATE TRIGGER step_deleted AFTER DELETE ON lane_checklist_steps BEGIN
+                    INSERT INTO step_writes VALUES ('delete', OLD.step);
+                END;
+                CREATE TRIGGER step_inserted AFTER INSERT ON lane_checklist_steps BEGIN
+                    INSERT INTO step_writes VALUES ('insert', NEW.step);
+                END;
+                CREATE TRIGGER step_updated AFTER UPDATE ON lane_checklist_steps BEGIN
+                    INSERT INTO step_writes VALUES ('update', NEW.step);
+                END;
+            """)
+
+        name = STEPS[0]["step"]
+        stale = await ledger.run(
+            "system", lambda uow: uow.set_checklist_step_completion(LANE, 2, name, "stale")
+        )
+        assert stale is False
+        args = {"lane": LANE, "step": name, "ref": "fixture evidence"}
+        await ledger.execute("worker:desktop", "checklist_done", "first", args)
+        await ledger.execute("worker:desktop", "checklist_done", "repeat", args)
+
+        with sqlite3.connect(database) as db:
+            assert db.execute("SELECT operation, step FROM step_writes").fetchall() == [
+                ("update", name)
+            ]
+            assert db.execute(
+                "SELECT step, completion_ref FROM lane_checklist_steps ORDER BY position"
+            ).fetchall() == [(name, "fixture evidence"), (STEPS[1]["step"], None)]
 
 
 async def test_steps_guard_archive_and_share_the_proposal(tmp_path: Path) -> None:

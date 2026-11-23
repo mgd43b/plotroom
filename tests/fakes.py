@@ -9,7 +9,7 @@ import sqlite3
 from collections import Counter
 from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
 from itertools import islice
@@ -300,6 +300,21 @@ class _MemoryTransaction:
     async def save_checklist(self, checklist: Checklist) -> None:
         self._live()
         self.checklists[checklist.lane] = checklist
+
+    async def set_checklist_step_completion(
+        self, lane: str, version: int, step: str, completion_ref: str
+    ) -> bool:
+        self._live()
+        checklist = self.checklists.get(lane)
+        if checklist is None or checklist.state != "active" or checklist.version != version:
+            return False
+        steps = list(checklist.steps)
+        for index, current in enumerate(steps):
+            if current.step == step and current.completion_ref is None:
+                steps[index] = replace(current, completion_ref=completion_ref)
+                self.checklists[lane] = replace(checklist, steps=tuple(steps))
+                return True
+        return False
 
     async def insert_action(self, action: Action) -> None:
         self._live()

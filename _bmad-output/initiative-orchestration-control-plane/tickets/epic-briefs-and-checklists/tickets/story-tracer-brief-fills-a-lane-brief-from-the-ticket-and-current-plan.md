@@ -58,7 +58,9 @@ The source lookup runs outside the writer. The brief reads the worker's current 
 - Medium, patch. Acceptance and integration each identified compact ready tickets that produced an absent body. The reader now returns the text fields from the matching in-scope entry. A mirror-to-brief fixture verifies the same reference through both paths.
 - Medium, patch. Acceptance and integration each identified that body lookup bypassed the source's configured issue scope. Lookup now shares ticket and effective milestone membership with the mirror. Focused fixtures cover explicit and inherited assignments and an in-progress ticket.
 - Medium, patch. The integration recheck found that the compact renderer could still return earlier subprocess text after validating a different file read. The trusted lookup now locates the ticket, and the confined TOML read provides the rendered text.
+- Medium, patch. Opening Kodus found repeated remote briefs rematerialized an unchanged ticket tree. A bounded cache keyed by the resolved commit and ref avoids repeated blob downloads. The fixture verifies cache reuse, commit changes, and recovery from a failed read.
 
 ## Verification
 
 - `rtk proxy uv run --locked python -m pytest tests/test_transport_contract.py tests/test_work_items.py tests/test_work_items_github_issues.py tests/test_work_items_github_tree.py tests/test_config.py`
+- [Built in PR #159](https://github.com/mgd43b/plotroom/pull/159)

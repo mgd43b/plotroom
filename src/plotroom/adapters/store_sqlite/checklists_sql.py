@@ -24,6 +24,15 @@ _INSERT_STEP = text("""
     INSERT INTO lane_checklist_steps (lane, position, step, owner, ref, completion_ref)
     VALUES (:lane, :position, :step, :owner, :ref, :completion_ref)
 """)
+_COMPLETE_STEP = text("""
+    UPDATE lane_checklist_steps SET completion_ref = :completion_ref
+    WHERE lane = :lane AND step = :step AND completion_ref IS NULL
+      AND EXISTS (
+        SELECT 1 FROM lane_checklists
+        WHERE lane = :lane AND version = :version AND state = 'active'
+      )
+    RETURNING step
+""")
 
 
 async def find_checklist(connection: AsyncConnection, lane: str) -> Checklist | None:
@@ -56,3 +65,13 @@ async def save_checklist(connection: AsyncConnection, checklist: Checklist) -> N
                 for position, step in enumerate(checklist.steps)
             ],
         )
+
+
+async def set_checklist_step_completion(
+    connection: AsyncConnection, lane: str, version: int, step: str, completion_ref: str
+) -> bool:
+    result = await connection.execute(
+        _COMPLETE_STEP,
+        {"lane": lane, "version": version, "step": step, "completion_ref": completion_ref},
+    )
+    return result.scalar_one_or_none() is not None
