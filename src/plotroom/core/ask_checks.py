@@ -101,7 +101,7 @@ def ask_conditions(
             buried = False
 
     orphaned: bool | None = None
-    if replied or issue_state == "open":
+    if issue_state == "open" or (history_complete and replied):
         orphaned = False
     elif (
         issue_state == "closed"

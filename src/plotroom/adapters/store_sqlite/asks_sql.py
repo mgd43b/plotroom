@@ -7,7 +7,7 @@ from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from plotroom.core.ask_checks import Ask, IssueComment, comment_time
-from plotroom.core.github_projection import COMMENTS
+from plotroom.core.github_projection import ASK_COMMENT_HISTORY
 
 _ASK_FROM_COMMENT = text(
     "SELECT * FROM human_asks WHERE repository = :repository AND comment_id = :comment_id"
@@ -39,8 +39,15 @@ _UNSETTLED = text("""
 _ASK_COMMENTS = text("""
     SELECT json_extract(records, '$[0].fields') AS fields
     FROM github_resources
-    WHERE repository = :repository AND resource = :resource
+    WHERE repository = :repository AND resource = 'issue_comments'
       AND json_extract(records, '$[0].fields.number') IN (SELECT value FROM json_each(:issues))
+""")
+
+
+_ASK_HISTORIES = text("""
+    SELECT scope, attributes FROM github_resources
+    WHERE repository = :repository AND resource = :resource
+      AND scope IN (SELECT value FROM json_each(:scopes))
 """)
 
 
@@ -110,7 +117,7 @@ async def ask_comments(
     results: dict[int, list[IssueComment]] = {}
     rows = await connection.execute(
         _ASK_COMMENTS,
-        {"repository": repository, "resource": COMMENTS, "issues": json.dumps(sorted(issues))},
+        {"repository": repository, "issues": json.dumps(sorted(issues))},
     )
     for row in rows:
         fields = json.loads(row.fields)
@@ -118,3 +125,23 @@ async def ask_comments(
             IssueComment(fields["id"], fields.get("author"), comment_time(fields["created_at"]))
         )
     return results
+
+
+async def ask_comment_histories(
+    connection: AsyncConnection, repository: str, issues: set[int]
+) -> dict[int, tuple[str, frozenset[int]]]:
+    if not issues:
+        return {}
+    rows = await connection.execute(
+        _ASK_HISTORIES,
+        {
+            "repository": repository,
+            "resource": ASK_COMMENT_HISTORY,
+            "scopes": json.dumps([str(number) for number in sorted(issues)]),
+        },
+    )
+    result: dict[int, tuple[str, frozenset[int]]] = {}
+    for row in rows:
+        attributes = json.loads(row.attributes)
+        result[int(row.scope)] = (attributes["version"], frozenset(attributes["comment_ids"]))
+    return result

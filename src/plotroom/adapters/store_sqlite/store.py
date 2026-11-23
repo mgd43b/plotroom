@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sqlite3
 from collections.abc import AsyncGenerator, Awaitable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import aiosqlite
+import sqlite_vec  # pyright: ignore[reportMissingTypeStubs]
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import URL, Connection, event
 from sqlalchemy.engine.interfaces import DBAPIConnection
@@ -18,6 +22,7 @@ from sqlalchemy.pool import ConnectionPoolEntry
 from plotroom.adapters.store_sqlite import (
     asks_sql,
     checklists_sql,
+    embedding_sql,
     github_sql,
     human_queue_sql,
     outbox_sql,
@@ -39,16 +44,26 @@ from plotroom.adapters.store_sqlite.ledger_sql import (
     event_from_row,
 )
 from plotroom.adapters.store_sqlite.migrate import upgrade_to_head
+from plotroom.adapters.store_sqlite.search_sql import search_messages
 from plotroom.adapters.store_sqlite.work_items_sql import ready_work_items
 from plotroom.core.actions import Action, QueuedAction
 from plotroom.core.ask_checks import Ask
 from plotroom.core.claims import Claim
-from plotroom.core.events import Event
+from plotroom.core.events import Event, LedgerError
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
 from plotroom.core.github_projection import GitHubResource
 from plotroom.core.merge_gate import GateSnapshot, load_gate_snapshot
 from plotroom.core.next_items import Item
-from plotroom.ports.store import Board
+from plotroom.core.search import pack_vector
+from plotroom.ports.search import (
+    MAX_SEARCH_LIMIT,
+    MESSAGE_KIND,
+    EmbeddedMessage,
+    EmbeddingError,
+    EmbeddingModel,
+    SearchPage,
+)
+from plotroom.ports.store import Board, Transaction
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
@@ -94,6 +109,60 @@ async def _uninterrupted[T](awaitable: Awaitable[T]) -> T:
     if canceled:
         raise asyncio.CancelledError
     return result
+
+
+async def _load_vector_extension(connection: AsyncConnection) -> None:
+    if connection.info.get("sqlite_vec_loaded"):
+        return
+    raw = await connection.get_raw_connection()
+    driver = raw.driver_connection
+    if not isinstance(driver, aiosqlite.Connection):
+        raise TypeError("vector search requires an aiosqlite connection")
+    await driver.enable_load_extension(True)
+    try:
+        await driver.load_extension(sqlite_vec.loadable_path())
+    finally:
+        await driver.enable_load_extension(False)
+    connection.info["sqlite_vec_loaded"] = True
+
+
+@dataclass(frozen=True)
+class SqliteEmbeddingIndex:
+    """The writer and reader for one model in one project's database."""
+
+    _engine: AsyncEngine
+    project_id: str
+    model: EmbeddingModel
+
+    async def cursor(self) -> int:
+        async with self._engine.connect() as connection:
+            return await embedding_sql.read_cursor(connection, self.model)
+
+    async def commit(
+        self, tx: Transaction, expected: int, through: int, records: tuple[EmbeddedMessage, ...]
+    ) -> bool:
+        if not isinstance(tx, SqliteTransaction):
+            raise TypeError("the SQLite embedding index requires a SQLite writer transaction")
+        return await tx.commit_embedding_batch(self._engine, self.model, expected, through, records)
+
+    async def query_vector(self, project: str, vector: tuple[float, ...], limit: int) -> SearchPage:
+        if project != self.project_id:
+            raise LedgerError("forbidden", "search is restricted to the current project")
+        if not 1 <= limit <= MAX_SEARCH_LIMIT:
+            raise LedgerError("invalid", f"search limit must be between 1 and {MAX_SEARCH_LIMIT}")
+        try:
+            query = pack_vector(vector, self.model.dimension)
+        except EmbeddingError as exc:
+            raise LedgerError("invalid", str(exc)) from exc
+        async with self._engine.connect() as connection:
+            # Loading is only needed for queries and leaves extension loading disabled again.
+            try:
+                await _uninterrupted(_load_vector_extension(connection))
+            except (sqlite3.Error, OSError, AttributeError) as exc:
+                raise LedgerError(
+                    "unavailable", "SQLite vector search requires sqlite-vec"
+                ) from exc
+            return await embedding_sql.query_vectors(connection, self.model, query, limit)
 
 
 class SqliteStore:
@@ -187,6 +256,25 @@ class SqliteStore:
         async with self._engine.connect() as connection:
             result = await connection.execute(EVENTS_AFTER, {"seq": seq, "limit": limit})
             return [event_from_row(row) for row in result]
+
+    async def index(self, tx: Transaction, event: Event) -> None:
+        if event.kind == MESSAGE_KIND:
+            if not isinstance(tx, SqliteTransaction):
+                raise TypeError("the SQLite index requires a SQLite writer transaction")
+            await tx.index_message(self._engine, event)
+
+    async def query(
+        self, project: str, text: str, kinds: tuple[str, ...] | None, limit: int
+    ) -> SearchPage:
+        if project != self._project_id:
+            raise LedgerError("forbidden", "search is restricted to the current project")
+        if kinds is not None and MESSAGE_KIND not in kinds:
+            return SearchPage((), 0)
+        async with self._engine.connect() as connection:
+            return await search_messages(connection, text, limit)
+
+    def embedding_index(self, model: EmbeddingModel) -> SqliteEmbeddingIndex:
+        return SqliteEmbeddingIndex(self._engine, self._project_id, model)
 
     async def _board(self, connection: AsyncConnection, role: str) -> Board:
         cursor = int((await connection.execute(HEAD_SEQ)).scalar_one())

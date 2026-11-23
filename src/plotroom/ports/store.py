@@ -75,6 +75,10 @@ class Transaction(Protocol):
         self, repository: str, issues: set[int]
     ) -> dict[int, list[IssueComment]]: ...
 
+    async def ask_comment_histories(
+        self, repository: str, issues: set[int]
+    ) -> dict[int, tuple[str, frozenset[int]]]: ...
+
     async def insert_noop_receipt(
         self, command: str, key: str, receipt: dict[str, Any]
     ) -> None: ...

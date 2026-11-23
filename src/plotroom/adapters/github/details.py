@@ -41,6 +41,7 @@ from plotroom.core.github import (
     FetchCursor,
     FetchRetry,
     PullRequest,
+    apply_ask_comment_history,
     apply_comments,
 )
 from plotroom.core.github_projection import (
@@ -452,7 +453,7 @@ class GitHubDetailPoller:
             return
         repository = self.api.repository
         pending = await self.ledger.pending_ask_issues(repository)
-        targets: list[tuple[int, str, int, str, FetchCursor | None]] = []
+        targets: list[tuple[int, str, int]] = []
         for row in issues.records:
             if row.kind != "issue_closed" or (number := row.fields["number"]) not in pending:
                 continue
@@ -460,18 +461,15 @@ class GitHubDetailPoller:
             if coverage is None:
                 continue
             version, count = coverage
-            key = f"{ASK_COMMENT_HISTORY}{number}"
-            prior = await self.ledger.fetch_cursor(repository, key)
-            if prior is None or prior.watermark != version:
-                targets.append((number, version, count, key, prior))
+            prior = await self.ledger.github_resource(repository, ASK_COMMENT_HISTORY, str(number))
+            if prior is None or prior.attributes.get("version") != version:
+                targets.append((number, version, count))
         if not targets:
             return
         targets.sort()
         offset = self._ask_history_offset % len(targets)
         self._ask_history_offset = offset + MAX_ASK_HISTORIES
-        for number, version, count, key, prior in (targets[offset:] + targets[:offset])[
-            :MAX_ASK_HISTORIES
-        ]:
+        for number, version, count in (targets[offset:] + targets[:offset])[:MAX_ASK_HISTORIES]:
             try:
                 comments = await fetch_issue_comments(
                     self.api, client, token, number, version, count
@@ -486,13 +484,12 @@ class GitHubDetailPoller:
             await self.ledger.run(
                 "system",
                 partial(
-                    apply_comments,
+                    apply_ask_comment_history,
                     repository=repository,
-                    baseline=prior,
+                    number=number,
+                    version=version,
                     comments=comments,
-                    watermark=version,
                     as_of=format_time(self.clock.now()),
-                    cursor_resource=key,
                 ),
             )
 

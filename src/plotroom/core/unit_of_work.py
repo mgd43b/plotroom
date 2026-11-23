@@ -44,6 +44,7 @@ from plotroom.core.next_items import Item, ItemKind
 from plotroom.core.pull_overlaps import reconcile_pull_overlaps
 from plotroom.core.roles import role_family
 from plotroom.ports.clock import Clock
+from plotroom.ports.search import EmbeddedMessage, EmbeddingIndex, Search
 from plotroom.ports.store import Transaction
 from plotroom.ports.work_items import WorkItem
 
@@ -76,6 +77,7 @@ class UnitOfWork:
         items: Mapping[str, ItemKind] | None = None,
         append_role: str | None = None,
         id_factory: Callable[[], str] = new_event_id,
+        search: Search | None = None,
     ) -> None:
         self._tx = tx
         self._events = events
@@ -84,6 +86,7 @@ class UnitOfWork:
         self._items: Mapping[str, ItemKind] = items if items is not None else {}
         self._append_role = append_role if append_role is not None else role
         self._id_factory = id_factory
+        self._search = search
         self._claims_changed = False
         self._pulls_changed = False
         self.all_merge_pulls = False
@@ -127,6 +130,17 @@ class UnitOfWork:
     async def allocate_seq(self) -> int:
         """The project's next ``seq``; rolled back with the transaction."""
         return await self._tx.allocate_seq()
+
+    async def save_embedding_batch(
+        self,
+        index: EmbeddingIndex,
+        expected: int,
+        through: int,
+        records: tuple[EmbeddedMessage, ...],
+    ) -> bool:
+        if self._role != "system":
+            raise LedgerError("forbidden", "only core may update the embedding index")
+        return await index.commit(self._tx, expected, through, records)
 
     async def ready_work_items(self) -> tuple[WorkItem, ...]:
         return await self._tx.ready_work_items()
@@ -224,7 +238,7 @@ class UnitOfWork:
             self.merge_check_heads.add(scope)
         elif resource in (LABELS, THREADS, PULL_COMPARISON, PULL_TEXT):
             self.merge_pull_numbers.add(int(scope))
-        if resource in {ISSUES, COMMENTS}:
+        if resource in {ISSUES, COMMENTS, ASK_COMMENT_HISTORY}:
             self._ask_repositories.add(repository)
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
@@ -234,8 +248,6 @@ class UnitOfWork:
         await self._tx.save_fetch_cursor(repository, resource, cursor)
         if resource == PULL_REQUESTS:
             self.all_merge_pulls = True
-        if resource.startswith(ASK_COMMENT_HISTORY):
-            self._ask_repositories.add(repository)
 
     async def ask_for_comment(self, repository: str, comment_id: int) -> Ask | None:
         return await self._tx.ask_for_comment(repository, comment_id)
@@ -254,6 +266,11 @@ class UnitOfWork:
         self, repository: str, issues: set[int]
     ) -> dict[int, list[IssueComment]]:
         return await self._tx.ask_comments(repository, issues)
+
+    async def ask_comment_histories(
+        self, repository: str, issues: set[int]
+    ) -> dict[int, tuple[str, frozenset[int]]]:
+        return await self._tx.ask_comment_histories(repository, issues)
 
     async def refresh_asks(
         self, repository: str | None, human_login: str | None, stale_days: int
@@ -414,4 +431,6 @@ class UnitOfWork:
         await self._tx.insert_event(stored)
         if event.kind == "core.tick":
             self._tick = True
+        if self._search is not None:
+            await self._search.index(self._tx, stored)
         return AppendResult(stored, True)

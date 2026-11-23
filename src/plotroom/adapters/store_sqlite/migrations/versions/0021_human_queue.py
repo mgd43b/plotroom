@@ -4,12 +4,17 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0021"
-down_revision = "0017"
+down_revision = "0020"
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
+    op.execute("""
+        CREATE INDEX issue_comments_by_number
+        ON github_resources (repository, json_extract(records, '$[0].fields.number'))
+        WHERE resource = 'issue_comments'
+    """)
     op.create_table(
         "decisions",
         sa.Column("id", sa.Text(), primary_key=True),
@@ -36,5 +41,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_index("issue_comments_by_number", table_name="github_resources")
     op.drop_table("human_asks")
     op.drop_table("decisions")

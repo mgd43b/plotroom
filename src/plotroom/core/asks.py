@@ -9,11 +9,10 @@ from typing import TYPE_CHECKING, Any
 from plotroom.core.ask_checks import ASK_ITEMS, Ask, ask_conditions, comment_time
 from plotroom.core.events import LedgerError, format_time
 from plotroom.core.github_projection import (
-    ASK_COMMENT_HISTORY,
     ISSUES,
-    GitHubRecord,
     ask_history_version,
     projected_comment,
+    projected_issues,
 )
 
 if TYPE_CHECKING:
@@ -41,6 +40,8 @@ async def record_ask(
     except UnicodeEncodeError:
         raise LedgerError("invalid", "ask options must be valid UTF-8 text") from None
     comment = await projected_comment(uow, repository, issue, comment_id)
+    if issue not in projected_issues(await uow.github_resource(repository, ISSUES)):
+        raise LedgerError("unavailable", "the issue is not in a complete GitHub issue projection")
     if text not in comment.body:
         raise LedgerError("invalid", "ask text does not occur in the projected comment")
     posted = comment_time(comment.fields["created_at"])
@@ -77,29 +78,23 @@ async def reconcile_asks(
     if not asks:
         return
     numbers = {ask.issue for ask in asks}
-    issues = await uow.github_resource(repository, ISSUES)
-    issue_rows: dict[int, GitHubRecord] = {}
-    if issues is not None and issues.complete:
-        issue_rows = {
-            row.fields["number"]: row
-            for row in issues.records
-            if row.details.get("resource") == "issue"
-        }
+    issues = projected_issues(await uow.github_resource(repository, ISSUES))
+    histories = await uow.ask_comment_histories(repository, numbers & issues.keys())
     comments = await uow.ask_comments(repository, numbers)
     now = uow.now()
-    complete: dict[int, bool] = {}
-    for number, row in issue_rows.items():
-        if number in numbers and (coverage := ask_history_version(row)) is not None:
-            version, _ = coverage
-            cursor = await uow.fetch_cursor(repository, f"{ASK_COMMENT_HISTORY}{number}")
-            complete[number] = cursor is not None and cursor.watermark == version
     for ask in asks:
-        issue = issue_rows.get(ask.issue)
+        issue = issues.get(ask.issue)
+        coverage = ask_history_version(issue) if issue is not None else None
+        history = histories.get(ask.issue)
+        current_history = coverage is not None and history is not None and coverage[0] == history[0]
+        issue_comments = comments.get(ask.issue, [])
+        if current_history and history is not None:
+            issue_comments = [comment for comment in issue_comments if comment.id in history[1]]
         conditions = ask_conditions(
             ask,
-            comments.get(ask.issue, []),
+            issue_comments,
             issue_state=issue.fields["state"] if issue is not None else None,
-            history_complete=complete.get(ask.issue, False),
+            history_complete=current_history,
             human_login=human_login,
             stale_days=stale_days,
             now=now,

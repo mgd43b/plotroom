@@ -23,7 +23,7 @@ PULL_TEXT = "pull_text"
 ISSUES = "issues"
 COMMENTS = "issue_comments"
 COMMENT_BACKFILL = "issue_comments_backfill"
-ASK_COMMENT_HISTORY = "ask_comment_history/"
+ASK_COMMENT_HISTORY = "ask_comment_history"
 ISSUE_TREE = "issue_tree"
 
 REPOSITORY = FieldSpec("repository", "str")
@@ -200,6 +200,16 @@ async def apply_resource(
         )
     ):
         uow.pull_overlaps_changed()
+
+
+def projected_issues(resource: GitHubResource | None) -> dict[int, GitHubRecord]:
+    if resource is None or not resource.complete:
+        return {}
+    return {
+        row.fields["number"]: row
+        for row in resource.records
+        if row.details.get("resource") == "issue"
+    }
 
 
 def ask_history_version(issue: GitHubRecord) -> tuple[str, int] | None:

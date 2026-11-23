@@ -8,18 +8,20 @@ from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Row, text
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from plotroom.adapters.store_sqlite import (
     actions_sql,
     asks_sql,
     checklists_sql,
     claims_sql,
+    embedding_sql,
     github_sql,
     human_queue_sql,
     items_sql,
     lanes_sql,
     outbox_sql,
+    search_sql,
     triggers_sql,
     work_items_sql,
 )
@@ -31,6 +33,7 @@ from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
 from plotroom.core.github_projection import GitHubResource
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
+from plotroom.ports.search import EmbeddedMessage, EmbeddingModel
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
@@ -217,6 +220,25 @@ class SqliteTransaction:
             },
         )
 
+    async def index_message(self, engine: AsyncEngine, event: Event) -> None:
+        connection = self._live()
+        if connection.engine is not engine:
+            raise RuntimeError("cannot index an event through another project's transaction")
+        await search_sql.insert_message(connection, event)
+
+    async def commit_embedding_batch(
+        self,
+        engine: AsyncEngine,
+        model: EmbeddingModel,
+        expected: int,
+        through: int,
+        records: tuple[EmbeddedMessage, ...],
+    ) -> bool:
+        connection = self._live()
+        if connection.engine is not engine:
+            raise RuntimeError("cannot index vectors through another project's transaction")
+        return await embedding_sql.commit_batch(connection, model, expected, through, records)
+
     async def find_claude_turn(self, session: str, aliases: tuple[str, ...]) -> Event | None:
         index = next((alias for alias in aliases if alias.startswith("index:")), None)
         for alias in aliases:
@@ -373,6 +395,11 @@ class SqliteTransaction:
 
     async def unsettled_asks(self, repository: str) -> list[Ask]:
         return await asks_sql.unsettled_asks(self._live(), repository)
+
+    async def ask_comment_histories(
+        self, repository: str, issues: set[int]
+    ) -> dict[int, tuple[str, frozenset[int]]]:
+        return await asks_sql.ask_comment_histories(self._live(), repository, issues)
 
     async def ask_comments(
         self, repository: str, issues: set[int]

@@ -25,7 +25,7 @@ LATER = POSTED + timedelta(seconds=1)
         ([], "closed", False, None, None),
         ([], "closed", True, False, True),
         ([IssueComment(43, "lane", LATER)], "open", False, True, False),
-        ([IssueComment(43, "HUMAN", LATER)], "closed", False, False, False),
+        ([IssueComment(43, "HUMAN", LATER)], "closed", False, False, None),
         ([IssueComment(43, None, LATER)], "closed", True, None, None),
         ([IssueComment(43, "human", POSTED)], "closed", True, None, None),
         (

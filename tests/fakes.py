@@ -26,7 +26,7 @@ from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
 from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, GitHubSummary, PullRequest
-from plotroom.core.github_projection import COMMENTS, GitHubResource
+from plotroom.core.github_projection import ASK_COMMENT_HISTORY, COMMENTS, GitHubResource
 from plotroom.core.human_queue import Decision
 from plotroom.core.lanes import Lane, with_projected_pr
 from plotroom.core.ledger import Ledger
@@ -385,6 +385,20 @@ class _MemoryTransaction:
             for ask in self.asks.values()
             if ask.repository == repository and ask.settled_by is None
         ]
+
+    async def ask_comment_histories(
+        self, repository: str, issues: set[int]
+    ) -> dict[int, tuple[str, frozenset[int]]]:
+        self._live()
+        histories: dict[int, tuple[str, frozenset[int]]] = {}
+        for number in issues:
+            resource = self.github_resources.get((repository, ASK_COMMENT_HISTORY, str(number)))
+            if resource is not None:
+                histories[number] = (
+                    resource.attributes["version"],
+                    frozenset(resource.attributes["comment_ids"]),
+                )
+        return histories
 
     async def ask_comments(
         self, repository: str, issues: set[int]
@@ -919,18 +933,26 @@ async def apply_inputs(ledger: Ledger, inputs: list[dict[str, Any]]) -> list[boo
 
 def sqlite_dump(path: Path) -> dict[str, Any]:
     """Every table of a project file, read with plain ``sqlite3`` (WAL lets this run beside a writer)."""
+
+    def identifier(name: str) -> str:
+        return '"' + name.replace('"', '""') + '"'
+
     db = sqlite3.connect(path)
     try:
-        names = [
-            row[0]
-            for row in db.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
-                "ORDER BY name"
-            )
-        ]
-        return {
-            name: db.execute(f'SELECT * FROM "{name}" ORDER BY rowid').fetchall() for name in names
-        }
+        dump: dict[str, Any] = {}
+        tables = db.execute(
+            "SELECT name, wr FROM pragma_table_list WHERE schema = 'main' "
+            "AND type != 'view' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+        for name, without_rowid in tables:
+            order = "rowid"
+            if without_rowid:
+                keys = db.execute(
+                    "SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk", (name,)
+                )
+                order = ", ".join(identifier(key) for (key,) in keys)
+            dump[name] = db.execute(f"SELECT * FROM {identifier(name)} ORDER BY {order}").fetchall()
+        return dump
     finally:
         db.close()
 

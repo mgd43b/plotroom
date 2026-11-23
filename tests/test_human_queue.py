@@ -17,7 +17,7 @@ from plotroom.adapters.store_sqlite.ledger_sql import SqliteTransaction
 from plotroom.core.ask_checks import ASK_BURIED, ASK_OPTIONLESS, ASK_ORPHANED, ASK_STALE
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import Event, LedgerError, NewEvent
-from plotroom.core.github import apply_comments
+from plotroom.core.github import apply_ask_comment_history, apply_comments
 from plotroom.core.github_projection import (
     ASK_COMMENT_HISTORY,
     COMMENT_BACKFILL,
@@ -281,6 +281,10 @@ async def test_ask_uses_exact_current_project_comment_and_retry_is_atomic(tmp_pa
         assert await ledger.head_seq() == head
         assert await ledger.list_asks(ORCHESTRATOR, False) == []
         await observe_comment(ledger, author="fixture-agent", body=f"Opening\r\n{WORDS}\nEnd")
+        with pytest.raises(LedgerError) as missing_issue:
+            await ledger.execute(ORCHESTRATOR, "ask", "retry-me", args)
+        assert missing_issue.value.code == "unavailable"
+        await issue_states(ledger, {42: "open"})
         for bad_args in (ask_args(issue=43), ask_args(text="cafe"), ask_args(options=[None])):
             with pytest.raises(LedgerError) as rejected:
                 await ledger.execute(ORCHESTRATOR, "ask", "retry-me", bad_args)
@@ -336,10 +340,12 @@ async def test_ask_conditions_transition_once_on_updates_ticks_and_settlement(
             ),
         )
         assert (ASK_ORPHANED, ask_ids[45]) not in await open_checks(ledger)
+        cached = await ledger.github_resource(REPO, COMMENTS, "9045")
+        assert cached is not None
         await ledger.run(
             "system",
-            lambda uow: apply_comments(
-                uow, REPO, None, (), f"{STAMP}/1", STAMP, cursor_resource=f"{ASK_COMMENT_HISTORY}45"
+            lambda uow: apply_ask_comment_history(
+                uow, REPO, 45, f"{STAMP}/1", cached.records, STAMP
             ),
         )
         clock.advance(86401)
@@ -479,6 +485,10 @@ async def test_closed_ask_requires_its_own_verified_comment_history(
     async with decision_ledger(tmp_path, clock=clock) as ledger:
         await issue_states(ledger, {42: "closed"}, comment_count=1 if result == "no-reply" else 2)
         await observe_comment(ledger, author="fixture-agent")
+        if result == "no-reply":
+            await observe_comment(
+                ledger, comment_id=9002, author=HUMAN, stamp="2026-11-23T13:00:00Z"
+            )
         ask_id = (await ledger.execute(ORCHESTRATOR, "ask", "closed-ask", ask_args())).result[
             "ask_id"
         ]
@@ -500,5 +510,9 @@ async def test_closed_ask_requires_its_own_verified_comment_history(
         assert pages == expected_pages
         checks = await open_checks(ledger)
         assert ((ASK_ORPHANED, ask_id) in checks) == (result == "no-reply")
-        proof = await ledger.fetch_cursor(REPO, f"{ASK_COMMENT_HISTORY}42")
+        proof = await ledger.github_resource(REPO, ASK_COMMENT_HISTORY, "42")
         assert (proof is not None) == (result in {"no-reply", "paginated-reply"})
+        if result == "no-reply":
+            assert proof is not None
+            assert proof.attributes["comment_ids"] == [9001]
+            assert await ledger.github_resource(REPO, COMMENTS, "9002") is not None

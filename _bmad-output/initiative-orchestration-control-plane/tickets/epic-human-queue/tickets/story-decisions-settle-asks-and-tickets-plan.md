@@ -3,7 +3,7 @@ title: 'Settle linked asks with decisions'
 type: feature
 ticket: '4'
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '3ecf20da2ba64a6e5e2e18f4e41b50db05b3fab0'
 route: full
 route_source: auto
@@ -56,6 +56,8 @@ Given a stale ask, when a decision settles it and governs its ticket, then the s
 
 ## Plan Change Log
 
+- Integrated main at `60ac5ffd247dd21fff701d066db55df480e53c91` and attached `0021` to its merged `0020` head.
+
 ## Review Triage Log
 
 | Finding | Verdict | Route | Evidence |
@@ -70,3 +72,4 @@ Given a stale ask, when a decision settles it and governs its ticket, then the s
 
 - `uv run python -m pytest -q tests/test_human_queue.py tests/test_migrations.py`
 - [GitHub story](https://github.com/mgd43b/plotroom/issues/86)
+- Built: https://github.com/mgd43b/plotroom/pull/165

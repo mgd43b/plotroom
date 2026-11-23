@@ -3,7 +3,7 @@ title: 'Record asks on GitHub issues'
 type: feature
 ticket: '2'
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '3ecf20da2ba64a6e5e2e18f4e41b50db05b3fab0'
 route: full
 route_source: auto
@@ -56,11 +56,15 @@ Given a test comment on a configured project issue, when ask is accepted and rea
 
 ## Plan Change Log
 
+- Integrated main at `60ac5ffd247dd21fff701d066db55df480e53c91` and attached `0021` to its merged `0020` head.
+
 ## Review Triage Log
 
 | Finding | Verdict | Route | Evidence |
 | --- | --- | --- | --- |
 | MCP coerced non-integer references | Medium | Patch | Both ask identifiers now use strict integer validation. Local transport fixtures exercise malformed values against a matching projected comment. |
+
+| Cached comment could cite an issue absent from projection | High | Patch | The ask writer requires a complete issue projection with the cited issue and checks for retry after the issue becomes available. |
 
 ## Verification
 
@@ -70,3 +74,4 @@ Given a test comment on a configured project issue, when ask is accepted and rea
 
 - `uv run python -m pytest -q tests/test_human_queue.py`
 - [GitHub story](https://github.com/mgd43b/plotroom/issues/84)
+- Built: https://github.com/mgd43b/plotroom/pull/165

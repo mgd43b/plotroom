@@ -13,7 +13,13 @@ _INSERT_DECISION = text("""
     INSERT INTO decisions (id, who, exact_words, where_ref, governs, settles, created_at)
     VALUES (:id, :who, :exact_words, :where_ref, :governs, :settles, :created_at)
 """)
-_LIST_DECISIONS = text("SELECT * FROM decisions ORDER BY rowid")
+_LIST_DECISIONS = text("""
+    SELECT * FROM decisions AS decision
+    WHERE :governs IS NULL OR EXISTS (
+        SELECT 1 FROM json_each(decision.governs) AS ticket WHERE ticket.value = :governs
+    )
+    ORDER BY decision.rowid
+""")
 
 
 async def insert_decision(connection: AsyncConnection, decision: Decision) -> None:
@@ -32,19 +38,15 @@ async def insert_decision(connection: AsyncConnection, decision: Decision) -> No
 
 
 async def list_decisions(connection: AsyncConnection, governs: str | None) -> list[Decision]:
-    decisions: list[Decision] = []
-    for row in await connection.execute(_LIST_DECISIONS):
-        ticket_refs = json.loads(row.governs)
-        if governs is None or governs in ticket_refs:
-            decisions.append(
-                Decision(
-                    row.id,
-                    row.who,
-                    row.exact_words,
-                    json.loads(row.where_ref),
-                    ticket_refs,
-                    json.loads(row.settles),
-                    row.created_at,
-                )
-            )
-    return decisions
+    return [
+        Decision(
+            row.id,
+            row.who,
+            row.exact_words,
+            json.loads(row.where_ref),
+            json.loads(row.governs),
+            json.loads(row.settles),
+            row.created_at,
+        )
+        for row in await connection.execute(_LIST_DECISIONS, {"governs": governs})
+    ]
