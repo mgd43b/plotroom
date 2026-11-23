@@ -1,9 +1,8 @@
 #!/bin/bash
 # safemerge.sh <pr> [--allow-overlap]
-# The merge gate. Merges a PR only if: it has at least ORCH_MIN_CHECKS checks, all finished with no failure, there are no unresolved review threads, the base
-# branch's latest CI run with a verdict is green (or this PR is the marked fix), no closing keyword would close an issue before it is verified, and no file the PR
-# changes was also changed on the base branch since the PR last merged it (the stale-CI rule: update the branch, run CI again). Merges pinned to the head
-# commit that was checked. It fails closed: anything it cannot read is a refusal, never a pass. Run it from inside the checkout (see lib.sh).
+# The merge gate requires finished checks, both Python CI jobs on the head, a completed Kody review, and resolved review threads. It also enforces green
+# base CI (unless the PR repairs the base), the closing-keyword rule, and the overlap rule. It merges only the head commit that it checked. Run it from the
+# checkout with jq installed (see lib.sh).
 #
 # Exit codes: 0 merged (or a dry run), 1 could not read the PR or the merge failed, 2 refused (checks, threads, a head that moved, a base branch with no verdict,
 # or a git/gh read that failed), 3 refused (overlap with the base branch), 4 refused (closing keywords), 5 refused (the base branch is red).
@@ -11,7 +10,7 @@
 # coordinator to judge; update the branch when in doubt.
 # Environment (all optional; ORCH_ROOT, ORCH_REPO, ORCH_BASE_BRANCH, ORCH_CI_WORKFLOW, ORCH_MIN_CHECKS and ORCH_STATE_DIR are in lib.sh):
 #   ORCH_MIN_CHECKS        required: the number of checks CI always starts for a PR; a PR that reports fewer is refused (see lib.sh)
-#   ORCH_IGNORE_CHECKS     check names, separated by ";", whose failure is not the PR's (a review bot that is down). Exact names; a name with ";" is not supported.
+#   ORCH_IGNORE_CHECKS     check names, separated by ";", exempt from the aggregate failure check. The Python and Kody proof is still required.
 #   ORCH_MAINFIX_OK=1      lets the one PR that turns a red base branch green merge
 #   ORCH_KEYWORDS_OK=1     allows closing keywords
 #   ORCH_DRY=1             stops before the merge and prints what it would do
@@ -19,14 +18,15 @@
 #   ORCH_MERGE_METHOD      merge (default), squash or rebase
 # shellcheck source=/dev/null
 . "$(dirname "$0")/lib.sh"
+# shellcheck source=/dev/null
+. "$OR_SCRIPT_DIR/pr-evidence.sh"
 n=$1; allow=$2
-[ -n "$n" ] || { echo "usage: safemerge.sh <pr> [--allow-overlap]" >&2; exit 1; }
-case "$n" in *[!0-9]*) echo "usage: safemerge.sh <pr number>" >&2; exit 1;; esac
+[[ "$n" =~ ^[1-9][0-9]*$ ]] || { echo "usage: safemerge.sh <pr> [--allow-overlap]" >&2; exit 1; }
 method=${ORCH_MERGE_METHOD:-merge}
 case "$method" in merge|squash|rebase) ;; *) echo "orch: ORCH_MERGE_METHOD must be merge, squash or rebase" >&2; exit 1;; esac
 git fetch -q origin || { echo "REFUSE #$n: could not fetch origin (a stale origin/$OR_BASE would hide an overlap)"; exit 2; }
 head=$(gh pr view "$n" --json headRefOid --jq .headRefOid) || exit 1
-[ -n "$head" ] || exit 1
+[[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "REFUSE #$n: could not read the full head SHA"; exit 2; }
 case "$head" in "$ORCH_EXPECT_HEAD"*) ;; *) echo "REFUSE #$n: the head moved to ${head:0:8}; it was ${ORCH_EXPECT_HEAD:0:8} when the wait began"; exit 2;; esac
 git fetch -q origin "pull/$n/head" || exit 1
 # One snapshot of the checks: the first line is the pending count, the second the total, the rest the names of the failing ones.
@@ -43,11 +43,14 @@ fails=$(printf '%s\n' "$failnames" | awk 'NF { s = s (n++ ? "; " : "") $0 } END 
 [ "$pending" = "0" ] || { echo "REFUSE #$n: $pending checks pending"; exit 2; }
 [ "$total" -ge "$OR_MIN_CHECKS" ] || { echo "REFUSE #$n: only $total checks have reported (at least $OR_MIN_CHECKS expected)"; exit 2; }
 [ -z "$fails" ] || { echo "REFUSE #$n: failing: $fails"; exit 2; }
-q="query{repository(owner:\"$OR_OWNER\",name:\"$OR_NAME\"){pullRequest(number:$n){reviewThreads(first:100){totalCount nodes{isResolved}}}}}"
-u=$(gh api graphql -f query="$q" --jq 'if .data.repository.pullRequest.reviewThreads.totalCount > 100 then "many" else ([.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)]|length) end')
+or_pr_ci_green "$n" "$head" || { echo "REFUSE #$n: latest PR CI attempt has no readable successful Python 3.14 and 3.15 jobs on ${head:0:8}"; exit 2; }
+review=$(or_kody_review_complete "$n" "$head") || { echo "REFUSE #$n: no verified completed Kody review for ${head:0:8}"; exit 2; }
+u=$(or_pr_threads "$n" "$head" "$review") || { echo "REFUSE #$n: could not read the review threads"; exit 2; }
 case "$u" in
   0) ;;
+  moved) echo "REFUSE #$n: the head moved during the merge check"; exit 2;;
   many) echo "REFUSE #$n: more than 100 review threads; the gate cannot count them all"; exit 2;;
+  unanswered) echo "REFUSE #$n: the cadence skip has review threads without a reply"; exit 2;;
   ''|*[!0-9]*) echo "REFUSE #$n: could not read the review threads"; exit 2;;
   *) echo "REFUSE #$n: $u unresolved threads"; exit 2;;
 esac
@@ -67,6 +70,7 @@ if [ -n "$overlap" ] && [ "$allow" != "--allow-overlap" ]; then
 fi
 kw=$( { gh pr view "$n" --json body --jq .body; git log --format=%B "$base..$head"; } | grep -oiE '\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #[0-9]+' | sort -u | tr '\n' ' ')
 [ -n "$kw" ] && [ -z "$ORCH_KEYWORDS_OK" ] && { echo "REFUSE #$n: closing keywords would close issues before they are verified: $kw (edit the body or commits to say Refs, or ORCH_KEYWORDS_OK=1)"; exit 4; }
+latest_head=$(gh pr view "$n" --json headRefOid --jq .headRefOid) && [ "$latest_head" = "$head" ] || { echo "REFUSE #$n: could not confirm that the head is still ${head:0:8}"; exit 2; }
 [ -n "$ORCH_DRY" ] && { echo "DRY #$n: would merge ${head:0:8}"; exit 0; }
 gh pr merge "$n" "--$method" --match-head-commit "$head" || exit 1
 # Merged. Report the PR's own merge commit (not the base's tip, which a later merge may have moved); a failed lookup or fetch must not hide the merge.
