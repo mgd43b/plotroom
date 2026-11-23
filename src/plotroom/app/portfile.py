@@ -6,10 +6,12 @@ A client trusts the file only while the data-directory lock is held by the pid t
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
 import os
 import stat
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -27,10 +29,21 @@ class PublishedListener:
     port: int
     host: str | None
     local_socket: str | None = None
+    local_unavailable: bool = False
 
 
-def directory_identity(data_dir: Path) -> DirectoryIdentity:
-    info = data_dir.stat(follow_symlinks=False)
+@contextlib.contextmanager
+def pin_directory(data_dir: Path) -> Generator[int]:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(data_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def directory_identity(data_dir: Path | int) -> DirectoryIdentity:
+    info = os.fstat(data_dir) if isinstance(data_dir, int) else data_dir.stat(follow_symlinks=False)
     if not stat.S_ISDIR(info.st_mode):
         raise NotADirectoryError(f"not a data directory: {data_dir}")
     return info.st_dev, info.st_ino
@@ -58,7 +71,7 @@ def private_socket_directory(path: Path) -> bool:
     )
 
 
-def prepare_local_socket(data_dir: Path) -> Path:
+def prepare_local_socket(data_dir: Path | int) -> Path:
     path = local_socket_path(directory_identity(data_dir))
     path.parent.mkdir(mode=0o700, exist_ok=True)
     if not private_socket_directory(path.parent):
@@ -69,24 +82,48 @@ def prepare_local_socket(data_dir: Path) -> Path:
 
 
 def write_port(
-    data_dir: Path, port: int, *, host: str | None = None, local_socket: Path | None = None
+    data_dir: Path,
+    port: int,
+    *,
+    host: str | None = None,
+    local_socket: Path | None = None,
+    local_unavailable: bool = False,
+    directory_fd: int | None = None,
 ) -> None:
     """Publish this process's address atomically. Legacy callers may omit the host."""
-    data_dir.mkdir(parents=True, exist_ok=True)
-    target = data_dir / PORT_FILE_NAME
-    scratch = data_dir / f"{PORT_FILE_NAME}.{os.getpid()}.tmp"
-    fields: dict[str, str | int] = {"pid": os.getpid(), "port": port}
+    if directory_fd is None:
+        data_dir.mkdir(parents=True, exist_ok=True)
+    target = _publication_path(data_dir, directory_fd)
+    scratch = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    fields: dict[str, str | int | None] = {"pid": os.getpid(), "port": port}
     if host is not None:
         fields["host"] = host
     if local_socket is not None:
         fields["local_socket"] = str(local_socket)
-    scratch.write_text(json.dumps(fields), encoding="utf-8")
-    os.replace(scratch, target)
+    elif local_unavailable:
+        fields["local_socket"] = None
+    try:
+        with open(
+            scratch,
+            "w",
+            encoding="utf-8",
+            opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW, dir_fd=directory_fd),
+        ) as handle:
+            json.dump(fields, handle)
+        os.replace(scratch, target, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(scratch, dir_fd=directory_fd)
 
 
-def remove_port(data_dir: Path) -> None:
+def _publication_path(data_dir: Path, directory_fd: int | None) -> Path:
+    return data_dir / PORT_FILE_NAME if directory_fd is None else Path(PORT_FILE_NAME)
+
+
+def remove_port(data_dir: Path, *, directory_fd: int | None = None) -> None:
     """Delete the port file, if there is one."""
-    (data_dir / PORT_FILE_NAME).unlink(missing_ok=True)
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(_publication_path(data_dir, directory_fd), dir_fd=directory_fd)
 
 
 def read_port(data_dir: Path) -> tuple[int, int] | None:
@@ -98,7 +135,14 @@ def read_port(data_dir: Path) -> tuple[int, int] | None:
 def read_listener(data_dir: Path) -> PublishedListener | None:
     """Read the listener, with no host for legacy records or invalid addresses."""
     try:
-        decoded: Any = json.loads((data_dir / PORT_FILE_NAME).read_text(encoding="utf-8"))
+        with open(
+            data_dir / PORT_FILE_NAME,
+            encoding="utf-8",
+            opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK),
+        ) as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            decoded: Any = json.load(handle)
     except OSError, ValueError:
         return None
     if not isinstance(decoded, dict):
@@ -120,5 +164,9 @@ def read_listener(data_dir: Path) -> PublishedListener | None:
         return PublishedListener(pid, port, None)
     local_socket = fields.get("local_socket")
     return PublishedListener(
-        pid, port, host, local_socket if isinstance(local_socket, str) else None
+        pid,
+        port,
+        host,
+        local_socket if isinstance(local_socket, str) else None,
+        local_unavailable="local_socket" in fields and local_socket is None,
     )

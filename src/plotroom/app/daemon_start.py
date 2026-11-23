@@ -104,18 +104,18 @@ def start_daemon(
         )
 
 
-async def endpoint_ready(endpoint: LocalEndpoint, *, within: float = _PROBE_TIMEOUT) -> bool:
-    """The verified peer accepts the configured Host and requires authentication."""
+async def probe_status(endpoint: LocalEndpoint, *, within: float = _PROBE_TIMEOUT) -> int | None:
+    """Read the bodyless readiness response from the verified peer."""
     if within <= 0:
-        return False
+        return None
     try:
         async with (
             asyncio.timeout(min(within, _PROBE_TIMEOUT)),
             endpoint.stream("HEAD") as response,
         ):
-            return response.status_code == 401
+            return response.status_code
     except httpx.HTTPError, OSError, TimeoutError:
-        return False
+        return None
 
 
 def logged_reason(log_path: Path, since: int) -> str | None:
@@ -243,6 +243,8 @@ class DaemonLocation:
         published = self._publication()
         if published is None or published.host is None or self.identity is None:
             return None
+        if published.local_unavailable:
+            raise UpstreamStartError("the running plotroom serve has no private local listener")
         socket_path = local_socket_path(self.identity)
         if published.local_socket != str(socket_path) or not private_socket_directory(
             socket_path.parent
@@ -273,8 +275,16 @@ class DaemonLocation:
 
 
 async def _ready_endpoint(location: DaemonLocation, within: float) -> LocalEndpoint | None:
+    deadline = time.monotonic() + min(within, _PROBE_TIMEOUT)
     endpoint = await location.current_endpoint()
-    if endpoint is None or not await endpoint_ready(endpoint, within=within):
+    if endpoint is None:
+        return None
+    status = await probe_status(endpoint, within=deadline - time.monotonic())
+    published_host = urlsplit(endpoint.url).netloc
+    if status == 421 and endpoint.host != published_host:
+        endpoint = replace(endpoint, host=published_host)
+        status = await probe_status(endpoint, within=deadline - time.monotonic())
+    if status != 401:
         return None
     return endpoint if endpoint == await location.current_endpoint() else None
 

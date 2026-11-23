@@ -21,8 +21,9 @@ class DataDirLock:
     The kernel drops the lock when the owning process exits, however it exits.
     """
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, *, directory_fd: int | None = None) -> None:
         self._path = data_dir / LOCK_FILE_NAME
+        self._directory_fd = directory_fd
         self._file: IO[str] | None = None
 
     @property
@@ -30,8 +31,14 @@ class DataDirLock:
         return self._path
 
     def acquire(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self._path.open("a+", encoding="utf-8")
+        if self._directory_fd is None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(  # noqa: SIM115 - release() closes the handle after dropping the lock.
+            self._path,
+            "a+",
+            encoding="utf-8",
+            opener=self._open_at if self._directory_fd is not None else None,
+        )
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -47,6 +54,9 @@ class DataDirLock:
         handle.write(str(os.getpid()))
         handle.flush()
         self._file = handle
+
+    def _open_at(self, _path: str, flags: int) -> int:
+        return os.open(LOCK_FILE_NAME, flags | os.O_NOFOLLOW, dir_fd=self._directory_fd)
 
     def release(self) -> None:
         if self._file is not None:

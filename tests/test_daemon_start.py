@@ -31,10 +31,10 @@ from plotroom.app.daemon_start import (
     LOG_FILE_NAME,
     DaemonLocation,
     daemon_env,
-    endpoint_ready,
     ensure_daemon,
     lock_owner,
     logged_reason,
+    probe_status,
     serve_command,
     start_daemon,
 )
@@ -283,7 +283,7 @@ async def test_readiness_requires_a_401_from_the_verified_peer(
         os.getpid() if matches else os.getppid(),
     )
     async with server:
-        assert await endpoint_ready(endpoint) is expected
+        assert (await probe_status(endpoint) == 401) is expected
         received = await asyncio.wait_for(requests.get(), WAIT)
     if matches:
         assert received.startswith(b"HEAD /mcp HTTP/1.1\r\n")
@@ -302,7 +302,7 @@ async def test_the_verified_probe_is_bounded_when_the_peer_stalls(tmp_path: Path
     )
     async with server:
         async with asyncio.timeout(5):
-            assert await endpoint_ready(endpoint, within=0.3) is False
+            assert await probe_status(endpoint, within=0.3) is None
             assert (await requests.get()).startswith(b"HEAD /mcp ")
 
 
@@ -315,7 +315,7 @@ async def test_a_reconnect_sends_no_http_to_a_different_peer_at_the_same_path(
     )
     server, _ = await answer_on_unix(path, http_reply("401 Unauthorized", ""))
     async with server:
-        assert await endpoint_ready(endpoint)
+        assert await probe_status(endpoint) == 401
     script = dedent("""\
         import socket
         import sys
@@ -630,22 +630,34 @@ async def test_the_proxy_selects_the_requested_project_token_by_id(
 
 
 @pytest.mark.parametrize(
-    ("server_host", "alias", "pattern"),
+    ("server_host", "alias", "client_pattern", "server_pattern"),
     [
-        ("localhost", "localhost", "localhost:*"),
-        ("127.0.0.1", "LOCALHOST", "localhost"),
-        ("127.0.0.1", "127.0.0.2", "127.0.0.2:*"),
-        ("127.0.0.1", "::1", "[::1]:*"),
+        ("localhost", "localhost", "localhost:*", "localhost:*"),
+        ("127.0.0.1", "LOCALHOST", "localhost", "localhost"),
+        ("127.0.0.1", "127.0.0.2", "127.0.0.2:*", "127.0.0.2:*"),
+        ("127.0.0.1", "::1", "[::1]:*", "[::1]:*"),
+        ("127.0.0.1", "127.0.0.2", "127.0.0.2:*", "127.0.0.1:*"),
     ],
 )
-async def test_the_proxy_preserves_an_explicitly_allowed_loopback_header(
-    tmp_path: Path, data_dir: Path, server_host: str, alias: str, pattern: str
+async def test_loopback_host_aliases_preserve_or_fall_back_to_an_allowed_host(
+    tmp_path: Path,
+    data_dir: Path,
+    server_host: str,
+    alias: str,
+    client_pattern: str,
+    server_pattern: str,
 ) -> None:
-    shared = f'data_dir = "data"\nport = 0\nallowed_hosts = ["{pattern}"]\n[projects.demo]\n'
+    shared = 'data_dir = "data"\nport = 0\n[projects.demo]\n'
     server_path = tmp_path / "serve.toml"
-    server_path.write_text(f'host = "{server_host}"\n{shared}', encoding="utf-8")
+    server_path.write_text(
+        f'host = "{server_host}"\nallowed_hosts = ["{server_pattern}"]\n{shared}',
+        encoding="utf-8",
+    )
     client_path = tmp_path / "connect.toml"
-    client_path.write_text(f'host = "{alias}"\n{shared}', encoding="utf-8")
+    client_path.write_text(
+        f'host = "{alias}"\nallowed_hosts = ["{client_pattern}"]\n{shared}',
+        encoding="utf-8",
+    )
     server = start_plotroom("serve", "--config", str(server_path))
     try:
         server.wait_for_log("serving")
@@ -780,8 +792,15 @@ async def test_a_local_bearer_is_not_sent_to_a_foreign_listener_on_a_fixed_port(
     assert requests == []
 
 
-async def test_a_running_pre_upgrade_daemon_requires_restart_without_sending_a_probe(
-    tmp_path: Path, data_dir: Path
+@pytest.mark.parametrize(
+    ("private_unavailable", "message"),
+    [
+        (False, "restart the running plotroom serve"),
+        (True, "the running plotroom serve has no private local listener"),
+    ],
+)
+async def test_a_running_daemon_without_a_private_socket_receives_no_probe(
+    tmp_path: Path, data_dir: Path, private_unavailable: bool, message: str
 ) -> None:
     requests: list[bytes] = []
 
@@ -796,9 +815,9 @@ async def test_a_running_pre_upgrade_daemon_requires_restart_without_sending_a_p
         config = write_config(tmp_path, port=port)
         TokenRegistry(data_dir).issue("demo", "orchestrator")
         with DataDirLock(data_dir):
-            write_port(data_dir, port, host="127.0.0.1")
+            write_port(data_dir, port, host="127.0.0.1", local_unavailable=private_unavailable)
             proxy = await spawn_proxy("--config", str(config))
-            assert "restart the running plotroom serve" in await first_error(proxy, "modern")
+            assert message in await first_error(proxy, "modern")
     assert requests == []
     assert not (data_dir / LOG_FILE_NAME).exists()
 
@@ -942,9 +961,13 @@ async def test_a_daemon_that_cannot_start_is_reported_with_its_reason(
 
 
 @pytest.mark.parametrize("era", ERAS)
+@pytest.mark.parametrize("nonregular_publication", [False, True])
 async def test_something_else_on_the_port_is_reported_and_not_proxied_to(
-    tmp_path: Path, data_dir: Path, era: str
+    tmp_path: Path, data_dir: Path, era: str, nonregular_publication: bool
 ) -> None:
+    if nonregular_publication:
+        await asyncio.to_thread(data_dir.mkdir)
+        os.mkfifo(data_dir / PORT_FILE_NAME)
     with socket.socket() as foreign:
         foreign.bind(("127.0.0.1", 0))
         foreign.listen()

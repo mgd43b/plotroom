@@ -18,7 +18,7 @@ import struct
 import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, BinaryIO, Protocol, cast
 from urllib.parse import urlsplit, urlunsplit
 
@@ -65,7 +65,7 @@ class LocalEndpoint:
     """The lock owner's published endpoint, verified on each Unix connection before HTTP writes."""
 
     url: str
-    host: str
+    host: str = field(compare=False)  # Readiness may choose another Host on the same listener.
     socket_path: str
     pid: int
 
