@@ -25,6 +25,7 @@ Verify: Pushing to a PR moves its head SHA in the projection once, and closing a
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
+- Built: https://github.com/mgd43b/plotroom/pull/145
 
 ## Notes
 

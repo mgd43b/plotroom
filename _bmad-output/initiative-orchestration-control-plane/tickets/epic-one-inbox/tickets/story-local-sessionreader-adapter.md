@@ -25,6 +25,7 @@ Verify: On a machine running the Claude desktop app, a lane's turn end appears o
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
+- Built: https://github.com/mgd43b/plotroom/pull/145
 
 ## Notes
 

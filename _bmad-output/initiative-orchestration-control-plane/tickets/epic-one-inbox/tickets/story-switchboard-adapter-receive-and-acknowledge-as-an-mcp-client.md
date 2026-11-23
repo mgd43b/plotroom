@@ -26,6 +26,7 @@ Verify: The scripted participant's message to plotroom becomes one event on the 
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
 - architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-10
+- Built: https://github.com/mgd43b/plotroom/pull/145
 
 ## Notes
 

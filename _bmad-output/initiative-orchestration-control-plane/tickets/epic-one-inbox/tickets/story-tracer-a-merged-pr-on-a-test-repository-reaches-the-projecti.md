@@ -27,6 +27,7 @@ Verify: Against the test repository, opening and merging a PR produces each gith
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
 - architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-2
 - architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-16
+- Built: https://github.com/mgd43b/plotroom/pull/145
 
 ## Notes
 
