@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -268,6 +269,24 @@ async def test_cancelling_during_uvicorns_own_shutdown_waits_for_it_and_keeps_th
     again = Daemon(config)  # and it is free once the shutdown has completed
     task2, _ = await run_daemon(again)
     await stop(again, task2)
+
+
+async def test_project_teardown_uses_the_original_sigint_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_handler = signal.getsignal(signal.SIGINT)
+    close_handlers: list[object] = []
+    close = SqliteStore.close
+
+    async def record_handler(store: SqliteStore) -> None:
+        close_handlers.append(signal.getsignal(signal.SIGINT))
+        await close(store)
+
+    monkeypatch.setattr(SqliteStore, "close", record_handler)
+    daemon = Daemon(make_config(tmp_path))
+    task, _ = await run_daemon(daemon)
+    await stop(daemon, task)
+    assert close_handlers == [original_handler]
 
 
 async def test_the_bound_port_is_published_with_the_pid_and_answers(tmp_path: Path) -> None:

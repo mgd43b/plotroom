@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import signal
 import sqlite3
+import threading
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import uvicorn
@@ -41,9 +44,26 @@ class _Server(uvicorn.Server):
     _shutdown_task: asyncio.Task[None] | None = None
 
     @contextlib.contextmanager
-    def capture_signals(self) -> Generator[None]:
-        # Daemon.run keeps uvicorn's signal capture active through the whole teardown.
-        yield
+    def defer_sigterm(self) -> Generator[None]:
+        """Hold SIGTERM until the daemon is done, including when uvicorn replays it."""
+        if threading.current_thread() is not threading.main_thread():
+            yield
+            return
+
+        received = False
+
+        def defer(_signal: int, _frame: FrameType | None) -> None:
+            nonlocal received
+            received = True
+            self.should_exit = True
+
+        previous = signal.signal(signal.SIGTERM, defer)
+        try:
+            yield
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+            if received:
+                signal.raise_signal(signal.SIGTERM)
 
     def shutdown_task(self, sockets: Any = None) -> asyncio.Task[None]:
         """The one task that shuts uvicorn down, started on first use by whoever needs it."""
@@ -162,9 +182,9 @@ class Daemon:
                     access_log=False,
                 )
                 self._server = _Server(uvicorn_config, self._started, config.data_dir)
-                # Uvicorn replays captured signals when its context exits. Do that after the
-                # listener and projects have closed and the data directory lock is released.
-                signals.enter_context(uvicorn.Server.capture_signals(self._server))
+                # Defer the SIGTERM uvicorn replays until the projects have closed and the lock
+                # is released. Uvicorn still restores and replays SIGINT on its usual schedule.
+                signals.enter_context(self._server.defer_sigterm())
                 serving = asyncio.ensure_future(self._announce())
                 try:
                     await self._server.serve()
