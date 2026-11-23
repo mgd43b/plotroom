@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "65"
 remote: "https://github.com/mgd43b/plotroom/issues/65"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Flake candidates on PRs and on main

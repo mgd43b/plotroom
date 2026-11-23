@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "64"
 remote: "https://github.com/mgd43b/plotroom/issues/64"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Rule 2: unresolved review threads
