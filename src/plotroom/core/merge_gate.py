@@ -18,7 +18,6 @@ from plotroom.core.github_projection import (
     THREADS,
     GitHubRecord,
     GitHubResource,
-    latest_checks,
     unresolved_threads,
 )
 from plotroom.core.merge_flakes import FAILURES as MAIN_FAILURES
@@ -131,7 +130,8 @@ def _projection_reason(
     return None
 
 
-def _check_buckets(checks: GitHubResource, head_sha: str) -> dict[str, str] | None:
+def _check_buckets(checks: GitHubResource, head_sha: str) -> list[tuple[str, str]] | None:
+    latest: dict[tuple[str, int | None, int | None], GitHubRecord] = {}
     for check in checks.records:
         fields = check.fields
         if (
@@ -143,8 +143,17 @@ def _check_buckets(checks: GitHubResource, head_sha: str) -> dict[str, str] | No
             or fields.get("head_sha") != head_sha
         ):
             return None
-    buckets: dict[str, str] = {}
-    for check in latest_checks(checks):
+        app_id = check.details.get("app_id")
+        # Unidentified runs cannot establish that they supersede one another.
+        if type(app_id) is int and app_id > 0:
+            key = (fields["name"], app_id, None)
+        else:
+            key = (fields["name"], None, fields["id"])
+        prior = latest.get(key)
+        if prior is None or fields["id"] > prior.fields["id"]:
+            latest[key] = check
+    buckets: list[tuple[str, str]] = []
+    for check in latest.values():
         status, conclusion = check.fields.get("status"), check.fields.get("conclusion")
         if not isinstance(status, str) or (
             conclusion is not None and not isinstance(conclusion, str)
@@ -162,7 +171,7 @@ def _check_buckets(checks: GitHubResource, head_sha: str) -> dict[str, str] | No
             bucket = "fail"
         else:
             return None
-        buckets[check.fields["name"]] = bucket
+        buckets.append((check.fields["name"], bucket))
     return buckets
 
 
@@ -175,19 +184,18 @@ def _rule_checks(snapshot: GateSnapshot, policy: GatePolicy, now: datetime) -> G
     buckets = _check_buckets(checks, pull.head_sha)
     if buckets is None:
         return GateReason("checks_unreadable", "could not read the checks")
-    pending = sum(bucket == "pending" for bucket in buckets.values())
+    pending = sum(bucket == "pending" for _, bucket in buckets)
     if pending:
         return GateReason("checks_pending", f"{pending} checks pending")
     minimum = policy.min_checks
-    if minimum is not None and len(buckets) < minimum:
+    total = len({name for name, _ in buckets})
+    if minimum is not None and total < minimum:
         return GateReason(
             "checks_below_minimum",
-            f"only {len(buckets)} checks have reported (at least {minimum} expected)",
+            f"only {total} checks have reported (at least {minimum} expected)",
         )
     failures = sorted(
-        name
-        for name, bucket in buckets.items()
-        if bucket == "fail" and name not in policy.ignore_checks
+        {name for name, bucket in buckets if bucket == "fail" and name not in policy.ignore_checks}
     )
     if failures:
         return GateReason("checks_failing", f"failing: {'; '.join(failures)}")

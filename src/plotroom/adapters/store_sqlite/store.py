@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from sqlalchemy.pool import ConnectionPoolEntry
 
 from plotroom.adapters.store_sqlite import github_sql, outbox_sql, triggers_sql
-from plotroom.adapters.store_sqlite.actions_sql import pending_action
+from plotroom.adapters.store_sqlite.actions_sql import pending_actions
 from plotroom.adapters.store_sqlite.claims_sql import count_claims, read_claims
 from plotroom.adapters.store_sqlite.items_sql import (
     first_change,
@@ -33,7 +33,7 @@ from plotroom.adapters.store_sqlite.ledger_sql import (
 )
 from plotroom.adapters.store_sqlite.migrate import upgrade_to_head
 from plotroom.adapters.store_sqlite.work_items_sql import ready_work_items
-from plotroom.core.actions import Action
+from plotroom.core.actions import Action, QueuedAction
 from plotroom.core.claims import Claim
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
@@ -279,12 +279,16 @@ class SqliteStore:
         async with self._engine.connect() as connection:
             return await ready_work_items(connection)
 
-    async def pending_action(
-        self, *, skip_keys: tuple[str, ...] = (), skip_branch_updates: bool = False
-    ) -> Action | None:
+    async def pending_action(self) -> Action | None:
+        page = await self.pending_actions(after=0, limit=1)
+        return page[0].action if page else None
+
+    async def pending_actions(
+        self, *, after: int, limit: int, skip_branch_updates: bool = False
+    ) -> tuple[QueuedAction, ...]:
         async with self._engine.connect() as connection:
-            return await pending_action(
-                connection, skip_keys=skip_keys, skip_branch_updates=skip_branch_updates
+            return await pending_actions(
+                connection, after=after, limit=limit, skip_branch_updates=skip_branch_updates
             )
 
     async def outbox_readiness(self, now: str) -> OutboxReadiness:

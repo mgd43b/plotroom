@@ -30,7 +30,14 @@ HEAD = "1" * 40
 PULL = PullRequest(REPOSITORY, 4, "branch", HEAD, REPOSITORY, "open", AS_OF, AS_OF, True, 1)
 
 
-def check(check_id: int, name: str, conclusion: str | None, head: str = HEAD) -> GitHubRecord:
+def check(
+    check_id: int,
+    name: str,
+    conclusion: str | None,
+    head: str = HEAD,
+    *,
+    app_id: int | None = 1,
+) -> GitHubRecord:
     return GitHubRecord(
         str(check_id),
         "check_run",
@@ -41,6 +48,7 @@ def check(check_id: int, name: str, conclusion: str | None, head: str = HEAD) ->
             "status": "completed" if conclusion else "in_progress",
             "conclusion": conclusion,
         },
+        details={"app_id": app_id} if app_id is not None else {},
     )
 
 
@@ -64,6 +72,54 @@ def check(check_id: int, name: str, conclusion: str | None, head: str = HEAD) ->
             "only 1 checks have reported (at least 2 expected)",
         ),
         ((check(2, "lint", "success"), check(1, "lint", "failure")), 1, (), None, 0, ""),
+        (
+            (check(1, "lint", "failure", app_id=1), check(2, "lint", "success", app_id=2)),
+            1,
+            (),
+            "checks_failing",
+            2,
+            "failing: lint",
+        ),
+        (
+            (check(1, "lint", "success", app_id=1), check(2, "lint", "success", app_id=2)),
+            2,
+            (),
+            "checks_below_minimum",
+            2,
+            "only 1 checks have reported (at least 2 expected)",
+        ),
+        (
+            (check(1, "lint", None, app_id=1), check(2, "lint", "success", app_id=2)),
+            1,
+            ("lint",),
+            "checks_pending",
+            2,
+            "1 checks pending",
+        ),
+        (
+            (check(1, "lint", "failure", app_id=None), check(2, "lint", "success", app_id=None)),
+            1,
+            (),
+            "checks_failing",
+            2,
+            "failing: lint",
+        ),
+        (
+            (check(1, "lint", "failure", app_id=1), check(2, "lint", "success", app_id=None)),
+            1,
+            (),
+            "checks_failing",
+            2,
+            "failing: lint",
+        ),
+        (
+            (check(1, "lint", "success", app_id=None), check(2, "lint", "success", app_id=None)),
+            2,
+            (),
+            "checks_below_minimum",
+            2,
+            "only 1 checks have reported (at least 2 expected)",
+        ),
         (
             (
                 check(1, "review", "failure"),

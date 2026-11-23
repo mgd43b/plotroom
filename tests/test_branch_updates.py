@@ -10,8 +10,13 @@ from plotroom.adapters.github.pull_comparison import fetch_pull_comparison
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.app.runtime import ProjectRuntime
-from plotroom.core.actions import Action
-from plotroom.core.branch_updates import BRANCH_UPDATE_CONFLICT, BRANCH_UPDATE_STAGED
+from plotroom.core.actions import ACTION_PAGE_SIZE, Action
+from plotroom.core.branch_updates import (
+    BRANCH_UPDATE_CONFLICT,
+    BRANCH_UPDATE_STAGED,
+    BranchUpdate,
+    stage_branch_update,
+)
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import NewEvent, format_time
 from plotroom.core.github import PULL_REQUESTS, FetchCursor, PullRequest
@@ -222,7 +227,7 @@ async def observe(
 
 
 @pytest.mark.parametrize(
-    "after", ["unchanged", "moved", "closed", "main_moved", "main_moved_after_crash"]
+    "after", ["unchanged", "moved", "closed", "merged", "main_moved", "main_moved_after_crash"]
 )
 async def test_conflict_survives_lost_response_and_restart(tmp_path: Path, after: str) -> None:
     clock, port = FixedClock(), FixtureWrite(lose_response=True)
@@ -265,8 +270,8 @@ async def test_conflict_survives_lost_response_and_restart(tmp_path: Path, after
     try:
         if after == "moved":
             await observe(ledger, head=NEXT, branch="other", main=NEXT, version=2)
-        elif after == "closed":
-            await observe(ledger, state="closed", main=NEXT, version=2)
+        elif after in {"closed", "merged"}:
+            await observe(ledger, state=after, main=NEXT, version=2)
         elif after in {"main_moved", "main_moved_after_crash"}:
             port.current_main = NEXT
             await observe(ledger, main=NEXT, overlap=False)
@@ -363,6 +368,58 @@ async def test_lookup_failure_preserves_the_write_attempt(tmp_path: Path) -> Non
         assert await runtime.run_one_action()
         assert await ledger.pending_action() is None
         assert port.calls == [KEY]
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+async def test_deferred_queue_pages_allow_unrelated_work(tmp_path: Path) -> None:
+    port = FixtureWrite()
+    store, ledger, runtime = await setup(tmp_path, FixedClock(), port, lane=False)
+    updates = [
+        BranchUpdate(REPO, 7, "work", f"{index:040x}", TIP)
+        for index in range(ACTION_PAGE_SIZE * 2 + 1)
+    ]
+    ordinary_calls: list[str] = []
+
+    async def ordinary(action: Action) -> None:
+        ordinary_calls.append(action.kind)
+
+    async def enqueue(uow: UnitOfWork) -> None:
+        for update in updates:
+            await stage_branch_update(uow, update)
+        cause = (await uow.append(NewEvent("core", "core.tick", "after-deferred-pages"))).event
+        await uow.enqueue_action(cause, "ordinary", {})
+
+    try:
+        runtime.handlers = {"ordinary": ordinary}
+        await ledger.run("system", enqueue)
+        assert await runtime.run_one_action()
+        assert ordinary_calls == ["ordinary"]
+        assert port.lookups == [update.key for update in updates]
+        assert not port.calls
+        assert (first := await ledger.pending_action()) is not None
+        assert first.key == updates[0].key
+        assert first == await store.pending_action()
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+async def test_merged_pull_retires_only_after_receipt_is_confirmed_absent(tmp_path: Path) -> None:
+    port = FixtureWrite(fail_lookup=True)
+    store, ledger, runtime = await setup(tmp_path, FixedClock(), port, lane=False)
+    try:
+        await observe(ledger)
+        assert await runtime.stage_branch_update(7)
+        await observe(ledger, state="merged", version=2)
+        assert not await runtime.run_one_action()
+        assert await ledger.pending_action() is not None
+        assert await runtime.run_one_action()
+        assert await ledger.pending_action() is None
+        assert port.lookups == [KEY, KEY]
+        assert not port.calls
+        assert not (await ledger.read_board("orchestrator"))[1]
     finally:
         await ledger.stop()
         await store.close()

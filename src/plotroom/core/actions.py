@@ -12,6 +12,7 @@ FAILED_ACTION = "failed_action"
 BRANCH_UPDATE = "branch_update"
 SWITCHBOARD_SEND = "switchboard.send"
 ACTION_FIELDS = (FieldSpec("action_key", "str"), FieldSpec("attempt", "int"))
+ACTION_PAGE_SIZE = 32
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,12 @@ class Action:
     payload: dict[str, Any]
     attempts: int = 0
     state: str = "pending"
+
+
+@dataclass(frozen=True)
+class QueuedAction:
+    position: int
+    action: Action
 
 
 async def record_attempt(uow: UnitOfWork, action: Action) -> Action:

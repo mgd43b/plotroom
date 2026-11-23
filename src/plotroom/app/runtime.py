@@ -106,16 +106,17 @@ class ProjectRuntime:
 
     async def run_one_action(self) -> bool:
         async with self._action_lock:
-            skipped: list[str] = []
+            after = 0
             while True:
-                action = await self.ledger.pending_action(
-                    skip_keys=tuple(skipped), skip_branch_updates=self.fixture_github_write is None
+                page = await self.ledger.pending_actions(
+                    after=after, skip_branch_updates=self.fixture_github_write is None
                 )
-                if action is None:
+                if not page:
                     return False
-                if await self._run_action(action):
-                    return True
-                skipped.append(action.key)
+                for entry in page:
+                    if await self._run_action(entry.action):
+                        return True
+                after = page[-1].position
 
     async def _run_action(self, action: Action) -> bool:
         if action.attempts >= self.action_attempts and action.kind != BRANCH_UPDATE:
@@ -198,6 +199,9 @@ class ProjectRuntime:
                 log.warning("fixture branch update receipt lookup failed")
                 raise _BranchUpdateDeferred from exc
             if receipt is None:
+                if pull is not None and pull.complete and pull.state == "merged":
+                    await finish_action(uow, action, "done")
+                    return
                 if exhausted and eligible:
                     await finish_action(uow, action, "failed")
                     return

@@ -67,6 +67,7 @@ Given two overlapping-file observations for the same head, including across rest
 - Native review, fixed. A recovery-only fixture lookup can reconcile a recorded conflict after main advances on the same PR head, including when the process exited before recording a local attempt. A deploy freeze defers all dispatch.
 - Native follow-up, fixed. A failed receipt lookup defers the key without consuming a write attempt. The fixture verifies that a previously blocked action can still execute after eligibility returns.
 - Final focused review, fixed. A successful lookup also avoids re-counting a previously recorded attempt. A receipt recovered after a crash supplies the first attempt when the local write count is zero.
+- Opening Kodus review, fixed. Pending actions use fixed 32-row cursor pages. A completely observed merged PR can retire after a lookup confirms that it has no receipt. Closed or moved PRs preserve the possibility of a later same-head update.
 
 - Medium, fixed. Compare provider repository names case-insensitively.
 - High, fixed. Recover a known fixture conflict after PR identity changes without applying another update. Keep the originally checked main SHA and routing information.

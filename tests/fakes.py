@@ -12,11 +12,12 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
 from plotroom.adapters.store_sqlite import SqliteStore
-from plotroom.core.actions import BRANCH_UPDATE, Action
+from plotroom.core.actions import BRANCH_UPDATE, Action, QueuedAction
 from plotroom.core.catalog import Catalog
 from plotroom.core.claims import OVERLAP_KINDS, Claim
 from plotroom.core.commands import Command, CommandError, CommandRegistry
@@ -586,21 +587,21 @@ class MemoryStore:
         found = next((i for i in self._changes if i.seq > cursor and visible(i, role)), None)
         return self._seq, asdict(found) if found is not None else None
 
-    async def pending_action(
-        self, *, skip_keys: tuple[str, ...] = (), skip_branch_updates: bool = False
-    ) -> Action | None:
-        return copy.deepcopy(
-            next(
-                (
-                    action
-                    for action in self._actions.values()
-                    if action.state == "pending"
-                    and action.key not in skip_keys
-                    and (not skip_branch_updates or action.kind != BRANCH_UPDATE)
-                ),
-                None,
-            )
+    async def pending_action(self) -> Action | None:
+        page = await self.pending_actions(after=0, limit=1)
+        return page[0].action if page else None
+
+    async def pending_actions(
+        self, *, after: int, limit: int, skip_branch_updates: bool = False
+    ) -> tuple[QueuedAction, ...]:
+        candidates = (
+            QueuedAction(position, action)
+            for position, action in enumerate(self._actions.values(), start=1)
+            if position > after
+            and action.state == "pending"
+            and (not skip_branch_updates or action.kind != BRANCH_UPDATE)
         )
+        return copy.deepcopy(tuple(islice(candidates, limit)))
 
     async def close(self) -> None:
         self.closed = True

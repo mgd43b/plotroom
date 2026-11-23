@@ -62,6 +62,7 @@ Given fixture check histories, when a clerk or orchestrator queries a PR, then p
 - Medium, fixed. The result includes the PR row timestamp in the watermark even when a more recent polling cursor exists.
 - Medium, fixed. Both supported protocols and transports now exercise a configured pending-check verdict with a check-derived watermark.
 - High, fixed. The Check Runs reader validates provider totals, so a missing page cannot leave a partial projection eligible.
+- Opening Kodus review, fixed. A run supersedes only earlier observations of the same name and confirmed app. Distinct names still determine the minimum.
 
 ## Verification
 

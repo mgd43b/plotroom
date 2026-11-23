@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Any, Protocol
 
-from plotroom.core.actions import Action
+from plotroom.core.actions import Action, QueuedAction
 from plotroom.core.claims import Claim
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
@@ -190,9 +190,11 @@ class Store(Protocol):
         self, role: str, cursor: int
     ) -> tuple[int, dict[str, Any] | None]: ...
 
-    async def pending_action(
-        self, *, skip_keys: tuple[str, ...] = (), skip_branch_updates: bool = False
-    ) -> Action | None: ...
+    async def pending_action(self) -> Action | None: ...
+
+    async def pending_actions(
+        self, *, after: int, limit: int, skip_branch_updates: bool = False
+    ) -> tuple[QueuedAction, ...]: ...
 
     async def outbox_readiness(self, now: str) -> OutboxReadiness: ...
 

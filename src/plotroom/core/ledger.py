@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
-from plotroom.core.actions import Action
+from plotroom.core.actions import ACTION_PAGE_SIZE, Action, QueuedAction
 from plotroom.core.catalog import Catalog
 from plotroom.core.claims import PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, Claim, sync_items
 from plotroom.core.commands import COMMAND_APPENDER, command_kind
@@ -90,11 +90,14 @@ class Ledger:
     def merge_gate_policy(self) -> GatePolicy:
         return self._merge_gate_policy
 
-    async def pending_action(
-        self, *, skip_keys: tuple[str, ...] = (), skip_branch_updates: bool = False
-    ) -> Action | None:
-        return await self._store.pending_action(
-            skip_keys=skip_keys, skip_branch_updates=skip_branch_updates
+    async def pending_action(self) -> Action | None:
+        return await self._store.pending_action()
+
+    async def pending_actions(
+        self, *, after: int, skip_branch_updates: bool
+    ) -> tuple[QueuedAction, ...]:
+        return await self._store.pending_actions(
+            after=after, limit=ACTION_PAGE_SIZE, skip_branch_updates=skip_branch_updates
         )
 
     @property
