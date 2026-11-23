@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import sqlite3
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,11 @@ class _Server(uvicorn.Server):
 
     _shutdown_task: asyncio.Task[None] | None = None
 
+    @contextlib.contextmanager
+    def capture_signals(self) -> Generator[None]:
+        # Daemon.run keeps uvicorn's signal capture active through the whole teardown.
+        yield
+
     def shutdown_task(self, sockets: Any = None) -> asyncio.Task[None]:
         """The one task that shuts uvicorn down, started on first use by whoever needs it."""
         if self._shutdown_task is None:
@@ -46,9 +52,7 @@ class _Server(uvicorn.Server):
         return self._shutdown_task
 
     async def _shut_down(self, sockets: Any) -> None:
-        # The port is no longer ours to publish. Done here, not only in ``Daemon.run``: after a
-        # SIGTERM uvicorn re-raises the signal as soon as it has shut down, which ends the process
-        # before ``Daemon.run`` gets to clean up.
+        # Stop publishing the listener as soon as it starts shutting down.
         with contextlib.suppress(OSError):
             remove_port(self._data_dir)
         await uvicorn.Server.shutdown(self, sockets)
@@ -134,7 +138,7 @@ class Daemon:
         config = self._config
         if self._started is None:
             self._started = asyncio.get_running_loop().create_future()
-        with DataDirLock(config.data_dir):
+        with contextlib.ExitStack() as signals, DataDirLock(config.data_dir):
             # Whatever an earlier daemon left behind is not this one's: gone before it binds.
             remove_port(config.data_dir)
             try:
@@ -158,6 +162,9 @@ class Daemon:
                     access_log=False,
                 )
                 self._server = _Server(uvicorn_config, self._started, config.data_dir)
+                # Uvicorn replays captured signals when its context exits. Do that after the
+                # listener and projects have closed and the data directory lock is released.
+                signals.enter_context(uvicorn.Server.capture_signals(self._server))
                 serving = asyncio.ensure_future(self._announce())
                 try:
                     await self._server.serve()

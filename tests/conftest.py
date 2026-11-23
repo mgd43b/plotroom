@@ -97,7 +97,7 @@ class Child:
             return self.process.wait(timeout=CHILD_TIMEOUT)
         except subprocess.TimeoutExpired:
             self.process.kill()
-            return self.process.wait()
+            return self.process.wait(timeout=CHILD_TIMEOUT)
 
 
 def start_plotroom(*args: str) -> Child:

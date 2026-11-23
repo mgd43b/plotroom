@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import signal
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ from mcp.client.client import Client
 from mcp.client.stdio import StdioServerParameters
 
 from conftest import Child, authenticated_client, start_plotroom, tool_json
+from plotroom.adapters.store_sqlite import head_revision
 from plotroom.app.cli import EXIT_CONFIG, EXIT_FAILURE, EXIT_LOCKED, main
 from plotroom.app.daemon_start import speaks_mcp
 from plotroom.app.portfile import PORT_FILE_NAME, read_port
@@ -85,8 +88,28 @@ def test_the_port_file_is_gone_after_the_server_is_stopped(
     child, _ = server
     port_file = config_path.parent / "data" / PORT_FILE_NAME
     assert port_file.exists()
-    child.stop()  # SIGTERM: uvicorn shuts down, then re-raises the signal, so the code is -15
+    child.stop()
     assert not port_file.exists()
+
+
+def test_sigterm_closes_the_open_project_file(server: tuple[Child, str], config_path: Path) -> None:
+    child, _ = server  # the serving log means migrations are committed and the store is open
+    project = config_path.parent / "data" / "demo.db"
+    wal = project.with_suffix(".db-wal")
+    shm = project.with_suffix(".db-shm")
+    assert wal.stat().st_size > 0
+    assert shm.exists()
+
+    assert child.stop() == -signal.SIGTERM
+
+    # Check before reopening SQLite, which could recover and remove the leftover files itself.
+    assert not wal.exists(), "the daemon exited without closing the project store"
+    assert not shm.exists()
+    with closing(sqlite3.connect(project)) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            head_revision(),
+        )
 
 
 def test_a_second_serve_on_the_same_directory_exits_with_the_lock_error(
