@@ -111,6 +111,8 @@ Third pass, 9 inline PR threads from a second review bot, all verified and patch
 
 Fourth pass, 3 inline PR threads on the previous fixes, all valid: the failed-migration test deleted the broken revision instead of retrying a repaired one (test now retries and checks revision 0002); over-limit refusals ignored writes left by cancelled requests (now counted); cancelling during uvicorn's own shutdown started a second shutdown (now guarded, test fails without it).
 
+Fifth pass, 1 inline PR thread on the previous shutdown fix, valid: a cancel during uvicorn's own shutdown still let `Daemon.run()` release the lock before that shutdown finished. Now one shielded shutdown task is shared and awaited, through further cancels, before the lock is released (test fails without it).
+
 ## Design Notes
 
 - Migrations live in the package (`adapters/store_sqlite/migrations/`), not the spine's root `migrations/`: a wheel must carry them. `alembic.ini` points there for `alembic revision`. Reported to the coordinator.

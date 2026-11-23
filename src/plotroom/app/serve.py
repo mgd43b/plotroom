@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import sqlite3
 from typing import Any
@@ -25,17 +26,31 @@ class _Server(uvicorn.Server):
         super().__init__(config)
         self._started_future = started
 
-    shutdown_begun = False
+    _shutdown_task: asyncio.Task[None] | None = None
+
+    def shutdown_task(self, sockets: Any = None) -> asyncio.Task[None]:
+        """The one task that shuts uvicorn down, started on first use by whoever needs it."""
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.ensure_future(uvicorn.Server.shutdown(self, sockets))
+        return self._shutdown_task
 
     async def shutdown(self, sockets: Any = None) -> None:
-        self.shutdown_begun = True
-        await super().shutdown(sockets=sockets)
+        # Shielded: a cancel must not abort a shutdown that is draining requests and lifespan
+        await asyncio.shield(self.shutdown_task(sockets))
 
     async def startup(self, sockets: Any = None) -> None:
         await super().startup(sockets=sockets)
         if self.started and not self._started_future.done():
             bound: Any = self.servers[0].sockets[0].getsockname()
             self._started_future.set_result(int(bound[1]))
+
+
+async def _finish(task: asyncio.Task[None]) -> None:
+    """Wait for ``task`` to complete, however many times this coroutine is cancelled meanwhile."""
+    while not task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(task)
+    task.result()
 
 
 class Daemon:
@@ -83,10 +98,10 @@ class Daemon:
             try:
                 await self._server.serve()
             except asyncio.CancelledError:
-                # uvicorn skips its own shutdown when the main loop is cancelled; one begun
-                # already (cancelled mid-shutdown) is not started a second time
-                if self._server.started and not self._server.shutdown_begun:
-                    await self._server.shutdown()
+                # uvicorn skips its own shutdown when its main loop is cancelled. Finish the one
+                # shutdown (begun by uvicorn or by us) before the lock is released.
+                if self._server.started:
+                    await _finish(self._server.shutdown_task())
                 raise
             finally:
                 serving.cancel()

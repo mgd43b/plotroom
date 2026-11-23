@@ -129,24 +129,35 @@ async def test_cancelling_the_daemon_closes_the_listener_before_the_lock_is_rele
     await stop(again, task2)
 
 
-async def test_cancelling_during_uvicorns_own_shutdown_does_not_shut_down_twice(
+async def test_cancelling_during_uvicorns_own_shutdown_waits_for_it_and_keeps_the_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = 0
     in_shutdown = asyncio.Event()
+    finish = asyncio.Event()
 
-    async def stuck_shutdown(self: uvicorn.Server, sockets: Any = None) -> None:
+    async def slow_shutdown(self: uvicorn.Server, sockets: Any = None) -> None:
         nonlocal calls
         calls += 1
         in_shutdown.set()
-        await asyncio.Event().wait()  # never finishes; only a cancel ends it
+        await finish.wait()  # stands in for draining requests and the app's lifespan
 
-    monkeypatch.setattr(uvicorn.Server, "shutdown", stuck_shutdown)
-    daemon = Daemon(make_config(tmp_path))
+    monkeypatch.setattr(uvicorn.Server, "shutdown", slow_shutdown)
+    config = make_config(tmp_path)
+    daemon = Daemon(config)
     task, _ = await run_daemon(daemon)
     daemon.stop()  # uvicorn starts its graceful shutdown
     await asyncio.wait_for(in_shutdown.wait(), timeout=30)
     task.cancel()
+    task.cancel()  # a second cancel must not cut the shutdown short either
+    await asyncio.sleep(0)
+    assert not task.done(), "the daemon must wait for the shutdown to finish"
+    with pytest.raises(LockError):  # the directory is still owned
+        await Daemon(config).run()
+    finish.set()
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=10)  # a second, stuck shutdown would hit the timeout
+        await asyncio.wait_for(task, timeout=30)
     assert calls == 1
+    again = Daemon(config)  # and it is free once the shutdown has completed
+    task2, _ = await run_daemon(again)
+    await stop(again, task2)
