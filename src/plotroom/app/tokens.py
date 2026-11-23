@@ -228,6 +228,17 @@ class TokenRegistry:
                 del entries[token_id]
                 _write(path, local_records)
 
+    async def has_role(self, project_id: str, role: str) -> bool:
+        """Check whether the instance has a token for the project role."""
+        try:
+            records = await asyncio.to_thread(_read_instance, self.path)
+        except OSError, TokenError:
+            return False
+        return any(
+            record["project"] == project_id and record["role"] == role
+            for record in records.values()
+        )
+
     async def authenticate(self, bearer: str) -> Identity | None:
         """Read the current atomic snapshot so the next request sees issue and revoke."""
         match = _BEARER.fullmatch(bearer)

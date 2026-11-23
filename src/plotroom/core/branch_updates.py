@@ -18,12 +18,15 @@ from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.ports.github_write import BranchUpdateReceipt
 
 BRANCH_UPDATE_STAGED = "core.branch_update_staged"
+BRANCH_UPDATED = "core.branch_updated"
 BRANCH_UPDATE_CONFLICT = "branch_update_conflict"
 BRANCH_UPDATE_FIELDS = (
     FieldSpec("repository", "str"),
     FieldSpec("number", "int"),
     FieldSpec("head_sha", "str"),
 )
+
+BRANCH_UPDATED_FIELDS = (*BRANCH_UPDATE_FIELDS, FieldSpec("main_sha", "str"))
 
 
 @dataclass(frozen=True)
@@ -46,7 +49,10 @@ def eligible_branch_update(
     labels = current_label_evidence(snapshot, policy, now)
     if (
         pull is None
+        or pull.draft is not False
         or pull.head_repository != pull.repository
+        or snapshot.earlier_pull is not None
+        or snapshot.ambiguous_lane
         or labels is None
         or (
             ALLOW_OVERLAP in labels.attributes["labels"]
@@ -100,5 +106,16 @@ async def complete_branch_update(
                 "main_sha": receipt.main_sha,
                 "lane": lane.id if lane is not None else None,
             },
+        )
+    else:
+        fields = {key: action.payload[key] for key in ("repository", "number", "head_sha")}
+        await uow.append(
+            NewEvent(
+                "core",
+                BRANCH_UPDATED,
+                action.key,
+                {**fields, "main_sha": receipt.main_sha},
+                f"BRANCH UPDATED #{fields['number']}",
+            )
         )
     await finish_action(uow, attempted, "done")

@@ -24,9 +24,18 @@ from plotroom.core.events import (
     format_time,
     validate_fields,
 )
-from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
-from plotroom.core.github_projection import GitHubResource
+from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, PullRequest
+from plotroom.core.github_projection import (
+    CHECKS,
+    LABELS,
+    MAIN,
+    MAIN_CI,
+    PULL_TEXT,
+    THREADS,
+    GitHubResource,
+)
 from plotroom.core.lanes import Lane
+from plotroom.core.merge_overlap import PULL_COMPARISON
 from plotroom.core.next_items import Item, ItemKind
 from plotroom.core.pull_overlaps import reconcile_pull_overlaps
 from plotroom.core.roles import role_family
@@ -70,6 +79,10 @@ class UnitOfWork:
         self._id_factory = id_factory
         self._claims_changed = False
         self._pulls_changed = False
+        self.all_merge_pulls = False
+        self.merge_pull_numbers: set[int] = set()
+        self.merge_check_heads: set[str] = set()
+        self.merge_observations: dict[int, tuple[PullRequest, bool]] = {}
 
     @property
     def role(self) -> str:
@@ -124,6 +137,9 @@ class UnitOfWork:
     async def branch_lane(self, branch: str) -> Lane | None:
         return await self._tx.branch_lane(branch)
 
+    async def active_lanes(self) -> list[Lane]:
+        return await self._tx.active_lanes()
+
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return await self._tx.pull_request(repository, number)
 
@@ -135,6 +151,7 @@ class UnitOfWork:
 
     async def set_deploy_freeze(self, reason: str | None) -> None:
         await self._tx.set_deploy_freeze(reason)
+        self.all_merge_pulls = True
 
     async def open_pulls(self, repository: str) -> tuple[PullRequest, ...]:
         return await self._tx.open_pulls(repository)
@@ -162,8 +179,23 @@ class UnitOfWork:
         if repository is not None:
             await reconcile_pull_overlaps(self, repository, tree_path, claims)
 
-    async def save_pull_request(self, pull: PullRequest) -> None:
+    async def latest_merge_verdict(self, repository: str, number: int) -> Event | None:
+        return await self._tx.latest_merge_verdict(repository, number)
+
+    async def save_merge_verdict(self, repository: str, number: int, seq: int) -> None:
+        await self._tx.save_merge_verdict(repository, number, seq)
+
+    async def save_pull_request(self, pull: PullRequest, *, historical: bool = False) -> None:
+        if pull.complete and pull.state == "merged" and not historical:
+            prior = await self._tx.pull_request(pull.repository, pull.number)
+            transition = prior is None or prior.state != "merged"
+            if transition or (
+                prior is not None and prior.merge_commit_sha != pull.merge_commit_sha
+            ):
+                self.merge_observations[pull.number] = (pull, transition)
         await self._tx.save_pull_request(pull)
+        self.merge_pull_numbers.add(pull.number)
+        self.all_merge_pulls = True  # branch membership may change the first PR on a lane
 
     async def github_resource(
         self, repository: str, resource: str, scope: str = ""
@@ -174,12 +206,20 @@ class UnitOfWork:
         self, repository: str, resource: str, scope: str, result: GitHubResource
     ) -> None:
         await self._tx.save_github_resource(repository, resource, scope, result)
+        if resource in (MAIN, MAIN_CI):
+            self.all_merge_pulls = True
+        elif resource == CHECKS:
+            self.merge_check_heads.add(scope)
+        elif resource in (LABELS, THREADS, PULL_COMPARISON, PULL_TEXT):
+            self.merge_pull_numbers.add(int(scope))
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         return await self._tx.fetch_cursor(repository, resource)
 
     async def save_fetch_cursor(self, repository: str, resource: str, cursor: FetchCursor) -> None:
         await self._tx.save_fetch_cursor(repository, resource, cursor)
+        if resource == PULL_REQUESTS:
+            self.all_merge_pulls = True
 
     async def save_fetch_retry(
         self, repository: str, resource: str, retry: FetchRetry | None
@@ -188,6 +228,7 @@ class UnitOfWork:
 
     async def save_lane(self, lane: Lane) -> None:
         await self._tx.save_lane(lane)
+        self.all_merge_pulls = True
 
     async def enqueue_action(
         self,
@@ -276,6 +317,9 @@ class UnitOfWork:
             )
         await self.save_item(item)
         return item
+
+    async def active_item(self, kind: str, subject_ref: str) -> Item | None:
+        return await self._tx.active_item(f"{kind}:{subject_ref}")
 
     async def active_item_subjects(self, kind: str) -> set[str]:
         return await self._tx.active_item_subjects(kind)

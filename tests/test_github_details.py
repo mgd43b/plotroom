@@ -33,6 +33,7 @@ from plotroom.core.github_projection import (
     ISSUE_TREE,
     LABELS,
     MAIN,
+    PULL_TEXT,
     THREADS,
     latest_checks,
     main_verdict,
@@ -156,6 +157,7 @@ class Fixture:
             "head": {"ref": "worker", "sha": self.sha, "repo": {"full_name": REPO}},
             "base": {"ref": "trunk", "sha": MAIN_SHA, "repo": {"full_name": REPO}},
             "merged_at": None,
+            "draft": False,
             "body": "",
             "changed_files": 1,
         }
@@ -451,13 +453,22 @@ async def test_details_stage_and_dispatch_pinned_fixture_update(tmp_path: Path) 
         ledger, clock, tick_seconds=5, action_attempts=3, fixture_github_write=port
     )
     comparisons: list[str] = []
+    text_complete = False
+    pull_body = "Raw pull body available only in the projection"
+    commit_message = "Raw commit message available only in the projection"
 
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix(f"/repos/{REPO}")
         if path == "/pulls/4":
             pull: dict[str, Any] = provider.handle(request).json()
             pull["base"] = {"ref": "trunk", "sha": MAIN_SHA, "repo": {"full_name": REPO}}
+            pull.update(body=pull_body, commits=1)
             return httpx.Response(200, json=pull)
+        if path == "/pulls/4/commits":
+            commits = (
+                [{"sha": FIRST, "commit": {"message": commit_message}}] if text_complete else []
+            )
+            return httpx.Response(200, json=commits)
         if path == "/actions/workflows/ci.yml/runs":
             run = {
                 **status(50, "ci", "success"),
@@ -506,7 +517,25 @@ async def test_details_stage_and_dispatch_pinned_fixture_update(tmp_path: Path) 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             await pulls.poll(client)
             await details.poll(client)
+            text = await ledger.github_resource(REPO, PULL_TEXT, "4")
+            assert text is not None
+            assert not text.complete
+            assert (await ledger.merge_gate("clerk", 4)).reasons[0].code == "stale_ci"
+            assert (action := await ledger.pending_action()) is not None
+            assert action.key == f"branch_update:4:{FIRST}"
+
+            text_complete = True
             await details.poll(client)
+        text = await ledger.github_resource(REPO, PULL_TEXT, "4")
+        assert text is not None
+        assert text.complete
+        assert text.records == ()
+        assert text.attributes["body"] == pull_body
+        assert text.attributes["commit_messages"] == [commit_message]
+        assert all(
+            pull_body not in event.body and commit_message not in event.body
+            for event in await store.events_after(0)
+        )
         assert len(comparisons) == 3
         assert (await ledger.merge_gate("clerk", 4)).reasons[0].code == "stale_ci"
         action_key = f"branch_update:4:{FIRST}"

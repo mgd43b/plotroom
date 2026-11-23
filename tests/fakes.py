@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from plotroom.adapters.store_sqlite import SqliteStore
-from plotroom.core.actions import BRANCH_UPDATE, Action, QueuedAction
+from plotroom.core.actions import BRANCH_UPDATE, CONTROLLER_MERGE, Action, QueuedAction
 from plotroom.core.catalog import Catalog
 from plotroom.core.claims import OVERLAP_KINDS, Claim
 from plotroom.core.commands import Command, CommandError, CommandRegistry
@@ -186,6 +186,10 @@ class _MemoryTransaction:
         ]
         return lanes[0] if len(lanes) == 1 else None
 
+    async def active_lanes(self) -> list[Lane]:
+        self._live()
+        return [lane for lane in self.lanes.values() if lane.state != "archived"]
+
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         self._live()
         return self.pulls.get((repository, number))
@@ -217,6 +221,22 @@ class _MemoryTransaction:
     async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None:
         self._live()
         return _branch_pull(self.pulls, repository, branch)
+
+    async def latest_merge_verdict(self, repository: str, number: int) -> StoredEvent | None:
+        self._live()
+        return next(
+            (
+                event
+                for event in reversed(self.events)
+                if event.kind == "core.merge_verdict"
+                and event.fields["repository"] == repository
+                and event.fields["number"] == number
+            ),
+            None,
+        )
+
+    async def save_merge_verdict(self, repository: str, number: int, seq: int) -> None:
+        self._live()
 
     async def deploy_freeze(self) -> str | None:
         self._live()
@@ -584,6 +604,7 @@ class MemoryStore:
 
     async def read_merge_gate(self, repository: str | None, number: int) -> GateSnapshot:
         reader = _MemoryTransaction(self._events, self._seq)
+        reader.lanes = self._lanes
         reader.pulls = self._pulls
         reader.github_resources = self._github_resources
         reader.fetch_cursors = self._fetch_cursors
@@ -630,7 +651,12 @@ class MemoryStore:
         return page[0].action if page else None
 
     async def pending_actions(
-        self, *, after: int, limit: int, skip_branch_updates: bool = False
+        self,
+        *,
+        after: int,
+        limit: int,
+        skip_branch_updates: bool = False,
+        skip_controller_merges: bool = False,
     ) -> tuple[QueuedAction, ...]:
         candidates = (
             QueuedAction(position, action)
@@ -638,6 +664,7 @@ class MemoryStore:
             if position > after
             and action.state == "pending"
             and (not skip_branch_updates or action.kind != BRANCH_UPDATE)
+            and (not skip_controller_merges or action.kind != CONTROLLER_MERGE)
         )
         return copy.deepcopy(tuple(islice(candidates, limit)))
 
