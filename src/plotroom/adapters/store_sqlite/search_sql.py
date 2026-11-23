@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from plotroom.ports.search import SearchHit, SearchPage, SearchRecord
 
+EXCERPT_LIMIT = 240
+
 FIND_RECORD = text("""
     SELECT seq, body FROM search_records WHERE kind = :kind AND record_id = :id
 """)
@@ -25,22 +27,33 @@ COUNT_MATCHES = text("""
     WHERE message_fts MATCH :query
       AND (:kinds IS NULL OR search_records.kind IN (SELECT value FROM json_each(:kinds)))
 """)
+# Rank and limit the row IDs before highlighting their bodies.
 FIND_MATCHES = text("""
-    WITH matches AS MATERIALIZED (
+    WITH ranked AS MATERIALIZED (
         SELECT search_records.record_id AS id, search_records.kind, search_records.seq,
-               message_fts.rank,
-               snippet(message_fts, 0, :marker, :marker, '…', 12) AS excerpt
+               message_fts.rank
         FROM message_fts JOIN search_records ON search_records.seq = message_fts.rowid
         WHERE message_fts MATCH :query
           AND (:kinds IS NULL OR search_records.kind IN (SELECT value FROM json_each(:kinds)))
         ORDER BY message_fts.rank, search_records.seq DESC
         LIMIT :limit
+    ), matches AS MATERIALIZED (
+        SELECT ranked.*, message_fts.body,
+               highlight(message_fts, 0, :open_marker, :close_marker) AS marked_body
+        FROM ranked CROSS JOIN message_fts
+        WHERE message_fts.rowid = ranked.seq AND message_fts MATCH :query
+    ), spans AS (
+        SELECT *, instr(marked_body, :open_marker) AS match_start,
+               instr(marked_body, :close_marker) - instr(marked_body, :open_marker)
+                   - length(:open_marker) AS match_length
+        FROM matches
     )
     SELECT id, kind,
            substr(
-               replace(substr(excerpt, max(1, instr(excerpt, :marker) - 60)), :marker, ''), 1, 240
+               body, max(1, match_start - min(60, max(0, :excerpt_limit - match_length))),
+               :excerpt_limit
            ) AS excerpt
-    FROM matches ORDER BY rank, seq DESC
+    FROM spans ORDER BY rank, seq DESC
 """)
 
 
@@ -55,9 +68,7 @@ async def index_record(
         await connection.execute(DELETE_MESSAGE, {"seq": current.seq})
         await connection.execute(DELETE_RECORD, {"seq": current.seq})
     seq = (
-        await connection.execute(
-            INSERT_RECORD, {**params, "embeddable": bool(record.body.strip())}
-        )
+        await connection.execute(INSERT_RECORD, {**params, "embeddable": bool(record.body.strip())})
     ).scalar_one()
     # SQLite's text functions can stop at a NUL. Index it as a word separator.
     await connection.execute(INSERT_MESSAGE, {"seq": seq, "body": record.body.replace("\x00", " ")})
@@ -70,7 +81,17 @@ async def search_records(
     phrase = '"' + query.replace('"', '""') + '"'
     params = {"query": phrase, "kinds": None if kinds is None else json.dumps(kinds)}
     total = (await connection.execute(COUNT_MATCHES, params)).scalar_one()
-    # The marker keeps a long adjacent token from pushing the match out of the excerpt.
-    rows = await connection.execute(FIND_MATCHES, {**params, "limit": limit, "marker": uuid4().hex})
+    # Highlight the complete phrase and give it priority over surrounding text.
+    marker = uuid4().hex
+    rows = await connection.execute(
+        FIND_MATCHES,
+        {
+            **params,
+            "limit": limit,
+            "excerpt_limit": EXCERPT_LIMIT,
+            "open_marker": f"<{marker}",
+            "close_marker": f">{marker}",
+        },
+    )
     hits = tuple(SearchHit(row.id, row.kind, row.excerpt) for row in rows)
     return SearchPage(hits, total)

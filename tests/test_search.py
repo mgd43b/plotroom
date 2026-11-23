@@ -83,6 +83,18 @@ async def test_search_bounds_excerpts_around_matches_and_limits_pages(tmp_path: 
     assert hit.excerpt in body
 
 
+@pytest.mark.parametrize("phrase", ["x" * 240, " ".join(["a"] * 120)])
+async def test_search_excerpt_keeps_a_long_phrase_intact(tmp_path: Path, phrase: str) -> None:
+    async with opened_search(tmp_path, "demo") as (_, ledger):
+        body = "prefix" * 200 + " " + phrase + " " + "suffix" * 200
+        await ledger.append("system", message("first", body))
+        (hit,) = (await ledger.search(phrase, None, 20)).hits
+
+    assert phrase in hit.excerpt
+    assert hit.excerpt in body
+    assert len(hit.excerpt) <= 240
+
+
 async def test_search_excerpt_includes_matches_after_a_nul(tmp_path: Path) -> None:
     async with opened_search(tmp_path, "demo") as (store, ledger):
         event = (await ledger.append("system", message("first", "prefix\x00needle"))).event
