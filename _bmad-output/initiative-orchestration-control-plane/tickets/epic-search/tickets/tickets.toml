@@ -1,0 +1,80 @@
+# Entries of the Search epic, in build order. Ids are permanent; table order is build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Tracer: full-text search over Claude and Codex messages"
+description = "The thinnest path: the Search port, an FTS5 adapter writing rows for claude.* and switchboard.message events inside the writer's unit of work (an Alembic migration hidden from autogenerate), and search(text, kinds?, limit) returning record ids, kinds and short excerpts within one project and its token budget."
+verify = "A turn report and a switchboard message are found by a word from each, results carry ids and excerpts only, and a second project's token never sees the first project's records."
+covers = ["R1", "R3"]
+after = ["1.4", "2.7", "2.9"]
+hitl = false
+risk = "medium"
+references = ["architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-6"]
+
+[[entry]]
+id = 2
+type = "story"
+title = "Index decisions, asks and flakes"
+description = "Decisions (their exact words), asks and flake candidates are indexed as they are written, and search() filters by kind."
+verify = "A decision is found by a word from its exact words, an ask by its text and a flake by its test id, and kinds=[decision] returns only decisions."
+covers = ["R1"]
+after = [1, "7.1", "7.2", "4.6"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Backfill what came before search"
+description = "Records written before search landed are indexed by a resumable backfill that follows seq, through the writer."
+verify = "On a project file with records from before the migration, the backfill indexes all of them, stopping it halfway and restarting it indexes the rest once, and search finds the oldest."
+covers = ["R2"]
+after = [2]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Embeddings off the writer"
+description = "An Embedder port (an HTTP endpoint or none), an indexer that follows seq off the writer with its own index_seq and writes vectors back through the writer, vectors as a BLOB column in a migrated table keyed by (record_id, model, dimension), queried with sqlite-vec's distance functions; changing the model reindexes. Tests use a fake embedder."
+verify = "With the fake embedder, new records get vectors without slowing the writer's transactions, a restart resumes from index_seq, and changing the configured model reindexes every record under the new model."
+covers = ["R1", "R4"]
+after = [1]
+hitl = false
+risk = "high"
+notes = ["Check beyond its criteria: an embedder that is down never blocks a write, and indexing catches up when it returns."]
+
+[[entry]]
+id = 5
+type = "story"
+title = "Search by meaning"
+description = "search() ranks by vector distance where an embedder is configured, and by full text otherwise, behind the same call; results stay within the token budget."
+verify = "With the fake embedder, a paraphrase of a decision finds it with no word in common; with no embedder, the same call returns full-text results."
+covers = ["R1", "R4"]
+after = [4, 2]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+verify = "Deferred findings are resolved or re-filed, and CI passes."
+covers = []
+after = [1, 2, 3, 4, 5]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 7
+type = "story"
+title = "End-to-end suite over the epic's Done when"
+description = "One suite runs every Done-when check of this epic against a real daemon with the fake embedder and with none."
+verify = "The suite passes in CI, one test per Done-when line."
+covers = ["R1", "R2", "R3", "R4"]
+after = [6]
+hitl = false
+risk = "low"

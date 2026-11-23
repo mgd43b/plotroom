@@ -1,0 +1,78 @@
+# Entries of the Helm chart epic, in build order. Ids are permanent; table order is build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Tracer: helm install runs plotroom as one replica"
+description = "The thinnest path: a chart in deploy/helm/ with one replica, the Recreate strategy, a ReadWriteOnce block volume for the data directory, a Service, a ConfigMap for the TOML config and Secret references; helm lint and helm template run in CI, and CI installs the chart on a kind cluster and waits for /readyz."
+verify = "In CI the chart lints, renders, installs on kind with one pod that passes /readyz, and an HTTP client with an issued token gets snapshot()."
+covers = ["R1"]
+after = ["1.10", "1.14"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 2
+type = "story"
+title = "Secrets and tokens on Kubernetes"
+description = "The chart mounts the instance token file and per-project secrets (GitHub App key, PAT, embedder key) from Kubernetes Secrets, documents issuing the first token with a one-off Job running plotroom token issue against the volume, and never renders a secret value into the ConfigMap."
+verify = "A kind install with Secrets for a token file and an App key polls the test repository with the App, a token issued by the Job works, and helm template output contains no secret value."
+covers = ["R1"]
+after = [1, "2.6"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Codex workers through the bridge"
+description = "The chart's documentation and values configure a hosted instance for plotroom bridge (a bridge token, the allowed Host names), and a test runs the bridge from outside the cluster against the kind install."
+verify = "A bridge run outside the kind cluster with a bridge token delivers a scripted switchboard participant's message to the hosted instance and a send back, once each."
+covers = ["R2"]
+after = [1, "2.8"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Scheduled backups"
+description = "An optional CronJob in the chart takes an online backup of every project file on the volume on a schedule, keeping a configured number."
+verify = "On kind, the CronJob run produces one consistent backup per project file that opens and migrates, and older backups past the configured count are removed."
+covers = ["R1"]
+after = [1]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Publish the chart"
+description = "The release workflow publishes the chart as an OCI artifact to ghcr.io next to the image, with the chart's maintainer contact set to the owner's public identity; the owner allows the workflow to push it."
+verify = "A release publishes the chart to ghcr.io, and helm install from that OCI reference on kind passes /readyz."
+covers = ["R1"]
+after = [1, "1.11"]
+hitl = true
+risk = "low"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+verify = "Deferred findings are resolved or re-filed, and CI passes."
+covers = []
+after = [1, 2, 3, 4, 5]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 7
+type = "story"
+title = "End-to-end suite over the epic's Done when"
+description = "One suite installs the chart on kind and runs every Done-when check of this epic, including the same Claude Code and Codex client configurations that work against a local daemon."
+verify = "The suite passes in CI, one test per Done-when line."
+covers = ["R1", "R2"]
+after = [6]
+hitl = false
+risk = "low"
