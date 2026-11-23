@@ -52,3 +52,4 @@ Anyone can run plotroom on Kubernetes from a chart, which closes the initiative'
 - Waits on epic-server-and-ledger, story by story, for: the container image and health endpoints.
 - Waits on epic-one-inbox, story by story, for: plotroom bridge for Codex workers.
 - Decision: 2026-11-22, build order 1 (helm install on kind, the tracer), 2, 3, 4, 5 (publishing, which needs the owner), with a refactor sweep (6) and an end-to-end suite (7); this epic closes the initiative's Kubernetes check. Prerequisites are story by story, with no whole-epic gate.
+- Decision: 2026-11-22, from the set check: the instance token file lives on the data volume and the first token comes from a one-off Job in the tracer; per-project secrets are mounted Secrets; backups go through a server command to their own volume; a person checks real clients against the chart (entry 3).

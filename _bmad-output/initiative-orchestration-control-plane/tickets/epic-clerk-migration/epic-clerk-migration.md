@@ -37,6 +37,7 @@ The clerk moves from markdown files onto plotroom without a cutover day.
 
 - `plotroom import` loads a sample ledger and triggers file through the server's commands, with fired triggers as fired and prose triggers as next items.
 - The clerk session runs its sweep and triggers on plotroom's tools for a working day.
+- No file outside tests/fixtures tells a session to run the hand-run clerk's scripts, and the copied clerk skill is gone.
 
 ## Boundaries
 
@@ -55,3 +56,4 @@ The clerk moves from markdown files onto plotroom without a cutover day.
 - Waits on epic-merge-controller, story by story, for: MERGE next items and merge_gate for the clerk's sweep.
 - Unknown: What the clerk's ledger.md holds (checklists, decisions or asks would add epics 6 and 7 as prerequisites); the clerk spike in epic 1 answers it.
 - Decision: 2026-11-22, build order 1 (triggers import, the tracer), 2 (ledger import, waiting on the clerk spike for what live ledgers hold), 3 (a person runs the clerk on plotroom for a working day), 4 (retire the hand-run clerk), with a refactor sweep (5) and an end-to-end suite (6). Prerequisites are story by story, with no whole-epic gate.
+- Decision: 2026-11-22, from the set check: imported FIRED triggers use an orchestrator-only imported_fired argument and imported checklist rows an orchestrator-only checklist_import; fire-time message fields import as fixed text; epic 6's checklists replace the clerk's catch-all merge trigger; retiring the clerk keeps a pinned safemerge.sh under tests/fixtures.

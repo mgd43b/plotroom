@@ -25,3 +25,7 @@ Verify: The suite passes in CI, one test per Done-when line.
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-merge-controller/epic-merge-controller.md
+
+## Notes
+
+- Once epic 9 retires the hand-run clerk (entry 9.4), the comparison runs against a pinned copy of safemerge.sh and lib.sh under tests/fixtures.

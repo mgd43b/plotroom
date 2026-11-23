@@ -29,3 +29,4 @@ Verify: The clerk runs a MERGE item's action and the merge is logged as gated; w
 ## Notes
 
 - Decision: 2026-11-22, the owner chose refusals as items the lane's own wait() sees ('Item the lane's wait() sees'), with no dependency on epic 3.
+- Hands on: MERGE items and merge_gate to epic 9's clerk on plotroom (entry 9.3).

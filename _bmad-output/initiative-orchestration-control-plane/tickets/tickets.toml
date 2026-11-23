@@ -61,7 +61,7 @@ slug = "epic-guardrails"
 title = "Guardrails"
 description = "A usage adapter reads provider spend; paid runs carry hard caps that raise next() items at 50% and 80% and stop the lane at 100%; and hands-on requests are routed to their owning lane."
 covers = ["R7", "R20", "R21"]
-after = [{ epic = 1, needs = "next items, the action runner and the container" }, { epic = 3, needs = "the trigger engine and send to workers" }]
+after = [{ epic = 1, needs = "next items, the action runner and the container" }, { epic = 2, needs = "the secret-file reader for credentials" }, { epic = 3, needs = "the trigger engine and send to workers" }]
 
 [[epic]]
 id = 9
@@ -69,7 +69,7 @@ slug = "epic-clerk-migration"
 title = "Clerk migration"
 description = "The clerk's markdown ledger and triggers are imported through the server's commands, and the clerk runs its merge sweep and triggers on plotroom's MCP calls with no cutover day."
 covers = ["R23"]
-after = [{ epic = 1, needs = "the writer-rule table, lanes and wait()" }, { epic = 3, needs = "trigger records and fired state" }, { epic = 4, needs = "MERGE next items and merge_gate for the clerk's sweep" }, { epic = 6, needs = "checklist rows for imported post-merge steps" }]
+after = [{ epic = 1, needs = "the writer-rule table, lanes and wait()" }, { epic = 2, needs = "PR head branches in the GitHub projection" }, { epic = 3, needs = "trigger records and fired state" }, { epic = 4, needs = "MERGE next items and merge_gate for the clerk's sweep" }, { epic = 6, needs = "checklist rows for imported post-merge steps" }]
 
 [[epic]]
 id = 10

@@ -30,3 +30,4 @@ Verify: With the compose stack as the hosted instance, the scripted participant'
 ## Notes
 
 - Real clients seen by entry 1.3 (lane #14): Claude Code 2.1.323 speaks the 2026 era (server/discover, a long-lived subscriptions/listen) and Codex 0.169 the 2025-06-18 handshake era; both send notifications/cancelled. The bridge's HTTP calls and the Codex side must work with both.
+- Hands on: plotroom bridge to epic 11's hosted Codex workers (entry 11.3).

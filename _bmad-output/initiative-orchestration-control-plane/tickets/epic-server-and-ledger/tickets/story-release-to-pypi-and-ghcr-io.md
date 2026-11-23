@@ -25,3 +25,7 @@ Verify: A first release publishes plotroom to PyPI and the image to ghcr.io only
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md
+
+## Notes
+
+- Hands on: the release workflow to epic 11's chart publishing (entry 11.5).

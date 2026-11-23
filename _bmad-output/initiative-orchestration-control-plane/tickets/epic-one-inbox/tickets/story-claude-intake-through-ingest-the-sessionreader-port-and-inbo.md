@@ -25,3 +25,7 @@ Verify: A turn report sent through ingest twice is stored once, with or without 
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
+
+## Notes
+
+- Hands on: claude.* events to epic 10's search (entry 10.2).

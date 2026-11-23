@@ -56,3 +56,4 @@ Every lane starts from a complete brief and ends with its follow-through tracked
 - Waits on epic-claims-and-overlaps, story by story, for: current claims for the don't-touch section.
 - Waits on epic-triggers, story by story, for: the trigger engine and the propose_archive action.
 - Decision: 2026-11-22, build order 1 (the tracer), 2, 3, 4, with a refactor sweep (5) and an end-to-end suite (6); the archive item opens without a trigger (only the orchestrator creates triggers), and checklist_empty is there for its own triggers. Prerequisites are story by story, with no whole-epic gate.
+- Decision: 2026-11-22, from the set check: a brief's paths are the lane's own claims and its scope is the work item's full text; there is one archive item kind (entry 3), which epic 3's propose_archive reuses; checklist_empty holds only for an active checklist whose last step closed.

@@ -54,3 +54,4 @@ Paid runs cannot overrun their caps unnoticed, and hands-on work is routed away 
 - Waits on epic-server-and-ledger, story by story, for: next items, the action runner and the container.
 - Waits on epic-triggers, story by story, for: the trigger engine and send to workers.
 - Decision: 2026-11-22, build order 1 (the tracer, on a fixture meter), 2, 3 (the first real provider, the least certain, with a plan checkpoint), 4, 5, with a refactor sweep (6) and an end-to-end suite (7); the first provider and its reporting endpoint are confirmed against its current documentation at entry 3's plan checkpoint. Prerequisites are story by story, with no whole-epic gate.
+- Decision: 2026-11-22, from the set check: budgets name their run's lane; the first provider (entry 3, the least certain) is built second; it is Anthropic, confirmed at its plan checkpoint.
