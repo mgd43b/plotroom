@@ -4,7 +4,7 @@ type: story
 title: "End-to-end suite over the epic's Done when"
 parent: epic-one-inbox
 covers: [R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11]
-after: [12]
+after: [12, "1.10", 2, 6]
 hitl: false
 risk: low
 tracker_id: "46"
