@@ -9,7 +9,7 @@ hitl: false
 risk: low
 tracker_id: "86"
 remote: "https://github.com/mgd43b/plotroom/issues/86"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Decisions settle asks and tickets
