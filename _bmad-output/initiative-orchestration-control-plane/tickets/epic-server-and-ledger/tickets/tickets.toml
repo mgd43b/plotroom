@@ -207,13 +207,46 @@ hitl = false
 risk = "low"
 
 [[entry]]
+id = 21
+type = "bug"
+title = "The stdio proxy can send its bearer to a listener it has not authenticated"
+description = "Four related findings from an independent review of #134. In plotroom connect --stdio, the local token choice, the daemon start, the published-listener lookup and the request dispatch each resolve the instance separately. The proxy also forwards its bearer to whatever answers at the published address, and counts that listener's 401 as readiness. The fix resolves the instance once (config, data directory, lock owner and its published loopback endpoint) and binds token selection, start, lookup and dispatch to that one resolution. It authenticates the listener as that instance's daemon before it sends a bearer or counts a 401 as local readiness. It connects to the published loopback endpoint and keeps the supported configured Host semantics (Host localhost when the config says localhost). Each finding's missing regression test lands with it."
+verify = "A listener at the published address that is not the resolved instance's daemon receives no bearer, and the proxy does not report it ready. Token selection, start, lookup and dispatch use one resolved instance, even when the config or port file changes between steps. A config with host localhost still connects with Host localhost. One regression test per finding passes in CI."
+covers = ["R12"]
+after = [5]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 22
+type = "bug"
+title = "An https bearer connection ignores configured CA trust"
+description = "From an independent review of #134. To keep environment proxies away from a token, a credentialed proxy turns off httpx's environment handling. That also drops SSL_CERT_FILE and SSL_CERT_DIR, so an explicit https endpoint signed by a private CA cannot be reached. The fix adds configured CA trust for explicit https endpoints (its setting is named in the plan) and keeps environment proxy discovery off for credentialed connections. The missing regression tests land with it."
+verify = "A credentialed connect to an https test server signed by a test CA succeeds with that CA configured, and fails with a clear error without it. A proxy set in the environment is never used for a credentialed connection. The regression tests pass in CI."
+covers = ["R12"]
+after = [5]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 23
+type = "bug"
+title = "Token revoke can report a failure after it has revoked"
+description = "From an independent review of #134. plotroom token revoke removes the token from the instance token file first, then from the local tokens file. If the local cleanup fails, the command reports a failure although the revocation has taken effect. The fix keeps the instance revocation authoritative. It reports a failed local cleanup separately, saying the token is revoked, and lets a retry finish the cleanup. Malformed instance or local token files fail through the existing TokenError paths and the configuration exit, never a traceback. The missing regression tests land with it."
+verify = "With the local tokens file unwritable, revoke leaves the token refused by the server, says only the local cleanup failed, and a retry once the file is writable removes the local entry. Malformed token files (bad JSON, the wrong shape, the wrong mode, not a regular file) give a TokenError message and the configuration exit. The regression tests pass in CI."
+covers = ["R12"]
+after = [5]
+hitl = false
+risk = "medium"
+
+[[entry]]
 id = 12
 type = "story"
 title = "Refactor sweep"
-description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred, including the stdio proxy blocking on readline when a client breaks stdout but keeps stdin open and silent (deferred in PR #51), and the unbounded writer queue in src/plotroom/core/writer.py (declined in PR #50; a cap needs a backpressure policy that belongs with the transport limits), and logged_reason reading only the active log file, so with a tiny size limit a failure line can roll into .1 before the parent reads it (low; cannot happen at the real limits; found in PR #132)."
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred, including the stdio proxy blocking on readline when a client breaks stdout but keeps stdin open and silent (deferred in PR #51), and the unbounded writer queue in src/plotroom/core/writer.py (declined in PR #50; a cap needs a backpressure policy that belongs with the transport limits), and logged_reason reading only the active log file, so with a tiny size limit a failure line can roll into .1 before the parent reads it (low; cannot happen at the real limits; found in PR #132). It also covers the port-file test after a stop: it checks the file only once the daemon has exited, so it does not prove the daemon unpublishes before HTTP shutdown finishes. The sweep pauses HTTP shutdown in an existing in-process daemon test and asserts the file is already gone. Production already unpublishes first (found in Kodus review of PR #135)."
 verify = "Deferred findings are resolved or re-filed, and CI passes."
 covers = []
-after = [2, 3, 4, 5, 6, 7, 8, 13, 9, 10, 14, 15, 11, 17, 18, 19, 20]
+after = [2, 3, 4, 5, 6, 7, 8, 13, 9, 10, 14, 15, 11, 17, 18, 19, 20, 21, 22, 23]
 hitl = false
 risk = "low"
 
