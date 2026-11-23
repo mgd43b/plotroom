@@ -569,7 +569,8 @@ def test_lock_owner_does_not_wait_for_a_fifo_writer(tmp_path: Path) -> None:
         "import sys\n"
         "from pathlib import Path\n"
         "from plotroom.app.daemon_start import lock_owner\n"
-        "assert lock_owner(Path(sys.argv[1])) is None\n"
+        "if lock_owner(Path(sys.argv[1])) is not None:\n"
+        "    raise SystemExit('a named pipe reported a PID')\n"
     )
     subprocess.run([sys.executable, "-c", program, str(tmp_path)], check=True, timeout=WAIT)
 
