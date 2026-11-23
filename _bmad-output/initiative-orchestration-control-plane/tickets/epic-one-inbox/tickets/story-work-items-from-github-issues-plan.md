@@ -50,6 +50,8 @@ Read structural GitHub issue data into the BMad work-item source. Apply the star
 
 Corrected child order, refinement parity, and cached metadata. A bounded relationship scan preserves the last good mirror until initial relationships are complete. Fixtures cover classification, CLI parity, and the runtime tick.
 
+The opening automated review identified unnecessary relationship polling and reconciliation starvation. The daemon only fetches the issue graph for an Issues source and reserves reconciliation capacity within the per-poll budget.
+
 ## Verification
 
 - `uv run python -m pytest -q`

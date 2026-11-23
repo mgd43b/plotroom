@@ -8,6 +8,7 @@ import pytest
 
 from fakes import FixedClock
 from plotroom.adapters.github import GitHubPoller, LocalGitHubCredential, PullRequestFetcher
+from plotroom.adapters.github.ci import fetch_main
 from plotroom.adapters.github.details import GitHubDetailPoller
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.store_sqlite import SqliteStore
@@ -19,6 +20,7 @@ from plotroom.core.events import LedgerError
 from plotroom.core.github import DETAILS
 from plotroom.core.github_projection import (
     CHECKS,
+    COMMENT_BACKFILL,
     COMMENTS,
     FILES,
     ISSUE_TREE,
@@ -57,6 +59,7 @@ class Fixture:
         self.break_threads = False
         self.limit = False
         self.extra_comment = False
+        self.reset_check = False
         self.requests: list[str] = []
 
     @property
@@ -119,7 +122,7 @@ class Fixture:
             "body": "",
             "changed_files": 1,
         }
-        check = status(15, "lint", "success" if self.step > 0 else None)
+        check = status(15, "lint", "success" if self.step > 0 and not self.reset_check else None)
         rerun = status(16, "lint", "failure")
         run = {
             **status(50, "ci", "success" if self.step == 0 else None),
@@ -142,6 +145,12 @@ class Fixture:
             "": {"default_branch": "trunk"},
             "/branches/trunk": {"commit": {"sha": MAIN_SHA}},
             "/actions/runs": {"workflow_runs": [run]},
+            "/actions/runs/50/attempts/1": {
+                **status(50, "ci", "success"),
+                "head_sha": MAIN_SHA,
+                "run_attempt": 1,
+                "created_at": NOW,
+            },
             "/actions/runs/50/attempts/1/jobs": {"jobs": [status(70, "image", "success")]},
             "/actions/runs/50/attempts/2/jobs": {"jobs": [status(71, "image", None)]},
             "/pulls": [pr],
@@ -187,7 +196,7 @@ class Fixture:
         assert path in result, path
         if path == "/actions/runs":
             assert request.url.params["branch"] == "trunk"
-        if path == "/issues/comments" and self.extra_comment:
+        if path == "/issues/comments" and self.extra_comment and "since" in request.url.params:
             since = request.url.params["since"]
             assert since < LATER
             result[path].append({**result[path][0], "id": 100})
@@ -208,7 +217,9 @@ async def test_github_transitions_and_pagination_are_durable(tmp_path: Path) -> 
         ledger = Ledger(store, catalog, clock, github_repository=REPO)
         ledger.start()
         puller = GitHubPoller(ledger, clock, REPO, credential, PullRequestFetcher(API, REPO), 1)
-        details = GitHubDetailPoller(ledger, clock, client_api, credential, ("image",))
+        details = GitHubDetailPoller(
+            ledger, clock, client_api, credential, ("image",), include_issue_tree=True
+        )
         try:
             await ledger.execute(
                 "orchestrator",
@@ -250,6 +261,8 @@ async def test_github_transitions_and_pagination_are_durable(tmp_path: Path) -> 
             assert labels is not None
             assert labels.attributes["labels"] == {"audited": "editor"}
 
+            provider.reset_check = True
+            await details.poll(client)
             provider.step = 2
             await puller.poll(client)
             await details.poll(client)
@@ -275,7 +288,7 @@ async def test_github_transitions_and_pagination_are_durable(tmp_path: Path) -> 
             kinds = [event.kind for event in events]
             assert kinds.count("github.review_thread") == 3
             check_ids = [event.fields["id"] for event in events if event.kind == "github.check_run"]
-            assert check_ids.count(15) == 2
+            assert check_ids.count(15) == 3
             assert check_ids.count(16) == 1
             assert kinds.count("github.pull_label") == 1
             assert kinds.count("github.pull_file") == 2
@@ -302,7 +315,9 @@ async def test_github_transitions_and_pagination_are_durable(tmp_path: Path) -> 
         await reopened.migrate()
         ledger = Ledger(reopened, catalog, clock, github_repository=REPO)
         ledger.start()
-        details = GitHubDetailPoller(ledger, clock, client_api, credential, ("image",))
+        details = GitHubDetailPoller(
+            ledger, clock, client_api, credential, ("image",), include_issue_tree=True
+        )
         try:
             provider.limit = False
             calls = len(provider.requests)
@@ -386,6 +401,7 @@ async def test_github_issues_flow_through_the_runtime_tick(
         clock,
         GitHubReadClient(API, REPO),
         LocalGitHubCredential("TOKEN", {"TOKEN": "fixture"}, None),
+        include_issue_tree=True,
     )
     runtime = ProjectRuntime(
         ledger,
@@ -404,6 +420,89 @@ async def test_github_issues_flow_through_the_runtime_tick(
         clock.advance(1)
         assert await runtime.tick_if_due()
         assert [item.ref for item in await ledger.ready_work_items()] == ["9"]
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+async def test_main_verdict_survives_cold_start_mid_rerun() -> None:
+    fixture = Fixture()
+    fixture.step = 1
+    api = GitHubReadClient(API, REPO)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handle)) as client:
+        main = await fetch_main(api, client, "fixture", ("image",), None)
+    assert main.records[0].fields["attempt"] == 2
+    verdict = main_verdict(main)
+    assert verdict is not None
+    assert verdict.fields["attempt"] == 1
+    assert verdict.details["image_jobs"][0]["conclusion"] == "success"
+
+
+async def test_issue_comment_backfill_advances_beyond_foreground_page_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("plotroom.adapters.github.read.MAX_PAGES", 1)
+
+    class CommentHistory(Fixture):
+        def handle(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path != f"/repos/{REPO}/issues/comments":
+                return super().handle(request)
+            sort = request.url.params["sort"]
+            page = int(request.url.params["page"])
+            identifier = 100 + (6 if sort == "updated" else page)
+            has_next = ("since" not in request.url.params and sort == "updated") or (
+                sort == "created" and page < 6
+            )
+            link = (
+                {"Link": f'<{request.url.copy_set_param("page", page + 1)}>; rel="next"'}
+                if has_next
+                else {}
+            )
+            return httpx.Response(
+                200,
+                headers=link,
+                json=[
+                    {
+                        "id": identifier,
+                        "issue_url": f"{API}/repos/{REPO}/issues/9",
+                        "created_at": NOW,
+                        "updated_at": LATER,
+                        "user": {"login": "editor"},
+                        "body": BODY,
+                    }
+                ],
+            )
+
+    fixture = CommentHistory()
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    clock = FixedClock()
+    ledger = Ledger(store, build_catalog(github_repository=REPO), clock, github_repository=REPO)
+    ledger.start()
+    details = GitHubDetailPoller(
+        ledger,
+        clock,
+        GitHubReadClient(API, REPO),
+        LocalGitHubCredential("TOKEN", {"TOKEN": "fixture"}, None),
+    )
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handle)) as client:
+            await details.poll(client)
+            cursor = await ledger.fetch_cursor(REPO, COMMENT_BACKFILL)
+            assert cursor is not None
+            assert cursor.watermark == "5"
+            assert await ledger.github_resource(REPO, COMMENTS, "106") is not None
+            assert await ledger.github_resource(REPO, COMMENTS, "105") is None
+            await details.poll(client)
+        cursor = await ledger.fetch_cursor(REPO, COMMENT_BACKFILL)
+        assert cursor is not None
+        assert cursor.watermark == "done"
+        assert await ledger.github_resource(REPO, COMMENTS, "105") is not None
+        observed = [
+            event for event in await store.events_after(0) if event.kind == "github.issue_comment"
+        ]
+        assert len(observed) == 6
+        assert await ledger.github_resource(REPO, ISSUE_TREE) is None
     finally:
         await ledger.stop()
         await store.close()

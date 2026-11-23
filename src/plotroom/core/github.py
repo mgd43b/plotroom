@@ -197,8 +197,10 @@ async def apply_comments(
     comments: tuple[GitHubRecord, ...],
     watermark: str,
     as_of: str,
+    *,
+    cursor_resource: str = COMMENTS,
 ) -> None:
-    if await uow.fetch_cursor(repository, COMMENTS) != baseline:
+    if await uow.fetch_cursor(repository, cursor_resource) != baseline:
         return
     for comment in comments:
         prior = await uow.github_resource(repository, COMMENTS, comment.key)
@@ -210,6 +212,6 @@ async def apply_comments(
             )
     await uow.save_fetch_cursor(
         repository,
-        COMMENTS,
+        cursor_resource,
         FetchCursor(watermark, as_of, baseline.generation + 1 if baseline else 1),
     )

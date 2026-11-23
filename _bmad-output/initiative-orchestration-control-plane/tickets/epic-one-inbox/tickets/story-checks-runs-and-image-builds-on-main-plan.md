@@ -49,6 +49,8 @@ Poll the default branch and selected PR heads through the daemon. Preserve recen
 
 Shared-SHA attribution uses assignments from check-run payloads and the current PR projection. Tests cover state transitions, reruns, and the prior completed verdict while a rerun runs.
 
+The opening automated review found that a cold-start pending rerun needed its preceding attempt and that checks can revisit a status. The fetcher backfills the preceding attempt, and check event identities also include generation. Both paths have fixtures.
+
 ## Verification
 
 - `uv run python -m pytest -q`

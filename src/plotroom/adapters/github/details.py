@@ -3,19 +3,26 @@
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from functools import partial
 from typing import Any
 
 import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable, LocalGitHubCredential
 from plotroom.adapters.github.ci import fetch_checks, fetch_main
-from plotroom.adapters.github.issue_details import fetch_comments, fetch_issue_tree, fetch_issues
+from plotroom.adapters.github.issue_details import (
+    fetch_comment_backfill,
+    fetch_comments,
+    fetch_issue_tree,
+    fetch_issues,
+)
 from plotroom.adapters.github.pr_details import fetch_files, fetch_labels, fetch_threads
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.core.events import format_time
 from plotroom.core.github import DETAILS, PULL_REQUESTS, FetchCursor, FetchRetry, apply_comments
 from plotroom.core.github_projection import (
     CHECKS,
+    COMMENT_BACKFILL,
     COMMENTS,
     FILES,
     ISSUE_TREE,
@@ -41,12 +48,15 @@ class GitHubDetailPoller:
         api: GitHubReadClient,
         credential: LocalGitHubCredential,
         image_jobs: tuple[str, ...] = (),
+        *,
+        include_issue_tree: bool = False,
     ) -> None:
         self.ledger = ledger
         self.clock = clock
         self.api = api
         self.credential = credential
         self.image_jobs = image_jobs
+        self.include_issue_tree = include_issue_tree
 
     async def cooling_down(self) -> bool:
         repository = self.api.repository
@@ -136,6 +146,8 @@ class GitHubDetailPoller:
             watermark = f"{pull.updated_at}:{pull.version}" if complete else ""
             await self._record_pull_attempt(pull.number, watermark)
 
+        if not self.include_issue_tree:
+            return
         if issues is not None:
             await self._refresh(
                 ISSUE_TREE,
@@ -160,31 +172,42 @@ class GitHubDetailPoller:
         self, client: httpx.AsyncClient, token: str, numbers: frozenset[int]
     ) -> None:
         repository = self.api.repository
-        baseline = await self.ledger.fetch_cursor(repository, COMMENTS)
-        try:
-            comments, watermark = await fetch_comments(
-                self.api, client, token, baseline.watermark if baseline else "", numbers
-            )
-        except GitHubRateLimited:
-            raise
-        except (
-            GitHubUnavailable,
-            httpx.RequestError,
-            KeyError,
-            ValueError,
-            TypeError,
-            OverflowError,
+        for resource, fetch in (
+            (COMMENTS, fetch_comments),
+            (COMMENT_BACKFILL, fetch_comment_backfill),
         ):
-            log.warning(
-                "GitHub issue comment refresh failed", extra={"project": self.ledger.project_id}
+            baseline = await self.ledger.fetch_cursor(repository, resource)
+            position = baseline.watermark if baseline else ""
+            if position == "done":
+                continue
+            try:
+                comments, watermark = await fetch(self.api, client, token, position, numbers)
+            except GitHubRateLimited:
+                raise
+            except (
+                GitHubUnavailable,
+                httpx.RequestError,
+                KeyError,
+                ValueError,
+                TypeError,
+                OverflowError,
+            ):
+                log.warning(
+                    "GitHub issue comment refresh failed", extra={"project": self.ledger.project_id}
+                )
+                continue
+            await self.ledger.run(
+                "system",
+                partial(
+                    apply_comments,
+                    repository=repository,
+                    baseline=baseline,
+                    comments=comments,
+                    watermark=watermark,
+                    as_of=format_time(self.clock.now()),
+                    cursor_resource=resource,
+                ),
             )
-            return
-        await self.ledger.run(
-            "system",
-            lambda uow: apply_comments(
-                uow, repository, baseline, comments, watermark, format_time(self.clock.now())
-            ),
-        )
 
     async def _mark_incomplete(
         self, resource: str, scope: str, pulls: tuple[int, ...] = ()

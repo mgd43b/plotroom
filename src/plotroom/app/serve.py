@@ -403,12 +403,14 @@ class Daemon:
                     PullRequestFetcher(github.api_url, github.repository),
                     github.poll_seconds,
                 )
+                issue_source = self._config.github_issue_sources.get(project_id)
                 details = GitHubDetailPoller(
                     project.ledger,
                     self._clock,
                     api,
                     credential,
                     github.image_jobs,
+                    include_issue_tree=issue_source is not None,
                 )
                 inputs.append(partial(poller.run, details.poll))
                 if remote_tree := self._config.github_ticket_trees.get(project_id):
@@ -421,7 +423,7 @@ class Daemon:
                         cooling_down=details.cooling_down,
                         report_rate_limit=details.record_rate_limit,
                     )
-                if issue_source := self._config.github_issue_sources.get(project_id):
+                if issue_source is not None:
                     work_items = GitHubIssuesWorkItems(
                         details.issue_tree,
                         issue_source.starter,

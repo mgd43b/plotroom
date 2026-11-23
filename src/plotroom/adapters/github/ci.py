@@ -6,7 +6,15 @@ from urllib.parse import quote
 
 import httpx
 
-from plotroom.adapters.github.read import GitHubReadClient, Row, number, obj, rows, string
+from plotroom.adapters.github.read import (
+    GitHubNotFound,
+    GitHubReadClient,
+    Row,
+    number,
+    obj,
+    rows,
+    string,
+)
 from plotroom.core.github_projection import GitHubRecord, GitHubResource
 
 
@@ -77,18 +85,19 @@ async def fetch_main(
         cached = old.get(key)
         if cached is not None and fields["status"] == "completed" and cached.fact == _state(fields):
             runs[key] = cached
-            continue
-        jobs = [
-            _status(job)
-            async for job in api.pages(
-                client, token, f"/actions/runs/{run_id}/attempts/{attempt}/jobs", key="jobs"
-            )
-        ]
-        fields.update({"head_sha": string(row["head_sha"]), "attempt": attempt, "jobs": jobs})
-        details = {
-            "created_at": string(row["created_at"]),
-        }
-        runs[key] = GitHubRecord(key, "workflow_run", fields, details=details, fact=_state(fields))
+        else:
+            runs[key] = await _workflow_run(api, client, token, row)
+        preceding = f"{run_id}/{attempt - 1}"
+        if attempt > 1 and fields["status"] != "completed" and preceding not in old:
+            try:
+                earlier = obj(
+                    await api.get(client, token, f"/actions/runs/{run_id}/attempts/{attempt - 1}")
+                )
+            except GitHubNotFound:
+                continue
+            if number(earlier["id"]) != run_id or number(earlier["run_attempt"]) != attempt - 1:
+                raise ValueError("GitHub returned a different workflow attempt")
+            runs[preceding] = await _workflow_run(api, client, token, earlier)
     # A rerun replaces the provider's list row for the previous attempt. Keep a bounded
     # recent history so a pending rerun cannot erase the previous completed verdict.
     merged = sorted(
@@ -107,3 +116,21 @@ async def fetch_main(
         for run in merged[:100]
     )
     return GitHubResource(projected, attributes={"branch": branch, "head_sha": sha})
+
+
+async def _workflow_run(
+    api: GitHubReadClient, client: httpx.AsyncClient, token: str, row: Row
+) -> GitHubRecord:
+    fields = _status(row)
+    run_id, attempt = fields["id"], number(row["run_attempt"])
+    jobs = [
+        _status(job)
+        async for job in api.pages(
+            client, token, f"/actions/runs/{run_id}/attempts/{attempt}/jobs", key="jobs"
+        )
+    ]
+    fields.update({"head_sha": string(row["head_sha"]), "attempt": attempt, "jobs": jobs})
+    details = {"created_at": string(row["created_at"])}
+    return GitHubRecord(
+        f"{run_id}/{attempt}", "workflow_run", fields, details=details, fact=_state(fields)
+    )

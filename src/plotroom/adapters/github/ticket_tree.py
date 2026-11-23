@@ -37,6 +37,7 @@ def validate_tree_path(value: str) -> PurePosixPath:
         path.is_absolute()
         or path.as_posix() != value
         or ".." in path.parts
+        or ":" in value
         or "\\" in value
         or any(not char.isprintable() for char in value)
         or len(value.encode("utf-8")) > 1024
@@ -44,6 +45,13 @@ def validate_tree_path(value: str) -> PurePosixPath:
     ):
         raise GitHubTicketTreeError("the GitHub ticket tree needs a repository-relative path")
     return path
+
+
+def _destination(checkout: Path, relative: PurePosixPath) -> Path:
+    destination = (checkout / relative).resolve()
+    if not destination.is_relative_to(checkout):
+        raise GitHubTicketTreeError("the ticket tree path leaves its temporary checkout")
+    return destination
 
 
 def _object(value: object) -> Row:
@@ -264,13 +272,13 @@ class GitHubTicketTree:
         ):
             raise GitHubTicketTreeError("the GitHub ticket tree exceeds the snapshot limit")
         with tempfile.TemporaryDirectory(prefix="plotroom-tickets-") as directory:
-            checkout = Path(directory)
-            tree = checkout / self._tree
+            checkout = await asyncio.to_thread(Path(directory).resolve)
+            tree = _destination(checkout, self._tree)
             tree.mkdir(parents=True, exist_ok=True)
             for child in directories:
-                (checkout / child).mkdir(parents=True, exist_ok=True)
+                _destination(checkout, child).mkdir(parents=True, exist_ok=True)
             await self._materialize(git, checkout, files)
-            items = await self._read_tree(tree, checkout / project)
+            items = await self._read_tree(tree, _destination(checkout, project))
         self._cached = (commit, items)
         return items
 
@@ -287,7 +295,7 @@ class GitHubTicketTree:
             for (relative, _), content in zip(batch, bodies, strict=True):
                 if isinstance(content, BaseException):
                     raise content
-                path = checkout / relative
+                path = _destination(checkout, relative)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with path.open("xb") as file:
                     file.write(content)

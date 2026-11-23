@@ -91,13 +91,23 @@ async def fetch_comments(
     watermark: str,
     issues: frozenset[int],
 ) -> tuple[tuple[GitHubRecord, ...], str]:
-    records: dict[str, GitHubRecord] = {}
-    latest = watermark
+    observed: list[Row] = []
     params = {"sort": "updated", "direction": "desc"}
     if watermark:
         # GitHub's since filter is exclusive and updated_at has second precision.
         params["since"] = format_time(datetime.fromisoformat(watermark) - timedelta(minutes=5))
-    async for row in api.pages(client, token, "/issues/comments", params=params):
+    async for row in api.pages(
+        client, token, "/issues/comments", params=params, recent=not watermark
+    ):
+        observed.append(row)
+    return _comments(observed, issues, watermark)
+
+
+def _comments(
+    observed: list[Row], issues: frozenset[int], latest: str = ""
+) -> tuple[tuple[GitHubRecord, ...], str]:
+    records: dict[str, GitHubRecord] = {}
+    for row in observed:
         n = _issue_number(string(row["issue_url"]))
         identifier = number(row["id"])
         updated = format_time(datetime.fromisoformat(string(row["updated_at"])))
@@ -116,6 +126,30 @@ async def fetch_comments(
         if key not in records or records[key].fields["updated_at"] <= updated:
             records[key] = GitHubRecord(key, "issue_comment", fields, _body(row))
     return tuple(records.values()), latest
+
+
+async def fetch_comment_backfill(
+    api: GitHubReadClient,
+    client: httpx.AsyncClient,
+    token: str,
+    position: str,
+    issues: frozenset[int],
+) -> tuple[tuple[GitHubRecord, ...], str]:
+    # Overlap a page to tolerate older comments being deleted during the backfill.
+    page = int(position or "1")
+    records: list[Row] = []
+    for offset in range(max(1, page - 1), page + 4):
+        batch, more = await api.page(
+            client,
+            token,
+            "/issues/comments",
+            offset,
+            params={"sort": "created", "direction": "asc"},
+        )
+        records.extend(batch)
+        if not more:
+            return _comments(records, issues)[0], "done"
+    return _comments(records, issues)[0], str(page + 4)
 
 
 def _related(row: Row, repository: str) -> int | str:
@@ -200,11 +234,13 @@ async def fetch_issue_tree(
             # separately from known issue changes and bound requests per sweep.
             if previous and previous.generation % 8 == issue["number"] % 8:
                 reconcile.append(issue)
-    if previous and len(reconcile) > MAX_RELATION_REFRESHES:
-        offset = (previous.generation // 8 * MAX_RELATION_REFRESHES) % len(reconcile)
+    reconcile_count = min(len(reconcile), max(1, MAX_RELATION_REFRESHES // 4))
+    if previous and len(reconcile) > reconcile_count:
+        offset = (previous.generation // 8 * reconcile_count) % len(reconcile)
         reconcile = reconcile[offset:] + reconcile[:offset]
-    refresh = (pending + reconcile)[:MAX_RELATION_REFRESHES]
+    pending_count = MAX_RELATION_REFRESHES - reconcile_count
+    refresh = pending[:pending_count] + reconcile[:reconcile_count]
     for issue in refresh:
         records.append(await _relations(api, client, token, issue))
-    complete = len(pending) <= MAX_RELATION_REFRESHES
+    complete = len(pending) <= pending_count
     return GitHubResource(tuple(records), complete=complete)

@@ -265,6 +265,7 @@ async def test_default_branch_requires_repo_store(
     ("metadata", "error"),
     [
         ({"path": "../story-escape.md"}, "repository-relative"),
+        ({"path": "C:story.md"}, "repository-relative"),
         ({"mode": "120000"}, "regular files"),
         ({"size": 2_000_000}, "size limit"),
     ],
@@ -287,7 +288,9 @@ async def test_unsafe_or_excessive_blob_metadata_is_refused(
     assert not any("/git/blobs/" in path for path in github.requests)
 
 
-@pytest.mark.parametrize("path", ["", "../tree", "/tree", "a/../tree", "./tree", r"a\tree"])
+@pytest.mark.parametrize(
+    "path", ["", "../tree", "/tree", "a/../tree", "./tree", r"a\tree", "C:tree", "nested/C:tree"]
+)
 def test_invalid_tree_path_is_refused(path: str) -> None:
     with pytest.raises(ValueError, match="repository-relative"):
         validate_tree_path(path)

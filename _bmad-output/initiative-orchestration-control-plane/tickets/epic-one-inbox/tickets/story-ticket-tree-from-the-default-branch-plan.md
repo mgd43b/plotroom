@@ -49,6 +49,8 @@ Materialize a bounded, pinned Git tree into an isolated temporary directory and 
 
 Independent review verified the trust boundary. Fixtures compare local readiness, refresh after a push, and preserve the mirror after a partial tree response.
 
+The opening automated review identified cross-platform path containment risk. The author-controlled input boundary rejects drive-qualified names, and the adapter checks every native destination under the resolved temporary checkout before writing.
+
 ## Verification
 
 - `uv run python -m pytest -q`

@@ -48,6 +48,8 @@ Read issues with their assignments and maintain comment records by ID. Commit co
 
 The comment overlap catches equal-timestamp arrivals. Verified two distinct comments with the same timestamp, exact body bytes, one event per observed transition, and no replay after restart.
 
+The opening automated review identified a history bootstrap stall at the page limit. An independent, persisted history cursor now advances in bounded slices alongside recent-comment polling.
+
 ## Verification
 
 - `uv run python -m pytest -q`

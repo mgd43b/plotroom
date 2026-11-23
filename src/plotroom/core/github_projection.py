@@ -19,6 +19,7 @@ FILES = "pull_files"
 LABELS = "pull_labels"
 ISSUES = "issues"
 COMMENTS = "issue_comments"
+COMMENT_BACKFILL = "issue_comments_backfill"
 ISSUE_TREE = "issue_tree"
 
 REPOSITORY = FieldSpec("repository", "str")
@@ -158,7 +159,13 @@ async def apply_resource(
         if len(relevant) == 1:
             fields["number"], lane_id = relevant[0]
         uid = f"{repository}:{resource}:{scope}:{row.key}@{row.fact or generation}"
-        if kind in {"review_thread", "issue_opened", "issue_closed", "issue_reopened"}:
+        if kind in {
+            "check_run",
+            "review_thread",
+            "issue_opened",
+            "issue_closed",
+            "issue_reopened",
+        }:
             uid = f"{uid}:{generation}"
         await uow.append(NewEvent("github", f"github.{kind}", uid, fields, row.body, lane_id))
     records = fresh if result.complete else {**previous, **fresh}

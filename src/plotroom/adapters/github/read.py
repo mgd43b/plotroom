@@ -104,6 +104,36 @@ class GitHubReadClient:
             return cast("list[Any]", value)
         return obj(value)
 
+    async def page(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+        path: str,
+        page: int,
+        *,
+        params: Mapping[str, Any] | None = None,
+        key: str | None = None,
+    ) -> tuple[list[Row], bool]:
+        value, response = await self._read(
+            client,
+            token,
+            self.endpoint + path,
+            params={**(params or {}), "per_page": 100, "page": page},
+        )
+        records = rows(obj(value)[key] if key is not None else value)
+        if len(records) > 100:
+            raise GitHubUnavailable("GitHub returned an oversized page")
+        link = response.links.get("next")
+        if link is None:
+            return records, False
+        try:
+            next_page = int(httpx.URL(link["url"]).params["page"])
+        except KeyError, ValueError, httpx.InvalidURL:
+            raise GitHubUnavailable("GitHub returned invalid pagination") from None
+        if next_page != page + 1:
+            raise GitHubUnavailable("GitHub returned invalid pagination")
+        return records, True
+
     async def pages(
         self,
         client: httpx.AsyncClient,
@@ -115,23 +145,11 @@ class GitHubReadClient:
         recent: bool = False,
     ) -> AsyncIterator[Row]:
         for page in range(1, MAX_PAGES + 1):
-            value, response = await self._read(
-                client,
-                token,
-                self.endpoint + path,
-                params={**(params or {}), "per_page": 100, "page": page},
-            )
-            for row in rows(obj(value)[key] if key is not None else value):
+            records, more = await self.page(client, token, path, page, params=params, key=key)
+            for row in records:
                 yield row
-            link = response.links.get("next")
-            if link is None or recent:
+            if recent or not more:
                 return
-            try:
-                next_page = int(httpx.URL(link["url"]).params["page"])
-            except KeyError, ValueError, httpx.InvalidURL:
-                raise GitHubUnavailable("GitHub returned invalid pagination") from None
-            if next_page != page + 1:
-                raise GitHubUnavailable("GitHub returned invalid pagination")
         raise GitHubUnavailable("GitHub read exceeded the page limit")
 
     async def review_threads(
