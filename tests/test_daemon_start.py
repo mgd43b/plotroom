@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
 import signal
@@ -29,6 +30,7 @@ from plotroom.app.daemon_start import (
     current_url,
     daemon_env,
     ensure_daemon,
+    lock_owner,
     logged_reason,
     serve_command,
     speaks_mcp,
@@ -537,6 +539,51 @@ async def test_the_proxy_preserves_an_explicitly_allowed_localhost_header(
 # --- reading the port back ------------------------------------------------------------------
 
 
+def test_lock_owner_reads_a_stale_live_pid_without_taking_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    lock_file = tmp_path / LOCK_FILE_NAME
+    pid = os.getpid()
+    contents = f"{pid}\n"
+    lock_file.write_text(contents, encoding="utf-8")
+
+    def unexpected_flock(*args: object) -> None:
+        pytest.fail("the lock owner probe attempted a kernel lock operation")
+
+    # Guard the syscall itself so a short acquire/release cannot go unnoticed.
+    monkeypatch.setattr(fcntl, "flock", unexpected_flock)
+    assert lock_owner(tmp_path) == pid
+    assert lock_file.read_text(encoding="utf-8") == contents
+    assert "locked" not in caplog.text
+
+
+def test_lock_owner_does_not_create_a_missing_lock_file(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    assert lock_owner(data_dir) is None
+    assert not data_dir.exists()
+
+
+@pytest.mark.parametrize("contents", [b"", b"not a PID", b"\xff", b"0", b"-1", b"1000000000000"])
+def test_lock_owner_ignores_invalid_pids(tmp_path: Path, contents: bytes) -> None:
+    (tmp_path / LOCK_FILE_NAME).write_bytes(contents)
+    assert lock_owner(tmp_path) is None
+
+
+@pytest.mark.parametrize("error", [ProcessLookupError, PermissionError])
+def test_lock_owner_checks_pid_liveness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[OSError]
+) -> None:
+    pid = os.getpid()
+    (tmp_path / LOCK_FILE_NAME).write_text(str(pid), encoding="utf-8")
+
+    def check_pid(checked_pid: int, sig: int) -> None:
+        assert (checked_pid, sig) == (pid, 0)
+        raise error
+
+    monkeypatch.setattr(os, "kill", check_pid)
+    assert lock_owner(tmp_path) == (pid if error is PermissionError else None)
+
+
 async def test_a_fixed_port_is_the_configs_own_url_whatever_the_directory_holds(
     tmp_path: Path, held_port: int
 ) -> None:
@@ -559,6 +606,7 @@ async def test_a_local_bearer_uses_the_published_host_even_with_a_different_conf
 
         write_port(config.data_dir, config.port, host="127.0.0.1")
         assert await current_url(config, require_published=True) == "http://127.0.0.1:41000/mcp"
+    assert await current_url(config, require_published=True) is None
 
 
 async def test_a_local_bearer_is_not_sent_to_a_foreign_listener_on_a_fixed_port(
