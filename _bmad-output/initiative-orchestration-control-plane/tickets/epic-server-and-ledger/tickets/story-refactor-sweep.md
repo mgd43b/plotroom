@@ -15,7 +15,7 @@ tracker_status: backlog
 
 ## Description
 
-Cleanup only, scoped at its start from the plans and review findings the epic deferred, including the stdio proxy blocking on readline when a client breaks stdout but keeps stdin open and silent (deferred in PR #51), and the unbounded writer queue in src/plotroom/core/writer.py (declined in PR #50; a cap needs a backpressure policy that belongs with the transport limits).
+Cleanup only, scoped at its start from the plans and review findings the epic deferred, including the stdio proxy blocking on readline when a client breaks stdout but keeps stdin open and silent (deferred in PR #51), and the unbounded writer queue in src/plotroom/core/writer.py (declined in PR #50; a cap needs a backpressure policy that belongs with the transport limits), and logged_reason reading only the active log file, so with a tiny size limit a failure line can roll into .1 before the parent reads it (low; cannot happen at the real limits; found in PR #132).
 
 ## Requirements
 
