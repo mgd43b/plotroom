@@ -53,11 +53,11 @@ notes = ["Check beyond its criteria: killing the server mid-transaction leaves n
 id = 5
 type = "story"
 title = "Tokens, project isolation and the writer-rule table"
-description = "Declares the token roles (orchestrator, clerk, worker:<name>, drain, bridge) and system; plotroom token issue and revoke write hashed tokens straight to the instance token file under a file lock (reloaded without restart) and, locally, the 0600 tokens file the proxy reads; HTTP middleware maps a token to (project, role) and checks the Host header; core's writer-rule table declares every command and system write by role and denies anything undeclared; the project config gains its drain_session key. Later epics append their rows. Hands on: the drain and bridge roles to epics 2 and 3."
-verify = "With two projects and a fixture orchestrator-only command, an orchestrator token runs it, a worker token is refused it, project A's token cannot reach project B, a revoked token gets 401 and an unknown Host gets 421."
+description = "Declares the token roles (orchestrator, clerk, worker:<name>, drain, bridge) and system; plotroom token issue and revoke write hashed tokens straight to the instance token file under a file lock (reloaded without restart) and, locally, the 0600 tokens file the proxy reads; HTTP middleware maps a token to (project, role) and checks the Host header; core's writer-rule table declares every command and system write by role and denies anything undeclared; the stdio proxy's readiness probe counts a 401 as a server answering; a person confirms how a real Claude Code session and a real Codex session handle a 401 with no WWW-Authenticate (the client spike entry 3 could not run before tokens existed); the project config gains its drain_session key. Later epics append their rows. Hands on: the drain and bridge roles to epics 2 and 3."
+verify = "With two projects and a fixture orchestrator-only command, an orchestrator token runs it, a worker token is refused it, project A's token cannot reach project B, a revoked token gets 401 and an unknown Host gets 421; with /mcp requiring a token, plotroom connect --stdio still finds the running daemon ready; real clients' handling of a bare 401 is recorded in the epic's Notes."
 covers = ["R1", "R7", "R12"]
 after = [3, 4]
-hitl = false
+hitl = true
 risk = "medium"
 
 [[entry]]
@@ -143,11 +143,11 @@ risk = "medium"
 id = 15
 type = "story"
 title = "Transport contract test over every tool"
-description = "The contract test calls every tool from entries 2 to 13 through the stdio proxy and HTTP in both protocol eras, and covers a 401 with no WWW-Authenticate; it runs in CI. A person confirms how a real Claude Code session and a real Codex session handle that 401."
+description = "The contract test calls every tool from entries 2 to 13 through the stdio proxy and HTTP in both protocol eras, and covers a 401 with no WWW-Authenticate and serve's lock refusal exiting with code 4 (uvicorn itself exits 3 on a failed start); it runs in CI. The real-client 401 check is entry 5's."
 verify = "The contract test passes in CI for every registered tool in both transports and both eras, and fails if a tool is missing from either."
 covers = ["R4", "R11"]
 after = [3, 5, 8, 9, 13]
-hitl = true
+hitl = false
 notes = ["Real clients seen by entry 3 (lane #14): Claude Code 2.1.323 speaks the 2026 era (server/discover, a long-lived subscriptions/listen) and Codex 0.169 the 2025-06-18 handshake era; both send notifications/cancelled. The contract test covers both eras, a long-lived subscriptions/listen, and cancellation."]
 risk = "medium"
 
@@ -163,13 +163,35 @@ hitl = true
 risk = "low"
 
 [[entry]]
+id = 17
+type = "story"
+title = "Bounded server log"
+description = "plotroom-serve.log in the data directory rotates by size, keeping a configured number of files, so a long-running daemon's log never grows without bound (found by lane #14 in PR #51)."
+verify = "With a small size limit configured, writing past it rotates the log, keeps only the configured number of files, and the daemon keeps logging to the new file."
+covers = ["R8"]
+after = [2]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 18
+type = "bug"
+title = "Tests can lose their daemon's port between picking and binding it"
+description = "Tests pick a free port and release it before the daemon binds it, so another process can take it in between; the daemon instead binds the port it is given or port 0 and publishes the port it bound (in its lock file or a ready line), and tests read it back (found by lane #14 in PR #51). A flaky test is a bug: fixed here, never rerun."
+verify = "The daemon started with port 0 reports the port it bound and serves on it, and the test suite starts every daemon that way with no free-port helper left."
+covers = ["R8", "R11"]
+after = [2]
+hitl = false
+risk = "medium"
+
+[[entry]]
 id = 12
 type = "story"
 title = "Refactor sweep"
-description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred, including the stdio proxy blocking on readline when a client breaks stdout but keeps stdin open and silent (deferred in PR #51)."
 verify = "Deferred findings are resolved or re-filed, and CI passes."
 covers = []
-after = [2, 3, 4, 5, 6, 7, 8, 13, 9, 10, 14, 15, 11]
+after = [2, 3, 4, 5, 6, 7, 8, 13, 9, 10, 14, 15, 11, 17, 18]
 hitl = false
 risk = "low"
 
