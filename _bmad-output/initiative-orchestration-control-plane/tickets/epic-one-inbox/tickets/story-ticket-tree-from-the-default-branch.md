@@ -9,7 +9,7 @@ hitl: false
 risk: low
 tracker_id: "37"
 remote: "https://github.com/mgd43b/plotroom/issues/37"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Ticket tree from the default branch
