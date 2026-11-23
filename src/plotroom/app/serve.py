@@ -39,6 +39,7 @@ from plotroom.app.portfile import (
 from plotroom.app.runtime import ProjectRuntime
 from plotroom.app.sqlite_floor import floor_problem
 from plotroom.app.tokens import TokenRegistry
+from plotroom.core.actions import SWITCHBOARD_SEND
 from plotroom.core.catalog import build_catalog
 from plotroom.core.ledger import Ledger
 from plotroom.ports import Clock
@@ -362,6 +363,7 @@ class Daemon:
                 self._clock,
                 tick_seconds=self._config.tick_seconds,
                 action_attempts=self._config.action_attempts,
+                handlers={SWITCHBOARD_SEND: switchboard.send} if switchboard is not None else {},
                 workers=workers,
                 work_items=BmadTicketTree(*source) if source is not None else None,
                 inputs=(switchboard.run,) if switchboard is not None else (),

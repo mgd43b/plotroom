@@ -13,6 +13,7 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.types import TextContent
 
+from plotroom.core.actions import Action
 from plotroom.core.events import NewEvent
 from plotroom.core.lanes import infer_lane
 from plotroom.core.ledger import Ledger
@@ -49,6 +50,8 @@ class Switchboard:
             env={"SWITCHBOARD_BOARD": board, "SWITCHBOARD_AUTO": "0"},
         )
         self._senders = senders
+        self._ready = asyncio.Event()
+        self._session: ClientSession | None = None
 
     async def run(self) -> None:
         delay = 0.25
@@ -64,9 +67,15 @@ class Switchboard:
                         registered = await _call(session, "register", {"name": NAME})
                         if registered.get("ok") is not True or registered.get("you") != NAME:
                             raise ValueError("Switchboard refused the protected address")
-                        while True:
-                            await self.receive(session)
-                            delay = 0.25
+                        self._session = session
+                        self._ready.set()
+                        try:
+                            while True:
+                                await self.receive(session)
+                                delay = 0.25
+                        finally:
+                            self._ready.clear()
+                            self._session = None
             except Exception:
                 log.warning(
                     "Switchboard receive unavailable, retrying",
@@ -74,6 +83,24 @@ class Switchboard:
                 )
             await asyncio.sleep(delay)
             delay = min(delay * 2, 30)
+
+    async def send(self, action: Action) -> None:
+        address, body = action.payload.get("to"), action.payload.get("body")
+        if not isinstance(address, str) or not address.strip() or not isinstance(body, str):
+            raise ValueError("Switchboard sends require a recipient and a message body")
+        while (session := self._session) is None:
+            await self._ready.wait()
+        response = await _call(
+            session,
+            "send",
+            {
+                "to": address,
+                "body": json.dumps({"action_key": action.key, "body": body}, ensure_ascii=False),
+                "idempotency_key": action.key,
+            },
+        )
+        if type(response.get("id")) is not int or response.get("to") != address:
+            raise ValueError("Switchboard did not accept the send")
 
     async def receive(self, session: ClientSession) -> None:
         batch = await _call(session, "wait", {"timeout_s": WAIT_SECONDS}, WAIT_SECONDS + 5)

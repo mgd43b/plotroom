@@ -30,7 +30,7 @@ def serve(state: Path) -> None:
             result = {
                 "tools": [
                     {"name": name, "inputSchema": {"type": "object"}}
-                    for name in ("register", "wait", "ack")
+                    for name in ("register", "wait", "ack", "send")
                 ]
             }
         else:
@@ -64,6 +64,14 @@ def serve(state: Path) -> None:
                 assert args["receipt"] == "redelivered"
                 (state / "acked").write_text(args["receipt"])
                 payload = {"ok": True, "id": 7}
+            elif name == "send":
+                first = state / "send-first"
+                if not first.exists():
+                    first.write_text(json.dumps(args))
+                    time.sleep(60)
+                    raise AssertionError("expected interruption after send")
+                (state / "send-retry").write_text(json.dumps(args))
+                payload = {"id": 11, "to": args["to"]}
             else:
                 raise AssertionError(name)
             result = {"content": [], "structuredContent": payload}
