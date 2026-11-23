@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -34,6 +35,7 @@ log = logging.getLogger("plotroom.daemon_start")
 LOG_FILE_NAME = "plotroom-serve.log"
 _POLL_SECONDS = 0.05
 _PROBE_TIMEOUT = 2.0
+_MAX_PID_RECORD_BYTES = 64
 
 # What a daemon started for a client inherits: enough to run, nothing of the client's own
 # environment (its tokens, its session variables). The PLOTROOM_* names are the config loader's
@@ -180,13 +182,22 @@ def logged_reason(log_path: Path, since: int) -> str | None:
 
 
 def lock_owner(data_dir: Path) -> int | None:
-    """The pid of the server that owns ``data_dir`` right now, or ``None`` when none does."""
-    if not holds_lock(data_dir):
-        return None
+    """Read the recorded PID if it is live, even when the file is stale."""
     try:
-        return int((data_dir / LOCK_FILE_NAME).read_text(encoding="utf-8").strip())
+        with open(
+            data_dir / LOCK_FILE_NAME,
+            "rb",
+            opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK),
+        ) as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            record = handle.read(_MAX_PID_RECORD_BYTES + 1)
+        if len(record) > _MAX_PID_RECORD_BYTES:
+            return None
+        pid = int(record.decode("utf-8"))
     except OSError, ValueError:
         return None
+    return pid if pid > 0 and _pid_alive(pid) else None
 
 
 def holds_lock(data_dir: Path) -> bool:
@@ -200,6 +211,11 @@ def holds_lock(data_dir: Path) -> bool:
     return False
 
 
+def _lock_still_held_by(data_dir: Path, pid: int) -> bool:
+    """Check the kernel lock and confirm the recorded PID after the check."""
+    return holds_lock(data_dir) and lock_owner(data_dir) == pid
+
+
 def _current_url(config: Config, require_published: bool) -> str | None:
     if config.port != 0 and not require_published:
         return config.url
@@ -211,10 +227,9 @@ def _current_url(config: Config, require_published: bool) -> str | None:
         return None
     if require_published and host is None:
         return None
-    # The file alone proves nothing: a killed daemon leaves it, and the kernel may hand its port
-    # to any other program. Only the lock's current owner can have written it. A dead pid needs no
-    # lock probe, which briefly takes the lock and could make a daemon starting just then lose it.
-    if not _pid_alive(pid) or lock_owner(config.data_dir) != pid:
+    # A killed daemon leaves both files behind. Skip the kernel check unless their PIDs match
+    # and the process is live. The PID files alone cannot establish ownership of the listener.
+    if lock_owner(config.data_dir) != pid or not _lock_still_held_by(config.data_dir, pid):
         return None
     return replace(
         config, host=host if require_published and host is not None else config.host, port=port
@@ -224,10 +239,10 @@ def _current_url(config: Config, require_published: bool) -> str | None:
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-    except ProcessLookupError, OverflowError:  # a pid no system has is not a live one
-        return False
-    except OSError:  # PermissionError: it exists, and is someone else's
+    except PermissionError:  # the process exists but belongs to someone else
         return True
+    except OSError, OverflowError:
+        return False
     return True
 
 
@@ -304,7 +319,11 @@ async def ensure_daemon(
             break
     owner = await asyncio.to_thread(lock_owner, config.data_dir)
     url = await current_url(config, require_published=require_published)
-    if owner is not None and owner != child.pid:
+    if (
+        owner is not None
+        and owner != child.pid
+        and await asyncio.to_thread(_lock_still_held_by, config.data_dir, owner)
+    ):
         if url is None:
             answer = "it has published no address that answers"
         elif config.port == 0:
