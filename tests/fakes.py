@@ -17,6 +17,7 @@ from typing import Any
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.actions import Action
 from plotroom.core.catalog import Catalog
+from plotroom.core.claims import OVERLAP_KINDS, Claim
 from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
@@ -32,6 +33,21 @@ from plotroom.ports.work_items import WorkItem
 
 FIXTURES = Path(__file__).parent / "fixtures"
 START = datetime(2026, 11, 22, 12, 0, 0, tzinfo=UTC)
+
+
+def _visible_claims(
+    claims: dict[tuple[str, str], Claim],
+    lanes: dict[str, Lane],
+    role: str,
+    lane: str | None = None,
+) -> list[Claim]:
+    return [
+        entry
+        for key, entry in sorted(claims.items())
+        if (lane is None or key[0] == lane)
+        and lanes[key[0]].state != "archived"
+        and role in {"orchestrator", "clerk", f"worker:{lanes[key[0]].worker}"}
+    ]
 
 
 def _branch_pull(
@@ -73,6 +89,7 @@ class _MemoryTransaction:
         self.receipts: dict[tuple[str, str], dict[str, Any]] = {}
         self.actions: dict[str, Action] = {}
         self.lanes: dict[str, Lane] = {}
+        self.claims: dict[tuple[str, str], Claim] = {}
         self.work_items: tuple[WorkItem, ...] = ()
         self.claude_turns: dict[tuple[str, str], set[str]] = {}
         self.pulls: dict[tuple[str, int], PullRequest] = {}
@@ -161,6 +178,30 @@ class _MemoryTransaction:
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         self._live()
         return self.pulls.get((repository, number))
+
+    async def lane_claims(self, lane: str | None = None) -> list[Claim]:
+        self._live()
+        return _visible_claims(self.claims, self.lanes, "orchestrator", lane)
+
+    async def save_claims(self, claims: list[Claim]) -> None:
+        self._live()
+        self.claims.update({(entry.lane, entry.glob): entry for entry in claims})
+
+    async def delete_claims(self, lane: str, globs: list[str] | None) -> None:
+        self._live()
+        self.claims = {
+            key: entry
+            for key, entry in self.claims.items()
+            if entry.lane != lane or (globs is not None and entry.glob not in globs)
+        }
+
+    async def open_pulls(self, repository: str) -> tuple[PullRequest, ...]:
+        self._live()
+        return tuple(
+            pull
+            for _, pull in sorted(self.pulls.items())
+            if pull.repository == repository and pull.state == "open" and pull.complete
+        )
 
     async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None:
         self._live()
@@ -275,6 +316,7 @@ class MemoryStore:
         self._receipts: dict[tuple[str, str], dict[str, Any]] = {}
         self._actions: dict[str, Action] = {}
         self._lanes: dict[str, Lane] = {}
+        self._claims: dict[tuple[str, str], Claim] = {}
         self._work_items: tuple[WorkItem, ...] = ()
         self._claude_turns: dict[tuple[str, str], set[str]] = {}
         self._pulls: dict[tuple[str, int], PullRequest] = {}
@@ -305,6 +347,7 @@ class MemoryStore:
         tx.receipts = copy.deepcopy(self._receipts)
         tx.actions = copy.deepcopy(self._actions)
         tx.lanes = self._lanes.copy()
+        tx.claims = self._claims.copy()
         tx.work_items = self._work_items
         tx.claude_turns = {key: ids.copy() for key, ids in self._claude_turns.items()}
         tx.pulls = self._pulls.copy()
@@ -322,6 +365,7 @@ class MemoryStore:
             self._receipts = tx.receipts
             self._actions = tx.actions
             self._lanes = tx.lanes
+            self._claims = tx.claims
             self._work_items = tx.work_items
             self._claude_turns = tx.claude_turns
             self._pulls = tx.pulls
@@ -357,21 +401,46 @@ class MemoryStore:
     async def ready_work_items(self) -> tuple[WorkItem, ...]:
         return self._work_items
 
-    async def read_github_board(self, role: str, repository: str) -> tuple[Board, GitHubSummary]:
+    async def read_snapshot(
+        self, role: str, repository: str | None
+    ) -> tuple[Board, GitHubSummary | None, int]:
+        board = await self.read_board(role)
+        claim_count = len(_visible_claims(self._claims, self._lanes, role))
+        if repository is None:
+            return board, None, claim_count
         opened = sum(
             pull.state == "open" for pull in self._pulls.values() if pull.repository == repository
         )
         cursor = await self.fetch_cursor(repository, PULL_REQUESTS)
-        seq, items, counts, lanes = await self.read_board(role)
+        seq, items, counts, lanes = board
         projected = [
             with_projected_pr(lane, pr.number, pr.head_sha)
             if (pr := _branch_pull(self._pulls, repository, lane.branch)) is not None
             else with_projected_pr(lane, None, None)
             for lane in lanes
         ]
-        return (seq, items, counts, projected), GitHubSummary(
-            opened, cursor.as_of if cursor else None
+        return (
+            (seq, items, counts, projected),
+            GitHubSummary(opened, cursor.as_of if cursor else None),
+            claim_count,
         )
+
+    async def read_claims(
+        self, role: str, lane: str | None, offset: int, limit: int
+    ) -> tuple[int, list[Claim]]:
+        claims = _visible_claims(self._claims, self._lanes, role, lane)
+        return self._seq, claims[offset : offset + limit]
+
+    async def read_overlaps(
+        self, role: str, lane: str | None, pr: int | None, offset: int, limit: int
+    ) -> tuple[int, list[Item]]:
+        cursor, items, _, _ = await self.read_board(role)
+        path = "lanes" if lane is not None else "prs"
+        subject = lane if lane is not None else pr
+        overlaps = [
+            item for item in items if item.kind in OVERLAP_KINDS and subject in item.context[path]
+        ]
+        return cursor, overlaps[offset : offset + limit]
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return self._pulls.get((repository, number))

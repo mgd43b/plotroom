@@ -29,6 +29,10 @@ TOOL_NAMES = {
     "lane_update",
     "lane_ready",
     "lane_archive",
+    "claim",
+    "release",
+    "claims",
+    "overlaps",
     "ingest",
 }
 type Message = dict[str, Any]
@@ -170,13 +174,13 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         names = {tool["name"] for tool in listed["result"]["tools"]}
         assert names == TOOL_NAMES
         for tool in listed["result"]["tools"]:
-            if tool["name"] == "ack" or tool["name"].startswith("lane_"):
+            if tool["name"] in {"ack", "claim", "release"} or tool["name"].startswith("lane_"):
                 assert "request_id" in tool["inputSchema"]["required"]
         called: set[str] = set()
 
         async def call(name: str, **args: Any) -> dict[str, Any]:
             called.add(name)
-            if name == "ack" or name.startswith("lane_"):
+            if name in {"ack", "claim", "release"} or name.startswith("lane_"):
                 args["request_id"] = name
             reply = await send(
                 message(era, len(called) + 2, "tools/call", name=name, arguments=args)
@@ -194,6 +198,10 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         assert (await call("wait", cursor=0, timeout=0))["item"] == item
         assert (await call("ack", item=item["id"]))["state"] == "snoozed"
         assert (await call("lane_ready", lane="lane", pr=1, head_sha="a" * 40))["state"] == "ready"
+        assert (await call("claim", lane="lane", globs=["src/**"], reason="fixture"))["changed"]
+        assert (await call("claims", lane="lane"))["claims"][0]["reason"] == "fixture"
+        assert (await call("overlaps", lane="lane"))["items"] == []
+        assert (await call("release", lane="lane", globs=["src/**"]))["changed"]
         assert (
             await call(
                 "ingest",

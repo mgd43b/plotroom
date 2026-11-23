@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from functools import partial
 
 from plotroom.core.actions import ACTION_FIELDS, FAILED_ACTION
+from plotroom.core.claims import CLAIM_OVERLAP, PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, claim, release
 from plotroom.core.commands import Command, CommandRegistry
 from plotroom.core.events import EventKind, EventRegistry, FieldSpec
 from plotroom.core.github import PR_FIELDS, PR_KINDS
@@ -92,6 +93,25 @@ def build_catalog(
     lane = FieldSpec("lane", "str")
     orchestrator = (WriterRule("orchestrator"),)
     owner = (*orchestrator, WriterRule("worker", owns_lane))
+    catalog.register_item(ItemKind(CLAIM_OVERLAP, 10, True, ("Coordinate the lane claims",)))
+    catalog.register_item(ItemKind(PR_CLAIM_OVERLAP, 10, True, ("Coordinate the PR and claim",)))
+    catalog.register_item(ItemKind(TICKET_TREE_MOVE, 10, True, ("Merge the editing PRs first",)))
+    globs = FieldSpec("globs", "array")
+    catalog.commands.register(
+        Command(
+            "claim",
+            (lane, globs, FieldSpec("reason", "str")),
+            claim,
+            record_if=lambda result: bool(result["changed"]),
+        ),
+        rules=owner,
+    )
+    catalog.commands.register(
+        Command(
+            "release", (lane, globs), release, record_if=lambda result: bool(result["changed"])
+        ),
+        rules=owner,
+    )
     catalog.commands.register(
         Command(
             "lane_start",

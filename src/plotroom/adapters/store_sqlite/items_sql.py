@@ -4,9 +4,10 @@ import json
 from dataclasses import asdict
 from typing import Any
 
-from sqlalchemy import Row, text
+from sqlalchemy import Row, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from plotroom.core.claims import OVERLAP_KINDS
 from plotroom.core.next_items import Item
 
 _ACTIVE_SUBJECTS = text(
@@ -14,10 +15,17 @@ _ACTIVE_SUBJECTS = text(
 )
 _BY_ID = text("SELECT * FROM next_items WHERE id = :id")
 _ACTIVE = text("SELECT * FROM next_items WHERE dedup_key = :key AND state != 'closed'")
-_OPEN = text(
-    "SELECT * FROM next_items WHERE state = 'open' AND (:role = 'orchestrator' OR role = :role) "
-    "ORDER BY rank_class, opened_seq LIMIT :limit OFFSET :offset"
+_VISIBLE_OPEN = (
+    "SELECT * FROM next_items WHERE state = 'open' AND (:role = 'orchestrator' OR role = :role)"
 )
+_ORDER = "ORDER BY rank_class, opened_seq LIMIT :limit OFFSET :offset"
+_OPEN = text(f"{_VISIBLE_OPEN} {_ORDER}")
+_OVERLAPS = text(
+    "SELECT * FROM next_items WHERE state = 'open' AND (:role = 'orchestrator' OR role = :role) "
+    "AND kind IN :kinds "
+    "AND EXISTS (SELECT 1 FROM json_each(context, :path) WHERE value = :subject) "
+    "ORDER BY rank_class, opened_seq LIMIT :limit OFFSET :offset"
+).bindparams(bindparam("kinds", expanding=True))
 _OPEN_BY_ID = text(
     "SELECT * FROM next_items WHERE id = :id AND state = 'open' "
     "AND (:role = 'orchestrator' OR role = :role)"
@@ -86,6 +94,28 @@ async def open_items(
 async def open_item(connection: AsyncConnection, role: str, item_id: str) -> Item | None:
     row = (await connection.execute(_OPEN_BY_ID, {"role": role, "id": item_id})).first()
     return None if row is None else _item(row)
+
+
+async def open_overlaps(
+    connection: AsyncConnection,
+    role: str,
+    lane: str | None,
+    pr: int | None,
+    offset: int,
+    limit: int,
+) -> list[Item]:
+    rows = await connection.execute(
+        _OVERLAPS,
+        {
+            "role": role,
+            "kinds": OVERLAP_KINDS,
+            "path": "$.lanes" if lane is not None else "$.prs",
+            "subject": lane if lane is not None else pr,
+            "offset": offset,
+            "limit": limit,
+        },
+    )
+    return [_item(row) for row in rows]
 
 
 async def save_item(connection: AsyncConnection, item: Item) -> None:

@@ -152,13 +152,13 @@ async def _project_pull(
     )
     if current is not None and current.head_sha != projected.head_sha:
         files = await uow.github_resource(repository, FILES, str(projected.number))
-        if files is not None and files.complete:
+        if files is not None and files.attributes.get("head_sha") is not None:
             await apply_resource(
                 uow,
                 repository,
                 FILES,
                 str(projected.number),
-                GitHubResource((), complete=False),
+                GitHubResource((), complete=False, attributes={"head_sha": None}),
                 as_of,
             )
     if not changes:
@@ -188,6 +188,7 @@ async def _project_pull(
         uid = f"{repository}#{projected.number}@{version}:{projected.updated_at}"
         await uow.append(NewEvent("github", kind, uid, fields, observed.body, lane_id))
     await uow.save_pull_request(projected)
+    uow.pull_overlaps_changed()
 
 
 async def apply_comments(
