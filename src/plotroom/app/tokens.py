@@ -99,7 +99,10 @@ def _read(path: Path) -> dict[str, Any]:
 
 
 def _read_instance(path: Path) -> dict[str, _InstanceRecord]:
-    records = _read(path)
+    return _validate_instance(path, _read(path))
+
+
+def _validate_instance(path: Path, records: dict[str, Any]) -> dict[str, _InstanceRecord]:
     for token_id, raw in records.items():
         if not _ID.fullmatch(token_id) or not isinstance(raw, dict):
             raise TokenError(f"invalid instance token file {path}")
@@ -231,10 +234,21 @@ class TokenRegistry:
         if match is None:
             return None
         try:
-            records = await asyncio.to_thread(_read_instance, self.path)
+            return await asyncio.to_thread(self._authenticate_from_disk, match[1], bearer)
         except OSError, TokenError:
             return None
-        record = records.get(match[1])
-        if record is None or not hmac.compare_digest(_digest(bearer), record["hash"]):
+
+    def _authenticate_from_disk(self, token_id: str, bearer: str) -> Identity | None:
+        records = _read(self.path)
+        raw: Any = records.get(token_id)
+        if not isinstance(raw, dict):
             return None
+        digest = cast("dict[str, Any]", raw).get("hash")
+        if (
+            not isinstance(digest, str)
+            or not _HASH.fullmatch(digest)
+            or not hmac.compare_digest(_digest(bearer), digest)
+        ):
+            return None
+        record = _validate_instance(self.path, records)[token_id]
         return Identity(record["project"], record["role"])

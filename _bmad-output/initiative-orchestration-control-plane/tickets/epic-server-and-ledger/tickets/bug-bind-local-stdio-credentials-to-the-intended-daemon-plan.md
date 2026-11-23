@@ -88,6 +88,7 @@ Preserve explicit URLs, public HTTP/MCP, project authorization, revocation, grac
 - Final-review medium, fixed. Prefer the shared data directory or the owner's existing runtime directory when the socket path fits. Keep a short private temporary directory as fallback.
 - Final-review low, fixed. Close the private listener and remove its directory before draining HTTP, so a forced stop during the drain does not strand the directory.
 - Nineteen focused socket, listener, restart, Host, and shutdown tests passed after the two final changes. Ruff, both Pyright targets, and the dependency check passed.
+- The last full local suites passed 445 tests on each locked Python version. Opening Kodus review on PR #143 identified cleanup after a live data-directory rename. Socket cleanup now uses the same pinned directory as unpublication, and a regression verifies that shutdown removes both from the moved directory.
 ## Verification
 
 - `uv run --locked python -m pytest`

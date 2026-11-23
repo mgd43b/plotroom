@@ -113,11 +113,18 @@ def prepare_local_socket(data_dir: Path, *, directory_fd: int | None = None) -> 
     raise error
 
 
-def remove_local_socket(path: Path) -> None:
+def remove_local_socket(path: Path, *, directory_fd: int | None = None) -> None:
+    parent = path.parent if directory_fd is None else Path(path.parent.name)
     with contextlib.suppress(OSError):
-        if path.is_socket():
-            path.unlink()
-        path.parent.rmdir()
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                mode = os.stat(path.name, dir_fd=fd, follow_symlinks=False).st_mode
+                if stat.S_ISSOCK(mode):
+                    os.unlink(path.name, dir_fd=fd)
+        finally:
+            os.close(fd)
+        os.rmdir(parent, dir_fd=directory_fd)
 
 
 def write_port(

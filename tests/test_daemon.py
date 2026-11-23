@@ -6,6 +6,7 @@ import asyncio
 import os
 import signal
 import socket
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -294,6 +295,28 @@ async def test_startup_cannot_unpublish_or_displace_the_replacement_daemon(
             previous_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await previous_task
+
+
+async def test_shutdown_removes_the_socket_from_a_renamed_data_directory() -> None:
+    with tempfile.TemporaryDirectory(prefix="plotroom-test-", dir="/tmp") as shared:
+        root = await asyncio.to_thread(Path(shared).resolve)
+        config = make_config(root)
+        daemon = Daemon(config, sqlite_version="3.0.0")
+        task, _ = await run_daemon(daemon)
+        try:
+            published = read_listener(config.data_dir)
+            assert published is not None
+            assert published.local_socket is not None
+            parent = Path(published.local_socket).parent
+            assert parent.parent == config.data_dir
+            moved = root / "moved"
+            await asyncio.to_thread(config.data_dir.rename, moved)
+            moved_parent = moved / parent.name
+            assert await asyncio.to_thread(moved_parent.is_dir)
+        finally:
+            await stop(daemon, task)
+        assert not await asyncio.to_thread(moved_parent.exists)
+        assert read_listener(moved) is None
 
 
 async def test_public_http_serves_when_the_private_listener_is_unavailable(

@@ -148,7 +148,10 @@ class _Server(uvicorn.Server):
             self._local_listener.close()
             self._local_listener = None
         if self._local_socket is not None:
-            remove_local_socket(self._local_socket)
+            directory_fd = (
+                self._directory_fd if self._local_socket.parent.parent == self._data_dir else None
+            )
+            remove_local_socket(self._local_socket, directory_fd=directory_fd)
             self._local_socket = None
 
 
@@ -254,7 +257,8 @@ class Daemon:
         if old is not None and old.local_socket is not None:
             stale_socket = published_socket(config.data_dir, identity, old.local_socket)
             if stale_socket is not None:
-                remove_local_socket(stale_socket)
+                parent_fd = directory_fd if stale_socket.parent.parent == config.data_dir else None
+                remove_local_socket(stale_socket, directory_fd=parent_fd)
         try:
             problem = floor_problem(self._sqlite_version)
             if problem is not None:

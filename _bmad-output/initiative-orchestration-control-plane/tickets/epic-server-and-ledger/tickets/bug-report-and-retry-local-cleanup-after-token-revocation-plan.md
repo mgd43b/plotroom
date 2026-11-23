@@ -58,6 +58,7 @@ The instance file is authoritative once revocation commits. Report a local clean
 - Follow-up low, fixed. Treat symlink refusal and invalid data as configuration errors. Keep operational read failures on the existing operational exit path.
 - All 23 focused tests passed after the second review fixes across both stories.
 - Three full native Codex review passes covered the batch. The combined suite passed 444 tests on each locked Python version after the token-file I/O fix.
+- Opening Kodus review on PR #143 identified unnecessary validation for rejected credentials. Authentication now rejects missing IDs and bad digests before schema validation. Accepted requests still validate a fresh snapshot so revocation and invalid files take effect immediately. The targeted post-review suite passed all 15 tests across both tickets.
 
 ## Verification
 

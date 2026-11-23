@@ -235,6 +235,25 @@ async def test_token_read_io_errors_remain_operational(
     assert await registry.authenticate(token.bearer) == Identity("demo", "orchestrator")
 
 
+async def test_rejected_bearers_skip_whole_snapshot_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TokenRegistry(tmp_path)
+    token = registry.issue("demo", "orchestrator", local=False)
+    token_id, secret = token.bearer.split(".", 1)
+    missing_id = "f" * 24 if token_id != "f" * 24 else "0" * 24
+    wrong_secret = ("f" if secret[0] != "f" else "0") + secret[1:]
+
+    def unexpected_validation(_path: Path, _records: dict[str, Any]) -> None:
+        pytest.fail("requests with a missing ID or bad digest do not validate the full snapshot")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("plotroom.app.tokens._validate_instance", unexpected_validation)
+        assert await registry.authenticate(f"{missing_id}.{secret}") is None
+        assert await registry.authenticate(f"{token_id}.{wrong_secret}") is None
+    assert await registry.authenticate(token.bearer) == Identity("demo", "orchestrator")
+
+
 @pytest.mark.parametrize("role", ["system", "worker", "worker:bad name", "admin"])
 def test_cli_refuses_invalid_token_roles(config_path: Path, role: str) -> None:
     code = main(
