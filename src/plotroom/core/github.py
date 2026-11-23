@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from plotroom.core.events import FieldSpec, NewEvent
-from plotroom.core.lanes import infer_lane
+from plotroom.core.lanes import infer_lane, refresh_ready_lane
 
 if TYPE_CHECKING:
     from plotroom.core.unit_of_work import UnitOfWork
@@ -82,8 +82,11 @@ async def apply_pull_poll(
 ) -> bool:
     if await uow.fetch_cursor(repository, PULL_REQUESTS) != baseline:
         return False
+    branches: set[str] = set()
     for observed in pulls:
-        await _project_pull(uow, repository, observed, as_of)
+        await _project_pull(uow, repository, observed, as_of, branches)
+    for branch in sorted(branches):
+        await refresh_ready_lane(uow, repository, branch)
     watermark = max((pull.updated_at for pull in pulls), default="")
     if baseline is not None:
         watermark = max(baseline.watermark, watermark)
@@ -117,7 +120,7 @@ def _changes(current: PullRequest | None, observed: ObservedPull) -> tuple[str, 
 
 
 async def _project_pull(
-    uow: UnitOfWork, repository: str, observed: ObservedPull, as_of: str
+    uow: UnitOfWork, repository: str, observed: ObservedPull, as_of: str, branches: set[str]
 ) -> None:
     current = await uow.pull_request(repository, observed.number)
     if current is not None and (
@@ -143,6 +146,10 @@ async def _project_pull(
         if current != projected:
             await uow.save_pull_request(projected)
         return
+    if current is not None and current.head_repository == repository:
+        branches.add(current.branch)
+    if projected.head_repository == repository:
+        branches.add(projected.branch)
     lane_id = (
         await infer_lane(uow, branch=projected.branch)
         if projected.head_repository == repository

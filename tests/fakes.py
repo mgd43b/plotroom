@@ -9,7 +9,7 @@ import sqlite3
 from collections import Counter
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,7 +21,7 @@ from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
 from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, GitHubSummary, PullRequest
-from plotroom.core.lanes import Lane
+from plotroom.core.lanes import Lane, with_projected_pr
 from plotroom.core.ledger import Ledger
 from plotroom.core.next_items import Item, visible
 from plotroom.core.roles import WriterRule
@@ -347,9 +347,9 @@ class MemoryStore:
         cursor = await self.fetch_cursor(repository, PULL_REQUESTS)
         seq, items, counts, lanes = await self.read_board(role)
         projected = [
-            replace(lane, pr=pr.number, head_sha=pr.head_sha)
+            with_projected_pr(lane, pr.number, pr.head_sha)
             if (pr := _branch_pull(self._pulls, repository, lane.branch)) is not None
-            else replace(lane, pr=None, head_sha=None)
+            else with_projected_pr(lane, None, None)
             for lane in lanes
         ]
         return (seq, items, counts, projected), GitHubSummary(

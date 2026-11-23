@@ -54,6 +54,10 @@ async def record_claude(
         raise LedgerError("forbidden", "ingest accepts only Claude reports and session messages")
     if not report.session_id.strip():
         raise LedgerError("invalid", "session_id must be nonempty")
+    try:
+        body_bytes = report.body.encode("utf-8")
+    except UnicodeError:
+        raise LedgerError("invalid", "Claude report text must be valid UTF-8") from None
     if role == "worker":
         if session_worker is not None and session_worker != caller:
             raise LedgerError("forbidden", "the Claude session is bound to another worker")
@@ -78,7 +82,7 @@ async def record_claude(
         return result
     if report.upstream_id is not None:
         raise LedgerError("invalid", "a turn report derives its upstream_id from the report")
-    digest = hashlib.sha256(report.body.encode()).hexdigest()
+    digest = hashlib.sha256(body_bytes).hexdigest()
     aliases = [f"digest:{digest}"]
     fields["report_digest"] = digest
     if report.turn_index is not None:

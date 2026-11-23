@@ -1,13 +1,17 @@
 """Poll explicitly bound local sessions and submit their observations to core."""
 
 import asyncio
+import logging
 from collections.abc import Mapping
 
+from plotroom.core.events import LedgerError
 from plotroom.core.intake import record_claude
 from plotroom.core.lanes import infer_lane
 from plotroom.core.ledger import Ledger
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.ports.session_reader import SessionEvent, SessionReader
+
+log = logging.getLogger("plotroom.session_intake")
 
 
 class SessionIntake:
@@ -18,15 +22,12 @@ class SessionIntake:
         self._reader = reader
         self._sessions = sessions
         self._seconds = seconds
-        self._seen: dict[str, set[SessionEvent]] = {}
 
     async def poll(self) -> None:
         for session, worker in self._sessions.items():
             observed = await self._reader.read(session)
-            seen = self._seen.setdefault(session, set())
-            pending = tuple(event for event in observed if event not in seen)
-            if pending and await self._record(worker, pending):
-                seen.update(pending)
+            if not observed or await self._record(worker, observed):
+                self._reader.accept(session)
 
     async def _record(self, worker: str, events: tuple[SessionEvent, ...]) -> bool:
         async def record(uow: UnitOfWork) -> bool:
@@ -34,7 +35,12 @@ class SessionIntake:
             if lane is None:
                 return False
             for event in events:
-                await record_claude(uow, event, lane=lane)
+                try:
+                    await record_claude(uow, event, lane=lane)
+                except LedgerError as exc:
+                    if exc.code != "invalid":
+                        raise
+                    log.warning("invalid Desktop observation", extra={"kind": event.kind})
             return True
 
         return await self._ledger.run("system", record)

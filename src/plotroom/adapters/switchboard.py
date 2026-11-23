@@ -23,6 +23,7 @@ from plotroom.core.unit_of_work import UnitOfWork
 log = logging.getLogger("plotroom.switchboard")
 NAME = "plotroom"
 WAIT_SECONDS = 15
+REGISTRATION_WAIT_SECONDS = 10
 
 
 async def _call(
@@ -90,8 +91,9 @@ class Switchboard:
         if not isinstance(address, str) or not address.strip() or not isinstance(body, str):
             raise ValueError("Switchboard sends require a recipient and a message body")
         address = address.strip()
-        while (session := self._session) is None:
-            await self._ready.wait()
+        async with asyncio.timeout(REGISTRATION_WAIT_SECONDS):
+            while (session := self._session) is None:
+                await self._ready.wait()
         response = await _call(
             session,
             "send",

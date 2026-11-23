@@ -28,6 +28,13 @@ class Lane:
         return {**asdict(self), "work_items": list(self.work_items)}
 
 
+def with_projected_pr(lane: Lane, number: int | None, head_sha: str | None) -> Lane:
+    state = lane.state
+    if state == "ready" and (number is None or (number, head_sha) != (lane.pr, lane.head_sha)):
+        state = "active"
+    return replace(lane, state=state, pr=number, head_sha=head_sha)
+
+
 async def infer_lane(
     uow: UnitOfWork, *, worker: str | None = None, branch: str | None = None
 ) -> str | None:
@@ -102,13 +109,18 @@ async def ready_lane(
         pr = await uow.open_branch_pull(repository, lane.branch)
         if pr is None or pr.number != args["pr"] or pr.head_sha != args["head_sha"]:
             raise LedgerError("conflict", "the PR and head must match the open GitHub projection")
-        result = await _save(
-            uow, replace(lane, state="ready", waiting_on=None, pr=None, head_sha=None)
-        )
-        return {**result, "pr": pr.number, "head_sha": pr.head_sha}
     return await _save(
         uow, replace(lane, state="ready", waiting_on=None, pr=args["pr"], head_sha=args["head_sha"])
     )
+
+
+async def refresh_ready_lane(uow: UnitOfWork, repository: str, branch: str) -> None:
+    lane = await uow.branch_lane(branch)
+    if lane is None or lane.state != "ready":
+        return
+    pr = await uow.open_branch_pull(repository, branch)
+    if pr is None or (pr.number, pr.head_sha) != (lane.pr, lane.head_sha):
+        await _save(uow, replace(lane, state="active", pr=None, head_sha=None))
 
 
 async def archive_lane(

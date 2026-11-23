@@ -306,18 +306,24 @@ async def test_heads_close_reopen_and_rate_limit_resume(
             assert await poller.poll(client)
             assert ledger.github_error is None
             assert await ledger.fetch_retry(REPO, PULL_REQUESTS) is None
-            assert (await ledger.snapshot_board("orchestrator"))[0][3][0].head_sha == new_head
+            projected_lane = (await ledger.snapshot_board("orchestrator"))[0][3][0]
+            assert projected_lane.head_sha == new_head
+            assert projected_lane.state == "active"
+            assert (await ledger.read_board("orchestrator"))[3][0].state == "active"
             with pytest.raises(LedgerError, match="head must match"):
                 await ledger.execute("worker:fixture", "lane_ready", "stale", args)
+            ready = {**args, "head_sha": new_head}
+            await ledger.execute("worker:fixture", "lane_ready", "confirm-new-head", ready)
             for state, open_count in [("closed", 0), ("open", 1), ("closed", 0), ("open", 1)]:
                 # GitHub timestamps have second resolution. Each observed transition is distinct.
                 github_fixture.rows = [pull(state=state, head=new_head, seconds=1)]
                 clock.advance(1)
                 assert await poller.poll(client)
                 assert await poller.poll(client)
-                _, summary = await ledger.snapshot_board("orchestrator")
+                board, summary = await ledger.snapshot_board("orchestrator")
                 assert summary is not None
                 assert summary.open_prs == open_count
+                assert board[3][0].state == "active"
             projected = await ledger.pull_request(REPO, 12)
             assert projected is not None
             assert projected.complete

@@ -103,7 +103,8 @@ async def test_reader_and_ingest_observe_one_turn(
         assert appended.created is not reader_first
         await intake.poll()
         # A new reader process must also defer to the durable aliases.
-        await SessionIntake(ledger, reader, {SESSION: "fixture"}, 1).poll()
+        restarted = ClaudeDesktopReader(tmp_path / "claude", tmp_path / "desktop")
+        await SessionIntake(ledger, restarted, {SESSION: "fixture"}, 1).poll()
         events = [event for event in await ledger.events_after(0) if event.source == "claude"]
         assert sorted(event.kind for event in events) == [SESSION_MESSAGE, TURN_REPORT]
         assert all(event.lane_id == "active" for event in events)
@@ -136,6 +137,68 @@ async def test_reader_rechecks_idle_status_after_reading_transcript(
 
     monkeypatch.setattr(reader, "_status", status)
     assert [event.kind for event in await reader.read(SESSION)] == [SESSION_MESSAGE]
+
+
+async def test_reader_never_follows_transcript_symlinks(tmp_path: Path) -> None:
+    reader = session_files(tmp_path)
+    transcript = tmp_path / "claude" / "projects" / "encoded-project" / f"{SESSION}.jsonl"
+    outside = transcript.rename(tmp_path / "outside.jsonl")
+    transcript.symlink_to(outside)
+    assert await reader.read(SESSION) == ()
+
+
+async def test_reader_resumes_a_partial_line_and_finishes_the_current_turn(tmp_path: Path) -> None:
+    reader = session_files(tmp_path, status="busy")
+    transcript = tmp_path / "claude" / "projects" / "encoded-project" / f"{SESSION}.jsonl"
+    assert [event.kind for event in await reader.read(SESSION)] == [SESSION_MESSAGE]
+    reader.accept(SESSION)
+    assert await reader.read(SESSION) == ()
+    reader.accept(SESSION)
+    peer = {"type": "user", "uuid": "late-peer", "origin": {"kind": "peer", "body": "late"}}
+    row = json.dumps(peer)
+    with transcript.open("a", encoding="utf-8") as stream:
+        stream.write("true}\n" + row[:20])
+    assert await reader.read(SESSION) == ()
+    reader.accept(SESSION)
+    with transcript.open("a", encoding="utf-8") as stream:
+        stream.write(row[20:] + "\n")
+    registry = tmp_path / "claude" / "sessions" / "103.json"
+    registry.write_text(json.dumps({"sessionId": SESSION, "status": "idle", "statusUpdatedAt": 9}))
+    assert [event.body for event in await reader.read(SESSION)] == ["late", REPORT]
+    reader.accept(SESSION)
+    assert await reader.read(SESSION) == ()
+
+
+async def test_invalid_text_does_not_discard_valid_desktop_messages(tmp_path: Path) -> None:
+    reader = session_files(tmp_path)
+    transcript = tmp_path / "claude" / "projects" / "encoded-project" / f"{SESSION}.jsonl"
+
+    def row(key: str, body: str) -> str:
+        peer = {"type": "user", "uuid": key, "origin": {"kind": "peer", "body": body}}
+        return json.dumps(peer) + "\n"
+
+    transcript.write_text(row("invalid", chr(0xD800)) + row("good", "valid"))
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    ledger = Ledger(store, build_catalog(frozenset({"fixture"})), FixedClock())
+    ledger.start()
+    try:
+        await ledger.execute(
+            "orchestrator",
+            "lane_start",
+            "start",
+            {"lane": "active", "worker": "fixture", "branch": "demo", "work_items": []},
+        )
+        intake = SessionIntake(ledger, reader, {SESSION: "fixture"}, 1)
+        await intake.poll()
+        with transcript.open("a", encoding="utf-8") as stream:
+            stream.write(row("next", "next valid"))
+        await intake.poll()
+        events = [event for event in await ledger.events_after(0) if event.source == "claude"]
+        assert [event.body for event in events] == ["valid", "next valid"]
+    finally:
+        await ledger.stop()
+        await store.close()
 
 
 def test_desktop_config_uses_explicit_roots_and_session_binding(tmp_path: Path) -> None:

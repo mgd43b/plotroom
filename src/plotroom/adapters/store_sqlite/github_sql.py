@@ -1,6 +1,7 @@
 """Persistence for the project GitHub projection."""
 
-from dataclasses import asdict, replace
+import json
+from dataclasses import asdict
 from typing import Any
 
 from sqlalchemy import text
@@ -8,7 +9,7 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, GitHubSummary, PullRequest
-from plotroom.core.lanes import Lane
+from plotroom.core.lanes import Lane, with_projected_pr
 
 PULL = text(
     "SELECT * FROM github_pull_requests WHERE repository = :repository AND number = :number"
@@ -44,6 +45,14 @@ BRANCH_HEAD = text("""
     WHERE repository = :repository AND head_repository = :repository AND branch = :branch
       AND state = 'open' AND complete
     LIMIT 2
+""")
+BRANCH_HEADS = text("""
+    SELECT pr.branch, MIN(pr.number) AS number, MIN(pr.head_sha) AS head_sha
+    FROM github_pull_requests AS pr
+    JOIN json_each(:branches) AS requested ON pr.branch = requested.value
+    WHERE pr.repository = :repository AND pr.head_repository = :repository
+      AND pr.state = 'open' AND pr.complete
+    GROUP BY pr.branch HAVING COUNT(*) = 1
 """)
 RETRY = text("""
     SELECT until, next_backoff FROM github_fetch_retries
@@ -96,14 +105,14 @@ async def open_branch_pull(
 async def project_lane_heads(
     connection: AsyncConnection, repository: str, lanes: list[Lane]
 ) -> list[Lane]:
-    projected: list[Lane] = []
-    for lane in lanes:
-        pr = await open_branch_pull(connection, repository, lane.branch)
-        if pr is not None:
-            projected.append(replace(lane, pr=pr.number, head_sha=pr.head_sha))
-        else:
-            projected.append(replace(lane, pr=None, head_sha=None))
-    return projected
+    if not lanes:
+        return []
+    branches = json.dumps(sorted({lane.branch for lane in lanes}))
+    rows = await connection.execute(BRANCH_HEADS, {"repository": repository, "branches": branches})
+    matches: dict[str, tuple[int | None, str | None]] = {
+        row.branch: (row.number, row.head_sha) for row in rows
+    }
+    return [with_projected_pr(lane, *matches.get(lane.branch, (None, None))) for lane in lanes]
 
 
 async def save_pull_request(connection: AsyncConnection, pull: PullRequest) -> None:

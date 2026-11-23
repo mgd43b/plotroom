@@ -11,7 +11,7 @@ from fakes import FixedClock
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.adapters.switchboard import Switchboard
 from plotroom.app.runtime import ProjectRuntime
-from plotroom.core.actions import SWITCHBOARD_SEND
+from plotroom.core.actions import SWITCHBOARD_SEND, Action
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import NewEvent
 from plotroom.core.ledger import Ledger
@@ -51,6 +51,24 @@ async def marker(directory: Path, name: str) -> None:
     async with asyncio.timeout(8):
         while not (directory / name).exists():  # noqa: ASYNC110 - observed across subprocesses
             await asyncio.sleep(0.02)
+
+
+async def test_send_times_out_when_relay_has_not_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("plotroom.adapters.switchboard.REGISTRATION_WAIT_SECONDS", 0)
+    store = SqliteStore("demo", tmp_path)
+    relay = Switchboard(
+        Ledger(store, build_catalog(), FixedClock()), "fixture", (sys.executable,), {}
+    )
+    action = Action(
+        "evt_fixture:send:", SWITCHBOARD_SEND, "evt_fixture", {"to": "peer", "body": "send"}
+    )
+    try:
+        with pytest.raises(TimeoutError):
+            await relay.send(action)
+    finally:
+        await store.close()
 
 
 async def test_switchboard_redelivery_after_interrupted_ack(tmp_path: Path) -> None:

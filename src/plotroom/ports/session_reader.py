@@ -15,5 +15,9 @@ class SessionEvent:
 
 class SessionReader(Protocol):
     async def read(self, session_id: str) -> tuple[SessionEvent, ...]:
-        """Return observations for the full session. Repeated reads may repeat prior facts."""
+        """Return observations after the last accepted checkpoint."""
+        ...
+
+    def accept(self, session_id: str) -> None:
+        """Advance after the caller has handled the most recent read."""
         ...
