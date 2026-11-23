@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from plotroom.core.actions import Action
 from plotroom.core.catalog import Catalog
 from plotroom.core.commands import COMMAND_APPENDER, command_kind
 from plotroom.core.events import (
@@ -17,11 +20,15 @@ from plotroom.core.events import (
     is_json,
     validate_fields,
 )
+from plotroom.core.lanes import Lane
+from plotroom.core.next_items import Item
 from plotroom.core.roles import OwnershipView, role_family
 from plotroom.core.unit_of_work import UnitOfWork
+from plotroom.core.watchers import Watchers
 from plotroom.core.writer import ProjectWriter
 from plotroom.ports.clock import Clock
 from plotroom.ports.store import Store, Transaction
+from plotroom.ports.work_items import WorkItem
 
 
 @dataclass(frozen=True)
@@ -42,21 +49,41 @@ def _check_role(role: str) -> str:
 class Ledger:
     """One project's event log: typed appends and deduplicated commands, one transaction each."""
 
-    def __init__(self, store: Store, catalog: Catalog, clock: Clock) -> None:
+    def __init__(
+        self,
+        store: Store,
+        catalog: Catalog,
+        clock: Clock,
+        *,
+        watcher_roles: tuple[str, ...] = (),
+        wait_cap: int = 240,
+    ) -> None:
         self._store = store
         self._catalog = catalog
         self._clock = clock
         self._writer = ProjectWriter(store)
+        self.watchers = Watchers(watcher_roles)
+        self._wait_cap = wait_cap
+        self._stopping = asyncio.Event()
+
+    @property
+    def commit_signal(self) -> asyncio.Event:
+        return self._writer.commit_signal
+
+    async def pending_action(self) -> Action | None:
+        return await self._store.pending_action()
 
     @property
     def project_id(self) -> str:
         return self._store.project_id
 
     def start(self) -> None:
+        self._stopping.clear()
         self._writer.start()
 
     async def stop(self) -> None:
         """Finish the queued inputs and stop the writer; later inputs fail ``unavailable``."""
+        self.stop_waiting()
         await self._writer.stop()
 
     async def run[T](self, role: str, work: Callable[[UnitOfWork], Awaitable[T]]) -> T:
@@ -64,7 +91,11 @@ class Ledger:
         _check_role(role)
 
         async def in_transaction(tx: Transaction) -> T:
-            return await work(UnitOfWork(tx, self._catalog.events, self._clock, role=role))
+            return await work(
+                UnitOfWork(
+                    tx, self._catalog.events, self._clock, role=role, items=self._catalog.items
+                )
+            )
 
         return await self._writer.submit(in_transaction)
 
@@ -102,25 +133,38 @@ class Ledger:
 
         async def in_transaction(tx: Transaction) -> CommandResult:
             uow = UnitOfWork(
-                tx, self._catalog.events, self._clock, role=role, append_role=COMMAND_APPENDER
+                tx,
+                self._catalog.events,
+                self._clock,
+                role=role,
+                append_role=COMMAND_APPENDER,
+                items=self._catalog.items,
             )
             recorded = await uow.find_event("core", kind, upstream_id)
-            if recorded is None:
+            receipt = recorded.fields if recorded is not None else None
+            if receipt is None and registered.record_if is not None:
+                receipt = await tx.find_noop_receipt(command, upstream_id)
+            if receipt is None:
                 validate_fields(registered.args, snapshot, command)
             # A retry can supply different arguments. Authorize the actual target of the
             # receipt, so new arguments cannot make a previous target visible.
-            target: dict[str, Any] = snapshot if recorded is None else recorded.fields["args"]
+            target: dict[str, Any] = snapshot if receipt is None else receipt["args"]
             if rule.owns is not None:
-                view = OwnershipView(role, uow.find_event)
+                view = OwnershipView(role, uow.find_event, uow.find_item, uow.find_lane)
                 if not await rule.owns(view, copy.deepcopy(target)):
                     raise LedgerError(
                         "forbidden", f"role {role!r} does not own the target of {command}"
                     )
-            if recorded is not None:
-                return CommandResult(recorded.fields["result"], True)
+            if receipt is not None:
+                return CommandResult(receipt["result"], True)
             result = await registered.handler(uow, copy.deepcopy(snapshot))
             if not isinstance(result, dict) or not is_json(result):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise TypeError(f"command {command!r} must return a JSON object")
+            if registered.record_if is not None and not registered.record_if(result):
+                await tx.insert_noop_receipt(
+                    command, upstream_id, {"args": snapshot, "result": result}
+                )
+                return CommandResult(result, False)
             await uow.append(
                 NewEvent(
                     source="core",
@@ -145,3 +189,63 @@ class Ledger:
     async def events_after(self, seq: int, limit: int = 100) -> list[Event]:
         """Committed events above ``seq``, ascending."""
         return await self._store.events_after(seq, limit)
+
+    def stop_waiting(self) -> None:
+        self._stopping.set()
+        self.commit_signal.set()
+
+    async def wait_for_item(
+        self,
+        role: str,
+        cursor: int | None,
+        seconds: float | None,
+        progress: Callable[[float, float], Awaitable[None]],
+    ) -> tuple[int, dict[str, Any] | None]:
+        """Wait for the first change visible to the caller and return its resume cursor."""
+        _check_role(role)
+        if cursor is not None and not 0 <= cursor <= 2**63 - 1:
+            raise LedgerError("invalid", "cursor must be a nonnegative ledger sequence")
+        if seconds is not None and (not math.isfinite(seconds) or seconds < 0):
+            raise LedgerError("invalid", "timeout must be a nonnegative finite number")
+        cap = float(self._wait_cap) if seconds is None else min(seconds, self._wait_cap)
+        now = asyncio.get_running_loop().time
+        started = now()
+        until = started + cap
+        position = await self.head_seq() if cursor is None else cursor
+        interval = min(15, cap / 2)
+        report_at = started
+        with self.watchers.waiting(role):
+            while True:
+                if self._stopping.is_set():
+                    raise LedgerError("unavailable", "the project is stopping")
+                committed = self.commit_signal
+                head, change = await self._store.first_item_change(role, position)
+                if position > head:
+                    raise LedgerError("invalid", "cursor is ahead of the project ledger")
+                if change is not None:
+                    return int(change["seq"]), change
+                # Advancing past invisible rows is safe because the read used one committed view.
+                position = head
+                current = now()
+                if current >= until:
+                    return position, None
+                if current >= report_at:
+                    await progress(current - started, cap)
+                    report_at = current + interval
+                try:
+                    async with asyncio.timeout_at(min(until, report_at)):
+                        await committed.wait()
+                except TimeoutError:
+                    continue
+
+    async def ready_work_items(self) -> tuple[WorkItem, ...]:
+        return await self._store.ready_work_items()
+
+    async def read_next(self, role: str, offset: int, limit: int) -> tuple[int, list[Item]]:
+        return await self._store.read_next(role, offset, limit)
+
+    async def read_open_item(self, role: str, item_id: str) -> Item | None:
+        return await self._store.read_open_item(role, item_id)
+
+    async def read_board(self, role: str) -> tuple[int, list[Item], dict[str, int], list[Lane]]:
+        return await self._store.read_board(role)

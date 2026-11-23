@@ -25,3 +25,7 @@ Verify: With the cap set to 2 seconds, a background plotroom watch keeps waiting
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md
+
+## Notes
+
+- Built: https://github.com/mgd43b/plotroom/pull/144

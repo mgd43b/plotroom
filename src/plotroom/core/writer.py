@@ -35,6 +35,7 @@ class ProjectWriter:
         self._queue: asyncio.Queue[_Item | None] | None = None
         self._task: asyncio.Task[None] | None = None
         self._accepting = False
+        self.commit_signal = asyncio.Event()
 
     @property
     def running(self) -> bool:
@@ -44,6 +45,7 @@ class ProjectWriter:
         """Start the writer task. Needs a running event loop."""
         if self._task is not None and not self._task.done():
             raise RuntimeError("the writer is already running")
+        self.commit_signal = asyncio.Event()
         queue: asyncio.Queue[_Item | None] = asyncio.Queue()
         self._queue = queue
         self._accepting = True
@@ -125,6 +127,8 @@ class ProjectWriter:
                         future.set_exception(_unavailable())
                     raise
                 else:
+                    committed, self.commit_signal = self.commit_signal, asyncio.Event()
+                    committed.set()
                     if not future.done():
                         future.set_result(result)
         finally:

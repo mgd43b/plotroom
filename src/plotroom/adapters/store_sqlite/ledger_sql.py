@@ -8,7 +8,12 @@ from typing import Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from plotroom.adapters.store_sqlite import actions_sql, items_sql, lanes_sql, work_items_sql
+from plotroom.core.actions import Action
 from plotroom.core.events import Event
+from plotroom.core.lanes import Lane
+from plotroom.core.next_items import Item
+from plotroom.ports.work_items import WorkItem
 
 FIND_EVENT = text(
     "SELECT seq, id, source, kind, upstream_id, lane_id, fields, body, observed_at "
@@ -17,6 +22,13 @@ FIND_EVENT = text(
 INSERT_EVENT = text(
     "INSERT INTO events (seq, id, source, kind, upstream_id, lane_id, fields, body, observed_at) "
     "VALUES (:seq, :id, :source, :kind, :uid, :lane_id, :fields, :body, :observed_at)"
+)
+FIND_NOOP_RECEIPT = text(
+    "SELECT receipt FROM noop_command_receipts WHERE command = :command AND request_key = :key"
+)
+INSERT_NOOP_RECEIPT = text(
+    "INSERT INTO noop_command_receipts (command, request_key, receipt) "
+    "VALUES (:command, :key, :receipt)"
 )
 ALLOCATE_SEQ = text("UPDATE project_seq SET value = value + 1 WHERE id = 1 RETURNING value")
 HEAD_SEQ = text("SELECT value FROM project_seq WHERE id = 1")
@@ -82,3 +94,51 @@ class SqliteTransaction:
     async def allocate_seq(self) -> int:
         result = await self._live().execute(ALLOCATE_SEQ)
         return int(result.scalar_one())
+
+    async def find_noop_receipt(self, command: str, key: str) -> dict[str, Any] | None:
+        value = (
+            await self._live().execute(FIND_NOOP_RECEIPT, {"command": command, "key": key})
+        ).scalar_one_or_none()
+        receipt: dict[str, Any] | None = None if value is None else json.loads(value)
+        return receipt
+
+    async def insert_noop_receipt(self, command: str, key: str, receipt: dict[str, Any]) -> None:
+        await self._live().execute(
+            INSERT_NOOP_RECEIPT, {"command": command, "key": key, "receipt": json.dumps(receipt)}
+        )
+
+    async def active_item_subjects(self, kind: str) -> set[str]:
+        return await items_sql.active_item_subjects(self._live(), kind)
+
+    async def find_item(self, item_id: str) -> Item | None:
+        return await items_sql.find_item(self._live(), item_id)
+
+    async def active_item(self, key: str) -> Item | None:
+        return await items_sql.active_item(self._live(), key)
+
+    async def ready_work_items(self) -> tuple[WorkItem, ...]:
+        return await work_items_sql.ready_work_items(self._live())
+
+    async def replace_work_items(self, items: tuple[WorkItem, ...]) -> None:
+        await work_items_sql.replace_work_items(self._live(), items)
+
+    async def claimed_work_items(self) -> set[str]:
+        return await work_items_sql.claimed_work_items(self._live())
+
+    async def find_lane(self, lane_id: str) -> Lane | None:
+        return await lanes_sql.find_lane(self._live(), lane_id)
+
+    async def worker_lane(self, worker: str) -> Lane | None:
+        return await lanes_sql.worker_lane(self._live(), worker)
+
+    async def save_lane(self, lane: Lane) -> None:
+        await lanes_sql.save_lane(self._live(), lane)
+
+    async def insert_action(self, action: Action) -> None:
+        await actions_sql.insert_action(self._live(), action)
+
+    async def update_action(self, action: Action) -> None:
+        await actions_sql.update_action(self._live(), action)
+
+    async def save_item(self, item: Item) -> None:
+        await items_sql.save_item(self._live(), item)

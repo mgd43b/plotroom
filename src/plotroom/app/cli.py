@@ -63,6 +63,11 @@ def _parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="how long to wait for a daemon started on demand (default: %(default)s)",
     )
+    watch = commands.add_parser("watch", help="wait until the next visible board change")
+    watch.add_argument("--config", type=Path, help="TOML config file (default: PLOTROOM_CONFIG)")
+    watch.add_argument("--token-id", help="local token ID (default: PLOTROOM_TOKEN_ID)")
+    watch.add_argument("--url", help="MCP endpoint (default: the local daemon)")
+    watch.add_argument("--cursor", type=int, help="resume after this board sequence")
     token = commands.add_parser("token", help="manage credentials without a running daemon")
     token_commands = token.add_subparsers(dest="action", required=True)
     issue = token_commands.add_parser("issue", help="issue a token and print it once as JSON")
@@ -89,6 +94,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     setup_logging(sys.stderr)  # stdout is the protocol channel
     if args.command == "token":
         return _token(args)
+    if args.command == "watch":
+        return _watch(args.url, args.config, args.token_id, args.cursor)
     return _connect(args.url, args.config, args.start_timeout, args.token_id)
 
 
@@ -165,6 +172,46 @@ def _serve(config_path: Path | None, log_file: Path | None) -> int:
         log.exception("serve failed")
         return EXIT_FAILURE
     return 0
+
+
+def _watch(url: str | None, config: Path | None, token_id: str | None, cursor: int | None) -> int:
+    from mcp.client.client import Client
+    from mcp.client.stdio import StdioServerParameters
+    from mcp_types import TextContent
+
+    args = ["-m", "plotroom", "connect", "--stdio"]
+    for flag, value in (("--url", url), ("--config", config), ("--token-id", token_id)):
+        if value is not None:
+            args.extend((flag, str(value)))
+
+    async def watch() -> int:
+        position = cursor
+        proxy = StdioServerParameters(command=sys.executable, args=args, env=os.environ.copy())
+        async with Client(proxy, mode="legacy") as client:
+            while True:
+                response = await client.call_tool(
+                    "wait", {} if position is None else {"cursor": position}
+                )
+                first = next(iter(response.content), None)
+                if not isinstance(first, TextContent):
+                    raise ValueError("wait returned no JSON result")
+                result = json.loads(first.text)
+                if not result["ok"]:
+                    log.error("wait failed", extra={"reason": result["error"]["message"]})
+                    return EXIT_FAILURE
+                data = result["data"]
+                position = int(data["cursor"])
+                if data["item"] is not None:
+                    print(json.dumps(data))
+                    return 0
+
+    try:
+        return asyncio.run(watch())
+    except KeyboardInterrupt:
+        return 130
+    except Exception as exc:
+        log.error("watch connection failed", extra={"reason": type(exc).__name__})
+        return EXIT_FAILURE
 
 
 def _connect(

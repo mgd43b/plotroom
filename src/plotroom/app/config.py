@@ -13,6 +13,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+from plotroom.core.roles import role_family
+from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, MIN_BOARD_BUDGET
+
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_ALLOWED_HOSTS = ("localhost:*", "127.0.0.1:*", "[::1]:*")
@@ -29,6 +32,11 @@ _TOP_LEVEL_KEYS = {
     "projects",
     "log_max_bytes",
     "log_backups",
+    "snapshot_budget",
+    "next_budget",
+    "tick_seconds",
+    "action_attempts",
+    "wait_cap",
 }
 
 
@@ -48,6 +56,15 @@ class Config:
     log_max_bytes: int = DEFAULT_LOG_MAX_BYTES
     log_backups: int = DEFAULT_LOG_BACKUPS
     drain_sessions: Mapping[str, str] = field(default_factory=lambda: {})
+
+    workers: Mapping[str, frozenset[str]] = field(default_factory=lambda: {})
+    ticket_trees: Mapping[str, tuple[Path, Path]] = field(default_factory=lambda: {})
+    snapshot_budget: int = DEFAULT_SNAPSHOT_BUDGET
+    next_budget: int = DEFAULT_SNAPSHOT_BUDGET
+    tick_seconds: int = 60
+    action_attempts: int = 3
+    wait_cap: int = 240
+    watchers: Mapping[str, tuple[str, ...]] = field(default_factory=lambda: {})
 
     @property
     def url(self) -> str:
@@ -106,6 +123,7 @@ def load_config(
     )
     projects = _projects(env.get("PLOTROOM_PROJECTS"), raw.get("projects"))
     drain_sessions = _drain_sessions(projects, raw.get("projects"))
+    workers = _workers(projects, raw.get("projects"))
     if require_projects and not projects:
         raise ConfigError(
             "no projects configured: add a [projects.<id>] table to the config file "
@@ -130,6 +148,20 @@ def load_config(
         log_max_bytes=log_max_bytes,
         log_backups=log_backups,
         drain_sessions=drain_sessions,
+        workers=workers,
+        ticket_trees=_ticket_trees(projects, raw.get("projects"), base),
+        watchers=_watchers(projects, raw.get("projects"), drain_sessions),
+        wait_cap=_integer("wait_cap", raw.get("wait_cap", 240), minimum=1),
+        snapshot_budget=_integer(
+            "snapshot_budget",
+            raw.get("snapshot_budget", DEFAULT_SNAPSHOT_BUDGET),
+            minimum=MIN_BOARD_BUDGET,
+        ),
+        next_budget=_integer(
+            "next_budget", raw.get("next_budget", DEFAULT_SNAPSHOT_BUDGET), minimum=MIN_BOARD_BUDGET
+        ),
+        tick_seconds=_integer("tick_seconds", raw.get("tick_seconds", 60), minimum=1),
+        action_attempts=_integer("action_attempts", raw.get("action_attempts", 3), minimum=1),
     )
 
 
@@ -221,3 +253,84 @@ def _drain_sessions(projects: tuple[str, ...], table: Any) -> dict[str, str]:
                 f"projects.{project_id}.drain_session", project["drain_session"]
             )
     return sessions
+
+
+def _workers(projects: tuple[str, ...], table: Any) -> dict[str, frozenset[str]]:
+    configured: dict[str, frozenset[str]] = {}
+    if not isinstance(table, dict):
+        return configured
+
+    entries = cast("dict[str, dict[str, Any]]", table)
+    for project_id in projects:
+        workers: Any = entries.get(project_id, {}).get("workers", {})
+        if not isinstance(workers, dict):
+            raise ConfigError(f"projects.{project_id}.workers must be a table keyed by worker name")
+        names = cast("dict[str, Any]", workers)
+        for name, value in names.items():
+            if not isinstance(value, dict):
+                raise ConfigError(f"projects.{project_id}.workers.{name} must be a table")
+            try:
+                role_family(f"worker:{name}")
+            except ValueError as exc:
+                raise ConfigError(
+                    f"projects.{project_id}.workers.{name}: invalid worker name"
+                ) from exc
+        configured[project_id] = frozenset(names)
+    return configured
+
+
+def _watchers(
+    projects: tuple[str, ...], table: Any, drain_sessions: Mapping[str, str]
+) -> dict[str, tuple[str, ...]]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, tuple[str, ...]] = {}
+    for project_id in projects:
+        value: Any = entries.get(project_id, {}).get("watchers")
+        if value is None:
+            configured[project_id] = (
+                ("orchestrator", "clerk", "drain")
+                if project_id in drain_sessions
+                else ("orchestrator", "clerk")
+            )
+            continue
+        label = f"projects.{project_id}.watchers"
+        if value == []:
+            configured[project_id] = ()
+            continue
+        roles = _string_list(label, value, ())
+        try:
+            if any(role_family(role) == "system" for role in roles):
+                raise ValueError("system cannot watch")
+        except ValueError as exc:
+            raise ConfigError(f"{label}: {exc}") from None
+        configured[project_id] = tuple(dict.fromkeys(roles))
+    return configured
+
+
+def _ticket_trees(
+    projects: tuple[str, ...], table: Any, base: Path
+) -> dict[str, tuple[Path, Path]]:
+    sources: dict[str, tuple[Path, Path]] = {}
+    if not isinstance(table, dict):
+        return sources
+    entries = cast("dict[str, dict[str, Any]]", table)
+    for project_id in projects:
+        settings = entries.get(project_id, {})
+        if "ticket_tree" in settings:
+            field_name = f"projects.{project_id}"
+            tree = (
+                base
+                / Path(_string(f"{field_name}.ticket_tree", settings["ticket_tree"])).expanduser()
+            ).resolve()
+            if "bmad_installation" not in settings:
+                raise ConfigError(
+                    f"{field_name}.bmad_installation must name a trusted BMad installation"
+                )
+            installation = (
+                base
+                / Path(
+                    _string(f"{field_name}.bmad_installation", settings["bmad_installation"])
+                ).expanduser()
+            ).resolve()
+            sources[project_id] = tree, installation
+    return sources

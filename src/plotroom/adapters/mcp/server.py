@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from mcp.server.mcpserver import Context, MCPServer
@@ -18,7 +18,9 @@ from plotroom.core.envelope import err, ok
 from plotroom.core.events import LedgerError
 from plotroom.core.ledger import Ledger
 from plotroom.core.roles import Identity
-from plotroom.core.snapshot import snapshot_result
+from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, render_next, render_snapshot
+
+_NEXT_PAGE_SIZE = 64
 
 type Authenticate = Callable[[str], Awaitable[Identity | None]]
 
@@ -109,6 +111,8 @@ def build_app(
     ledgers: Mapping[str, Ledger],
     authenticate: Authenticate,
     unavailable: str | None = None,
+    snapshot_budget: int = DEFAULT_SNAPSHOT_BUDGET,
+    next_budget: int = DEFAULT_SNAPSHOT_BUDGET,
 ) -> Starlette:
     """The ASGI app serving the tool set at ``/mcp``.
 
@@ -117,13 +121,175 @@ def build_app(
     """
     server = MCPServer("plotroom")
 
-    @server.tool()
-    def snapshot(ctx: Context[Any, Request]) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
-        """Summarize the whole board: lanes, open items by kind, and the ranked item list."""
+    def board_access(ctx: Context[Any, Request]) -> ProjectRequest:
         caller = _project_request(ctx)
-        if unavailable is None and caller.identity.role == "drain":
-            return err("forbidden", "the drain role may only read the outbox")
-        return snapshot_result(caller.identity.project_id, unavailable)
+        if unavailable is not None:
+            raise LedgerError("unavailable", unavailable)
+        if caller.identity.role == "drain":
+            raise LedgerError("forbidden", "the drain role may only read the outbox")
+        return caller
+
+    @server.tool()
+    async def snapshot(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        lane_offset: int = 0,
+        lane: str | None = None,
+    ) -> dict[str, Any]:
+        """Summarize the board, page through current lanes, or read a named lane in full."""
+        try:
+            caller = board_access(ctx)
+            if lane_offset < 0:
+                return err("invalid", "lane_offset must be nonnegative")
+            cursor, items, lanes, details = (
+                (0, [], {}, [])
+                if caller.ledger is None
+                else await caller.ledger.read_board(caller.identity.role)
+            )
+            if lane is not None:
+                for detail in details:
+                    if detail.id == lane:
+                        return ok(detail.render())
+                return err("not_found", "current lane not found")
+            return ok(
+                render_snapshot(
+                    caller.identity.project_id,
+                    cursor,
+                    items,
+                    lanes,
+                    snapshot_budget,
+                    lane_details=details,
+                    lane_offset=lane_offset,
+                )
+            )
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
+
+    async def next_items(
+        ctx: Context[Any, Request],
+        offset: int = 0,
+        item: str | None = None,
+    ) -> dict[str, Any]:
+        """Page through visible next items in rank order, or read one open item in full."""
+        try:
+            caller = board_access(ctx)
+            if not 0 <= offset <= 2**63 - 1:
+                return err("invalid", "offset must be a nonnegative SQLite integer")
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            role = caller.identity.role
+            if item is not None:
+                entry = await caller.ledger.read_open_item(role, item)
+                if entry is None:
+                    return err("not_found", "open next item not found")
+                return ok(asdict(entry))
+            cursor, items = await caller.ledger.read_next(role, offset, _NEXT_PAGE_SIZE + 1)
+            return ok(
+                render_next(
+                    cursor,
+                    items[:_NEXT_PAGE_SIZE],
+                    offset,
+                    next_budget,
+                    has_more=len(items) > _NEXT_PAGE_SIZE,
+                )
+            )
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
+
+    server.tool(name="next")(next_items)
+
+    @server.tool()
+    async def ack(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        item: str,
+        request_id: str,
+        outcome: str | None = None,
+    ) -> dict[str, Any]:
+        """Acknowledge a next item."""
+        args: dict[str, Any] = {"item": item}
+        if outcome is not None:
+            args["outcome"] = outcome
+        if unavailable is not None:
+            return err("unavailable", unavailable)
+        return await execute_command(ctx, "ack", request_id, args)
+
+    @server.tool()
+    async def wait(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        cursor: int | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 - MCP tool argument
+    ) -> dict[str, Any]:
+        """Wait for the next visible board change, or return a cursor on timeout."""
+        caller = _project_request(ctx)
+        if caller.ledger is None:
+            return err("unavailable", unavailable or "the project ledger is unavailable")
+
+        async def progress(elapsed: float, total: float) -> None:
+            await ctx.report_progress(elapsed, total, "Waiting for the next item")
+
+        try:
+            position, item = await caller.ledger.wait_for_item(
+                caller.identity.role, cursor, timeout, progress
+            )
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
+        return ok({"cursor": position, "item": item})
+
+    @server.tool()
+    async def lane_start(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        lane: str,
+        worker: str,
+        branch: str,
+        work_items: list[str],
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Start a lane for a configured worker."""
+        return await execute_command(
+            ctx,
+            "lane_start",
+            request_id,
+            {"lane": lane, "worker": worker, "branch": branch, "work_items": work_items},
+        )
+
+    @server.tool()
+    async def lane_update(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        lane: str,
+        waiting_on: str | None,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Report who the lane is waiting on. Pass null when it can continue."""
+        return await execute_command(
+            ctx,
+            "lane_update",
+            request_id,
+            {"lane": lane, "waiting_on": waiting_on or ""},
+        )
+
+    @server.tool()
+    async def lane_ready(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        lane: str,
+        pr: int,
+        head_sha: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Report the pull request and head ready for review."""
+        return await execute_command(
+            ctx,
+            "lane_ready",
+            request_id,
+            {"lane": lane, "pr": pr, "head_sha": head_sha},
+        )
+
+    @server.tool()
+    async def lane_archive(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        lane: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Archive the lane and release its worker."""
+        return await execute_command(ctx, "lane_archive", request_id, {"lane": lane})
 
     app = server.streamable_http_app(
         stateless_http=True,

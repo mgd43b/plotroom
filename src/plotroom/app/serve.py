@@ -8,6 +8,7 @@ import logging
 import signal
 import sqlite3
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
@@ -18,6 +19,7 @@ from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from plotroom.adapters.mcp import build_app
 from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.adapters.work_items_bmad import BmadTicketTree
 from plotroom.app.clock import SystemClock
 from plotroom.app.config import Config, ConfigError
 from plotroom.app.lock import DataDirLock
@@ -33,6 +35,7 @@ from plotroom.app.portfile import (
     remove_port,
     write_port,
 )
+from plotroom.app.runtime import ProjectRuntime
 from plotroom.app.sqlite_floor import floor_problem
 from plotroom.app.tokens import TokenRegistry
 from plotroom.core.catalog import build_catalog
@@ -60,9 +63,11 @@ class _Server(uvicorn.Server):
         started: asyncio.Future[int],
         data_dir: Path,
         directory_fd: int,
+        on_shutdown: Callable[[], None],
     ) -> None:
         super().__init__(config)
         self._started_future = started
+        self._on_shutdown = on_shutdown
         self._data_dir = data_dir
         self._directory_fd = directory_fd
         self._identity = directory_identity(directory_fd)
@@ -79,6 +84,7 @@ class _Server(uvicorn.Server):
 
     async def _shut_down(self, sockets: Any) -> None:
         # Stop publishing the listener as soon as it starts shutting down.
+        self._on_shutdown()
         self._stop_local_socket()
         with contextlib.suppress(OSError):
             remove_port(self._data_dir, directory_fd=self._directory_fd)
@@ -169,6 +175,7 @@ class _Project:
 
     store: SqliteStore
     ledger: Ledger | None = None
+    runtime: ProjectRuntime | None = None
 
 
 class Daemon:
@@ -272,6 +279,8 @@ class Daemon:
                 ledgers=self.ledgers,
                 authenticate=TokenRegistry(config.data_dir).authenticate,
                 unavailable=problem,
+                snapshot_budget=config.snapshot_budget,
+                next_budget=config.next_budget,
             )
             uvicorn_config = uvicorn.Config(
                 app,
@@ -279,8 +288,15 @@ class Daemon:
                 port=config.port,
                 log_config=None,
                 access_log=False,
+                timeout_graceful_shutdown=5,
             )
-            self._server = _Server(uvicorn_config, started, config.data_dir, directory_fd)
+            self._server = _Server(
+                uvicorn_config,
+                started,
+                config.data_dir,
+                directory_fd,
+                on_shutdown=self._stop_waiting,
+            )
             if self._received_sigterm:  # opening finished after a stop request
                 return
             serving = asyncio.ensure_future(self._announce())
@@ -324,13 +340,36 @@ class Daemon:
                 "migrated",
                 extra={"project": project_id, "revision": await project.store.revision()},
             )
-            project.ledger = Ledger(project.store, build_catalog(), self._clock)
+            workers = self._config.workers.get(project_id, frozenset())
+            source = self._config.ticket_trees.get(project_id)
+            project.ledger = Ledger(
+                project.store,
+                build_catalog(workers),
+                self._clock,
+                watcher_roles=self._config.watchers.get(project_id, ()),
+                wait_cap=self._config.wait_cap,
+            )
             project.ledger.start()
+            project.runtime = ProjectRuntime(
+                project.ledger,
+                self._clock,
+                tick_seconds=self._config.tick_seconds,
+                action_attempts=self._config.action_attempts,
+                workers=workers,
+                work_items=BmadTicketTree(*source) if source is not None else None,
+            )
+            project.runtime.start()
+
+    def _stop_waiting(self) -> None:
+        for ledger in self.ledgers.values():
+            ledger.stop_waiting()
 
     async def _close_projects(self) -> None:
         """Stop every writer (draining queued inputs), then close every store. Never raises."""
         projects = list(self._projects.values())
         for project in projects:
+            if project.runtime is not None:
+                await project.runtime.stop()
             if project.ledger is not None:
                 try:
                     await project.ledger.stop()

@@ -13,6 +13,7 @@ from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.app import serve
 from plotroom.app.lock import DataDirLock, LockError
 from plotroom.app.serve import Daemon
+from plotroom.core.catalog import Catalog
 from plotroom.core.events import LedgerError, NewEvent
 from plotroom.core.ledger import Ledger
 from plotroom.core.unit_of_work import UnitOfWork
@@ -21,7 +22,10 @@ from test_daemon import make_config, run_daemon, stop
 
 @pytest.fixture(autouse=True)
 def fixture_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(serve, "build_catalog", lambda: Fixture().catalog)
+    def build_fixture_catalog(_workers: frozenset[str]) -> Catalog:
+        return Fixture().catalog
+
+    monkeypatch.setattr(serve, "build_catalog", build_fixture_catalog)
 
 
 def note(key: str) -> NewEvent:

@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from plotroom.core.events import Event
+    from plotroom.core.lanes import Lane
+    from plotroom.core.next_items import Item
 
 SIMPLE_TOKEN_ROLES = frozenset({"orchestrator", "clerk", "drain", "bridge"})
 SIMPLE_ROLES = SIMPLE_TOKEN_ROLES | {"system"}
@@ -51,8 +53,18 @@ class OwnershipView:
     role: str
     _lookup: Callable[[str, str, str], Awaitable[Event | None]] = field(repr=False)
 
+    _item: Callable[[str], Awaitable[Item | None]] = field(repr=False)
+
+    _lane: Callable[[str], Awaitable[Lane | None]] = field(repr=False)
+
+    async def find_lane(self, lane_id: str) -> Lane | None:
+        return await self._lane(lane_id)
+
     async def find_event(self, source: str, kind: str, upstream_id: str) -> Event | None:
         return await self._lookup(source, kind, upstream_id)
+
+    async def find_item(self, item_id: str) -> Item | None:
+        return await self._item(item_id)
 
 
 type Ownership = Callable[[OwnershipView, dict[str, Any]], Awaitable[bool]]

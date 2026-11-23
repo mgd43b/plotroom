@@ -30,7 +30,7 @@ from plotroom.app.portfile import (
 )
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import TokenRegistry
-from plotroom.core.catalog import build_catalog
+from plotroom.core.catalog import Catalog, build_catalog
 from plotroom.core.commands import Command
 from plotroom.core.roles import WriterRule
 from plotroom.core.unit_of_work import UnitOfWork
@@ -166,7 +166,11 @@ async def test_a_mutating_tool_uses_the_authenticated_role_and_project_ledger(
         return sdk
 
     monkeypatch.setattr("plotroom.adapters.mcp.server.MCPServer", fixture_server)
-    monkeypatch.setattr("plotroom.app.serve.build_catalog", lambda: catalog)
+
+    def fixture_catalog(_workers: frozenset[str]) -> Catalog:
+        return catalog
+
+    monkeypatch.setattr("plotroom.app.serve.build_catalog", fixture_catalog)
     config = make_config(tmp_path, "alpha", "beta")
     daemon = Daemon(config)
     task, port = await run_daemon(daemon)
