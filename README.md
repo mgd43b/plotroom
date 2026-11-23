@@ -13,8 +13,9 @@ chats, both can decide to edit the same fixture, and the note to verify CI on
 main can disappear after the PR merges. With Plotroom, the orchestrator can
 see the overlapping claims in `next()` and decide who should own the fixture.
 A replacement chat can read `snapshot()` to recover the lane state. The worker
-can attach a checklist with "Verify CI on main" to the PR and its head SHA.
-When that head merges, the step keeps the lane open until the result is recorded.
+can save "Verify CI on main" in the lane's checklist for a specific PR and head
+SHA. When that head merges, the step keeps the lane open until the result is
+recorded.
 
 ## How a lane works
 
@@ -30,11 +31,13 @@ readiness.
    `lane_update`. The orchestrator uses `next()` for attention items such as
    overlapping claims or a lane waiting on them. `snapshot()` shows the
    current board from a fresh chat.
-3. The worker or orchestrator calls `lane_ready` with the PR, its head SHA,
-   and any follow-up steps. With GitHub reads configured, Plotroom activates
-   the checklist when it observes that exact PR and head merge. The lane's
-   worker or the orchestrator records completion with `checklist_done`.
-   Once the checklist is complete, the orchestrator can archive the lane.
+3. To use a checklist, set up [GitHub reads](#local-github-reads) and wait for
+   Plotroom to see the lane's open PR at its current head SHA. The worker or
+   orchestrator then calls `lane_ready` with that PR, head SHA, and the
+   follow-up steps. Plotroom activates the checklist when it observes that
+   exact PR and head merge. The lane's worker or the orchestrator records
+   completion with `checklist_done`, and the orchestrator can archive the
+   lane once the checklist is complete.
 
 ## Try it locally
 
@@ -67,7 +70,9 @@ stdio proxy. [Lane smoke test](tests/test_lanes.py) ·
 ## Run your own local instance
 
 Plotroom runs from source as a local daemon with a SQLite ledger per project.
-A project with one worker can start with this `plotroom.toml`.
+Save this one-worker example as `plotroom.toml` next to the checkout. The
+relative `data_dir` keeps the ledger alongside the config, outside the
+checkout.
 
 ```toml
 data_dir = "plotroom-data"
@@ -75,16 +80,16 @@ data_dir = "plotroom-data"
 [projects.example.workers.agent]
 ```
 
-From the checkout, run `uv run plotroom serve --config plotroom.toml` to
+From the checkout, run `uv run plotroom serve --config ../plotroom.toml` to
 serve MCP over HTTP. Issue a project-scoped token for each role.
 
 ```sh
-uv run plotroom token issue --config plotroom.toml --project example --role orchestrator
-uv run plotroom token issue --config plotroom.toml --project example --role worker:agent
+uv run plotroom token issue --config ../plotroom.toml --project example --role orchestrator
+uv run plotroom token issue --config ../plotroom.toml --project example --role worker:agent
 ```
 
 Configure each MCP client to run
-`uv run plotroom connect --stdio --config plotroom.toml --token-id <id>` from
+`uv run plotroom connect --stdio --config ../plotroom.toml --token-id <id>` from
 the checkout. Replace `<id>` with the `token_id` returned for that client's role.
 
 On macOS and Linux, `plotroom connect --stdio` with a config-derived URL uses a private Unix socket
