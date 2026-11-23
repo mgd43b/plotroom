@@ -836,18 +836,26 @@ async def apply_inputs(ledger: Ledger, inputs: list[dict[str, Any]]) -> list[boo
 
 def sqlite_dump(path: Path) -> dict[str, Any]:
     """Every table of a project file, read with plain ``sqlite3`` (WAL lets this run beside a writer)."""
+
+    def identifier(name: str) -> str:
+        return '"' + name.replace('"', '""') + '"'
+
     db = sqlite3.connect(path)
     try:
-        names = [
-            row[0]
-            for row in db.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
-                "ORDER BY name"
-            )
-        ]
-        return {
-            name: db.execute(f'SELECT * FROM "{name}" ORDER BY rowid').fetchall() for name in names
-        }
+        dump: dict[str, Any] = {}
+        tables = db.execute(
+            "SELECT name, wr FROM pragma_table_list WHERE schema = 'main' "
+            "AND type != 'view' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+        for name, without_rowid in tables:
+            order = "rowid"
+            if without_rowid:
+                keys = db.execute(
+                    "SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk", (name,)
+                )
+                order = ", ".join(identifier(key) for (key,) in keys)
+            dump[name] = db.execute(f"SELECT * FROM {identifier(name)} ORDER BY {order}").fetchall()
+        return dump
     finally:
         db.close()
 

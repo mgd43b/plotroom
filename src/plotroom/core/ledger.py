@@ -34,6 +34,7 @@ from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.watchers import Watchers
 from plotroom.core.writer import ProjectWriter
 from plotroom.ports.clock import Clock
+from plotroom.ports.search import MAX_SEARCH_LIMIT, MAX_SEARCH_QUERY_LENGTH, Search, SearchPage
 from plotroom.ports.store import Board, Store, Transaction
 from plotroom.ports.work_items import WorkItem, WorkItemSource
 
@@ -74,8 +75,12 @@ class Ledger:
         merge_clerk: Callable[[], Awaitable[bool]] | None = None,
         fixture_merge_enabled: bool = False,
         fixture_branch_updates: bool = False,
+        search: Search | None = None,
     ) -> None:
+        if search is not None and search.project_id != store.project_id:
+            raise ValueError("a ledger and its search index must belong to the same project")
         self._store = store
+        self._search = search
         self._catalog = catalog
         self._clock = clock
         self._writer = ProjectWriter(store)
@@ -121,6 +126,17 @@ class Ledger:
     @property
     def project_id(self) -> str:
         return self._store.project_id
+
+    async def search(self, text: str, kinds: tuple[str, ...] | None, limit: int) -> SearchPage:
+        if self._search is None:
+            raise LedgerError("unavailable", "the project search index is unavailable")
+        if not text.strip() or len(text) > MAX_SEARCH_QUERY_LENGTH or "\x00" in text:
+            raise LedgerError(
+                "invalid", f"search text must contain 1 to {MAX_SEARCH_QUERY_LENGTH} characters"
+            )
+        if not 1 <= limit <= MAX_SEARCH_LIMIT:
+            raise LedgerError("invalid", f"search limit must be between 1 and {MAX_SEARCH_LIMIT}")
+        return await self._search.query(self.project_id, text.strip(), kinds, limit)
 
     def start(self) -> None:
         self._stopping.clear()
@@ -189,7 +205,12 @@ class Ledger:
     async def _evaluate_triggers(self, tx: Transaction) -> None:
         if (leaves := self._catalog.trigger_leaves) is not None:
             uow = UnitOfWork(
-                tx, self._catalog.events, self._clock, role="system", items=self._catalog.items
+                tx,
+                self._catalog.events,
+                self._clock,
+                role="system",
+                items=self._catalog.items,
+                search=self._search,
             )
             await leaves.evaluate_open(uow)
 
@@ -199,7 +220,12 @@ class Ledger:
 
         async def in_transaction(tx: Transaction) -> T:
             uow = UnitOfWork(
-                tx, self._catalog.events, self._clock, role=role, items=self._catalog.items
+                tx,
+                self._catalog.events,
+                self._clock,
+                role=role,
+                items=self._catalog.items,
+                search=self._search,
             )
             result = await work(uow)
             await uow.refresh_overlaps(self.github_repository, self._github_tree_path)
@@ -254,6 +280,7 @@ class Ledger:
                 role=role,
                 append_role=COMMAND_APPENDER,
                 items=self._catalog.items,
+                search=self._search,
             )
             recorded = await uow.find_event("core", kind, upstream_id)
             receipt = recorded.fields if recorded is not None else None

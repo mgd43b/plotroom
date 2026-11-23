@@ -37,6 +37,7 @@ def test_defaults_are_loopback(tmp_path: Path) -> None:
     assert config.port == 8765
     assert config.allowed_hosts == DEFAULT_ALLOWED_HOSTS
     assert config.url == "http://127.0.0.1:8765/mcp"
+    assert config.search_budget == 2000
 
 
 @pytest.mark.parametrize("board", ["project", "team-", "team_"])
@@ -87,6 +88,7 @@ def test_no_file_at_the_default_location_leaves_environment_and_defaults(
         ("[projects.Bad_Case]\n", "lowercase slug"),
         ("[projects.'a b']\n", "lowercase slug"),
         ('port = "http"\n[projects.a]\n', "port must be an integer"),
+        ("search_budget = 255\n[projects.a]\n", "search_budget must be an integer of at least 256"),
         ("port = 70000\n[projects.a]\n", "between 0 and 65535"),
         ("hots = 'x'\n[projects.a]\n", "unknown config keys"),
         ("allowed_hosts = []\n[projects.a]\n", "must not be empty"),
