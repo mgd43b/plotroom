@@ -7,6 +7,7 @@ import copy
 import math
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from plotroom.core.actions import Action
@@ -17,6 +18,7 @@ from plotroom.core.events import (
     Event,
     LedgerError,
     NewEvent,
+    format_time,
     is_json,
     validate_fields,
 )
@@ -60,6 +62,7 @@ class Ledger:
         wait_cap: int = 240,
         github_repository: str | None = None,
         session_workers: Mapping[str, str] | None = None,
+        drain_enabled: bool = False,
     ) -> None:
         self._store = store
         self._catalog = catalog
@@ -70,6 +73,7 @@ class Ledger:
         self.github_repository = github_repository
         self.github_error = "waiting for the first GitHub poll" if github_repository else None
         self.session_workers = dict(session_workers or {})
+        self._drain_enabled = drain_enabled
         self._stopping = asyncio.Event()
 
     @property
@@ -92,16 +96,25 @@ class Ledger:
         self.stop_waiting()
         await self._writer.stop()
 
+    async def _evaluate_triggers(self, tx: Transaction) -> None:
+        if (leaves := self._catalog.trigger_leaves) is not None:
+            uow = UnitOfWork(
+                tx, self._catalog.events, self._clock, role="system", items=self._catalog.items
+            )
+            await leaves.evaluate_open(uow)
+
     async def run[T](self, role: str, work: Callable[[UnitOfWork], Awaitable[T]]) -> T:
         """Run ``work`` as one input in one transaction; its appends are checked as ``role``."""
         _check_role(role)
 
         async def in_transaction(tx: Transaction) -> T:
-            return await work(
+            result = await work(
                 UnitOfWork(
                     tx, self._catalog.events, self._clock, role=role, items=self._catalog.items
                 )
             )
+            await self._evaluate_triggers(tx)
+            return result
 
         return await self._writer.submit(in_transaction)
 
@@ -127,13 +140,18 @@ class Ledger:
         rule = self._catalog.writer_rules.rule_for(command, family)
         if rule is None:
             raise LedgerError("forbidden", f"role {role!r} may not execute {command}")
+        if family == "drain" and not self._drain_enabled:
+            raise LedgerError("forbidden", "no drain session is configured for this project")
         if not isinstance(request_id, str) or not request_id:  # pyright: ignore[reportUnnecessaryIsInstance]
             raise LedgerError("invalid", f"{command}: request_id must be a non-empty string")
         if not isinstance(args, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise LedgerError("invalid", f"{command}: args must be an object")
         # One snapshot is validated, copied to the handler and recorded in the receipt, so a caller
         # mutating its dict while the handler runs changes none of the three.
-        snapshot = copy.deepcopy(args)
+        try:
+            snapshot = copy.deepcopy(args)
+        except RecursionError:
+            raise LedgerError("invalid", f"{command}: arguments are nested too deeply") from None
         kind = command_kind(command)
         upstream_id = f"{role}:{request_id}"
 
@@ -151,7 +169,12 @@ class Ledger:
             if receipt is None and registered.record_if is not None:
                 receipt = await tx.find_noop_receipt(command, upstream_id)
             if receipt is None:
-                validate_fields(registered.args, snapshot, command)
+                try:
+                    validate_fields(registered.args, snapshot, command)
+                except RecursionError:
+                    raise LedgerError(
+                        "invalid", f"{command}: arguments are nested too deeply"
+                    ) from None
             # A retry can supply different arguments. Authorize the actual target of the
             # receipt, so new arguments cannot make a previous target visible.
             target: dict[str, Any] = snapshot if receipt is None else receipt["args"]
@@ -170,20 +193,21 @@ class Ledger:
                 await tx.insert_noop_receipt(
                     command, upstream_id, {"args": snapshot, "result": result}
                 )
-                return CommandResult(result, False)
-            await uow.append(
-                NewEvent(
-                    source="core",
-                    kind=kind,
-                    upstream_id=upstream_id,
-                    fields={
-                        "role": role,
-                        "request_id": request_id,
-                        "args": copy.deepcopy(snapshot),
-                        "result": result,
-                    },
+            else:
+                await uow.append(
+                    NewEvent(
+                        source="core",
+                        kind=kind,
+                        upstream_id=upstream_id,
+                        fields={
+                            "role": role,
+                            "request_id": request_id,
+                            "args": copy.deepcopy(snapshot),
+                            "result": result,
+                        },
+                    )
                 )
-            )
+            await self._evaluate_triggers(tx)
             return CommandResult(result, False)
 
         return await self._writer.submit(in_transaction)
@@ -209,6 +233,8 @@ class Ledger:
     ) -> tuple[int, dict[str, Any] | None]:
         """Wait for the first change visible to the caller and return its resume cursor."""
         _check_role(role)
+        if role == "drain" and not self._drain_enabled:
+            raise LedgerError("forbidden", "no drain session is configured for this project")
         if cursor is not None and not 0 <= cursor <= 2**63 - 1:
             raise LedgerError("invalid", "cursor must be a nonnegative ledger sequence")
         if seconds is not None and (not math.isfinite(seconds) or seconds < 0):
@@ -225,11 +251,26 @@ class Ledger:
                 if self._stopping.is_set():
                     raise LedgerError("unavailable", "the project is stopping")
                 committed = self.commit_signal
-                head, change = await self._store.first_item_change(role, position)
+                wake_at = until
+                if role == "drain":
+                    check_started = now()
+                    moment = self._clock.now()
+                    readiness = await self._store.outbox_readiness(format_time(moment))
+                    head = readiness.head
+                    change = None
+                    # Pending work remains actionable when resuming from a saved cursor or
+                    # after a lease expires. The wake contains no lease or delivery payload.
+                    if readiness.ready_seq is not None:
+                        change = {"kind": "outbox_ready", "seq": readiness.ready_seq}
+                    if readiness.next_expiry is not None:
+                        delay = datetime.fromisoformat(readiness.next_expiry) - moment
+                        wake_at = min(until, check_started + delay.total_seconds())
+                else:
+                    head, change = await self._store.first_item_change(role, position)
                 if position > head:
                     raise LedgerError("invalid", "cursor is ahead of the project ledger")
                 if change is not None:
-                    return int(change["seq"]), change
+                    return max(position, int(change["seq"])), change
                 # Advancing past invisible rows is safe because the read used one committed view.
                 position = head
                 current = now()
@@ -239,7 +280,7 @@ class Ledger:
                     await progress(current - started, cap)
                     report_at = current + interval
                 try:
-                    async with asyncio.timeout_at(min(until, report_at)):
+                    async with asyncio.timeout_at(min(wake_at, report_at)):
                         await committed.wait()
                 except TimeoutError:
                     continue
@@ -260,6 +301,16 @@ class Ledger:
         if self.github_repository is None:
             return await self.read_board(role), None
         return await self._store.read_github_board(role, self.github_repository)
+
+    async def snapshot_with_triggers(
+        self, role: str
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int]]:
+        return await self._store.read_snapshot_board(role, self.github_repository)
+
+    async def list_triggers(self, role: str, lane: str | None) -> list[dict[str, Any]]:
+        if _check_role(role) != "orchestrator":
+            raise LedgerError("forbidden", "only the orchestrator may list triggers")
+        return [trigger.render() for trigger in await self._store.list_triggers(lane)]
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return await self._store.pull_request(repository, number)

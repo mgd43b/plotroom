@@ -10,7 +10,8 @@ import copy
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from typing import Any
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
 from plotroom.core.actions import Action
 from plotroom.core.events import (
@@ -30,6 +31,10 @@ from plotroom.core.roles import role_family
 from plotroom.ports.clock import Clock
 from plotroom.ports.store import Transaction
 from plotroom.ports.work_items import WorkItem
+
+if TYPE_CHECKING:
+    from plotroom.core.outbox import OutboxLease, OutboxMessage
+    from plotroom.core.triggers import Trigger
 
 
 def new_event_id() -> str:
@@ -65,6 +70,9 @@ class UnitOfWork:
     @property
     def role(self) -> str:
         return self._role
+
+    def now(self) -> datetime:
+        return self._clock.now()
 
     async def find_event(self, source: str, kind: str, upstream_id: str) -> Event | None:
         return await self._tx.find_event(source, kind, upstream_id)
@@ -144,6 +152,27 @@ class UnitOfWork:
         if self._append_role != "system":
             raise LedgerError("forbidden", "only core may update a committed action")
         await self._tx.update_action(action)
+
+    async def insert_outbox(self, message: OutboxMessage) -> None:
+        await self._tx.insert_outbox(message)
+
+    async def lease_outbox(self, lease_id: str, now: str, expires_at: str) -> OutboxLease | None:
+        return await self._tx.lease_outbox(lease_id, now, expires_at)
+
+    async def complete_outbox(self, lease_id: str, now: str) -> str | None:
+        return await self._tx.complete_outbox(lease_id, now)
+
+    async def find_trigger(self, trigger_id: str) -> Trigger | None:
+        return await self._tx.find_trigger(trigger_id)
+
+    async def open_triggers(self) -> list[Trigger]:
+        return await self._tx.open_triggers()
+
+    async def save_trigger(self, trigger: Trigger) -> None:
+        await self._tx.save_trigger(trigger)
+
+    async def first_matching_pull(self, repository: str, pattern: str) -> int | None:
+        return await self._tx.first_matching_pull(repository, pattern)
 
     def item_kind(self, kind: str) -> ItemKind:
         if kind not in self._items:

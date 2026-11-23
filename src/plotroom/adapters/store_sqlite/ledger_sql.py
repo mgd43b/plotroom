@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from fnmatch import fnmatchcase
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -13,6 +14,8 @@ from plotroom.adapters.store_sqlite import (
     github_sql,
     items_sql,
     lanes_sql,
+    outbox_sql,
+    triggers_sql,
     work_items_sql,
 )
 from plotroom.core.actions import Action
@@ -22,6 +25,10 @@ from plotroom.core.github_projection import GitHubResource
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
+
+if TYPE_CHECKING:
+    from plotroom.core.outbox import OutboxLease, OutboxMessage
+    from plotroom.core.triggers import Trigger
 
 FIND_EVENT = text(
     "SELECT seq, id, source, kind, upstream_id, lane_id, fields, body, observed_at "
@@ -80,6 +87,7 @@ class SqliteTransaction:
     def __init__(self, connection: AsyncConnection) -> None:
         self._connection = connection
         self._expired = False
+        self._branch_candidates: dict[str, tuple[tuple[int, str], ...]] = {}
 
     def expire(self) -> None:
         """End the handle's life with its transaction: the connection serves the next input."""
@@ -180,6 +188,7 @@ class SqliteTransaction:
 
     async def save_pull_request(self, pull: PullRequest) -> None:
         await github_sql.save_pull_request(self._live(), pull)
+        self._branch_candidates.pop(pull.repository, None)
 
     async def github_resource(
         self, repository: str, resource: str, scope: str = ""
@@ -210,6 +219,32 @@ class SqliteTransaction:
 
     async def update_action(self, action: Action) -> None:
         await actions_sql.update_action(self._live(), action)
+
+    async def insert_outbox(self, message: OutboxMessage) -> None:
+        await outbox_sql.insert_outbox(self._live(), message)
+
+    async def lease_outbox(self, lease_id: str, now: str, expires_at: str) -> OutboxLease | None:
+        return await outbox_sql.lease_outbox(self._live(), lease_id, now, expires_at)
+
+    async def complete_outbox(self, lease_id: str, now: str) -> str | None:
+        return await outbox_sql.complete_outbox(self._live(), lease_id, now)
+
+    async def find_trigger(self, trigger_id: str) -> Trigger | None:
+        return await triggers_sql.find_trigger(self._live(), trigger_id)
+
+    async def open_triggers(self) -> list[Trigger]:
+        return await triggers_sql.open_triggers(self._live())
+
+    async def save_trigger(self, trigger: Trigger) -> None:
+        await triggers_sql.save_trigger(self._live(), trigger)
+
+    async def first_matching_pull(self, repository: str, pattern: str) -> int | None:
+        connection = self._live()
+        candidates = self._branch_candidates.get(repository)
+        if candidates is None:
+            candidates = await triggers_sql.branch_candidates(connection, repository)
+            self._branch_candidates[repository] = candidates
+        return next((number for number, branch in candidates if fnmatchcase(branch, pattern)), None)
 
     async def save_item(self, item: Item) -> None:
         await items_sql.save_item(self._live(), item)

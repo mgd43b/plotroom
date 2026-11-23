@@ -4,22 +4,29 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from itertools import count
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
 
 from conftest import write_config
+from drain_standin import DrainStandIn
+from plotroom.adapters.github import GitHubPoller
 from plotroom.app.config import load_config
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import IssuedToken, TokenRegistry
+from plotroom.core.github import ObservedPull, apply_pull_poll
 from plotroom.core.snapshot import estimate_tokens
 from plotroom.core.watchers import Watchers
 from rawproxy import ERAS, MODERN, initialize_request, modern_call, spawn_proxy
 
 LEGACY = "2025-06-18"
+FIXTURE_REPO = "fixture/project"
+FIXTURE_TIME = "2026-11-23T12:00:00.000000Z"
 TOOL_NAMES = {
     "next",
     "snapshot",
@@ -30,6 +37,22 @@ TOOL_NAMES = {
     "lane_ready",
     "lane_archive",
     "ingest",
+    "trigger",
+    "triggers",
+    "cancel",
+    "outbox_lease",
+    "outbox_done",
+}
+WRITER_TOOLS = {
+    "ack",
+    "lane_start",
+    "lane_update",
+    "lane_ready",
+    "lane_archive",
+    "trigger",
+    "cancel",
+    "outbox_lease",
+    "outbox_done",
 }
 type Message = dict[str, Any]
 type Request = Callable[[Message], Awaitable[Message]]
@@ -40,6 +63,8 @@ class Endpoint:
     url: str
     config: Path
     token: IssuedToken
+    drain: IssuedToken
+    worker: IssuedToken
     departed: asyncio.Queue[str]
 
 
@@ -48,9 +73,16 @@ async def endpoint(
     tmp_path: Path, token_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncGenerator[Endpoint]:
     config = write_config(tmp_path)
-    config.write_text(config.read_text() + "\n[projects.demo.workers.fixture]\n", encoding="utf-8")
+    config.write_text(
+        config.read_text() + 'drain_session = "fixture-drain"\n[projects.demo.workers.fixture]\n'
+        'claude_session = "fixture-session"\n[projects.demo.github]\nrepository = "fixture/project"\n',
+        encoding="utf-8",
+    )
     options = load_config(config, {})
-    token = TokenRegistry(options.data_dir).issue("demo", "orchestrator", local=True)
+    registry = TokenRegistry(options.data_dir)
+    token = registry.issue("demo", "orchestrator", local=True)
+    drain_token = registry.issue("demo", "drain", local=True)
+    worker_token = registry.issue("demo", "worker:fixture", local=True)
     daemon = Daemon(options)
     departed: asyncio.Queue[str] = asyncio.Queue()
     waiting = Watchers.waiting
@@ -64,11 +96,29 @@ async def endpoint(
             departed.put_nowait(role)
 
     monkeypatch.setattr(Watchers, "waiting", observed)
+
+    async def pause_poller(
+        _self: GitHubPoller,
+        _after_pull: Callable[[httpx.AsyncClient], Awaitable[None]] | None = None,
+    ) -> None:
+        await asyncio.Future[None]()
+
+    monkeypatch.setattr(GitHubPoller, "run", pause_poller)
     serving = asyncio.create_task(daemon.run())
     try:
         async with asyncio.timeout(10):
             port = await daemon.wait_started()
-        yield Endpoint(f"http://127.0.0.1:{port}/mcp", config, token, departed)
+        projections = (
+            ObservedPull(1, "demo", "a" * 40, FIXTURE_REPO, "open", FIXTURE_TIME, ""),
+            ObservedPull(2, "merged", "b" * 40, FIXTURE_REPO, "merged", FIXTURE_TIME, ""),
+        )
+        await daemon.ledgers["demo"].run(
+            "system",
+            lambda uow: apply_pull_poll(uow, FIXTURE_REPO, None, projections, FIXTURE_TIME),
+        )
+        yield Endpoint(
+            f"http://127.0.0.1:{port}/mcp", config, token, drain_token, worker_token, departed
+        )
     finally:
         daemon.stop()
         async with asyncio.timeout(10):
@@ -170,17 +220,17 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         names = {tool["name"] for tool in listed["result"]["tools"]}
         assert names == TOOL_NAMES
         for tool in listed["result"]["tools"]:
-            if tool["name"] == "ack" or tool["name"].startswith("lane_"):
+            if tool["name"] in WRITER_TOOLS:
                 assert "request_id" in tool["inputSchema"]["required"]
         called: set[str] = set()
+        request_ids = count(21)
 
         async def call(name: str, **args: Any) -> dict[str, Any]:
             called.add(name)
-            if name == "ack" or name.startswith("lane_"):
-                args["request_id"] = name
-            reply = await send(
-                message(era, len(called) + 2, "tools/call", name=name, arguments=args)
-            )
+            number = next(request_ids)
+            if name in WRITER_TOOLS:
+                args["request_id"] = f"{name}-{number}"
+            reply = await send(message(era, number, "tools/call", name=name, arguments=args))
             assert "result" in reply, reply
             assert not reply["result"].get("isError", False), reply
             payload = json.loads(reply["result"]["content"][0]["text"])
@@ -205,7 +255,95 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             )
         )["created"]
         assert (await call("lane_archive", lane="lane"))["state"] == "archived"
-        assert called == names
+        trigger = await call(
+            "trigger",
+            predicate={"pr_merged": {"number": 1}},
+            action={"notify_orchestrator": {"text": "fixture"}},
+        )
+        assert (await call("triggers"))["triggers"][0]["id"] == trigger["id"]
+        assert (await call("cancel", trigger_id=trigger["id"]))["state"] == "canceled"
+        assert (await call("snapshot"))["triggers"]["canceled"] == 1
+        fired = await call(
+            "trigger",
+            predicate={"pr_merged": {"number": 2}},
+            action={"send": {"worker": "fixture", "text": "synthetic native delivery"}},
+        )
+        [firing] = [row for row in (await call("triggers"))["triggers"] if row["id"] == fired["id"]]
+        assert firing["state"] == "fired"
+        assert called | {"outbox_lease", "outbox_done"} == names
+
+    async with (
+        asyncio.timeout(15),
+        connection(replace(endpoint, token=endpoint.drain), transport, era) as send,
+    ):
+
+        async def drain_call(name: str, **args: Any) -> dict[str, Any]:
+            number = next(request_ids)
+            if name in WRITER_TOOLS:
+                args["request_id"] = f"drain-success-{number}"
+            reply = await send(message(era, number, "tools/call", name=name, arguments=args))
+            payload = json.loads(reply["result"]["content"][0]["text"])
+            assert payload["ok"], payload
+            result: dict[str, Any] = payload["data"]
+            return result
+
+        stand_in = DrainStandIn()
+        lease = await stand_in.drain_one(drain_call)
+        assert lease["action_key"] == firing["action_key"]
+        assert stand_in.deliveries == {
+            firing["action_key"]: ("fixture-session", "synthetic native delivery")
+        }
+        arguments: dict[str, dict[str, Any]] = {
+            "ack": {"item": "fixture"},
+            "lane_start": {
+                "lane": "fixture",
+                "worker": "fixture",
+                "branch": "fixture",
+                "work_items": [],
+            },
+            "lane_update": {"lane": "fixture", "waiting_on": None},
+            "lane_ready": {"lane": "fixture", "pr": 1, "head_sha": "a" * 40},
+            "lane_archive": {"lane": "fixture"},
+            "ingest": {"kind": "claude.session_message", "session_id": "fixture", "body": "test"},
+            "trigger": {
+                "predicate": {"pr_merged": {"number": 1}},
+                "action": {"notify_orchestrator": {"text": "fixture"}},
+            },
+            "cancel": {"trigger_id": "fixture"},
+            "wait": {"timeout": 0},
+            "outbox_lease": {"consumer_id": stand_in.consumer_id},
+            "outbox_done": {"act_id": "fixture"},
+        }
+        for number, name in enumerate(sorted(names), start=1):
+            args = arguments.get(name, {})
+            if name in WRITER_TOOLS:
+                args["request_id"] = f"drain-{name}"
+            reply = await send(message(era, number, "tools/call", name=name, arguments=args))
+            assert not reply["result"].get("isError", False), reply
+            payload = json.loads(reply["result"]["content"][0]["text"])
+            if name == "wait":
+                assert payload["ok"]
+                assert payload["data"]["item"] is None
+            elif name == "outbox_lease":
+                assert payload["ok"]
+                assert payload["data"]["lease"] is None
+            else:
+                code = "conflict" if name == "outbox_done" else "forbidden"
+                assert payload["error"]["code"] == code
+
+    async with (
+        asyncio.timeout(15),
+        connection(replace(endpoint, token=endpoint.worker), transport, era) as send,
+    ):
+        for number, name in enumerate(("outbox_lease", "outbox_done"), start=1):
+            args = {"request_id": name}
+            if name == "outbox_done":
+                args["act_id"] = "fixture"
+            else:
+                args["consumer_id"] = str(uuid4())
+            reply = await send(message(era, number, "tools/call", name=name, arguments=args))
+            payload = json.loads(reply["result"]["content"][0]["text"])
+            assert payload["error"]["code"] == "forbidden"
 
 
 @pytest.mark.parametrize("era", ERAS)

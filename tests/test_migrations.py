@@ -1,12 +1,20 @@
 import shutil
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from alembic.script import ScriptDirectory
 
+from fakes import FixedClock
 from plotroom.adapters.store_sqlite import SqliteStore, head_revision, script_heads
 from plotroom.adapters.store_sqlite.migrate import MIGRATIONS_DIR, alembic_config, upgrade_to_head
+from plotroom.core.catalog import build_catalog
+from plotroom.core.events import NewEvent
+from plotroom.core.github import ObservedPull, apply_pull_poll
+from plotroom.core.github_projection import GitHubResource
+from plotroom.core.ledger import Ledger
+from plotroom.core.unit_of_work import UnitOfWork
 
 
 def test_history_has_exactly_one_head() -> None:
@@ -163,3 +171,53 @@ async def test_a_file_at_the_first_revision_is_upgraded_in_place(tmp_path: Path)
         await store.close()
     with sqlite3.connect(tmp_path / "demo.db") as db:
         assert db.execute("SELECT id, value FROM project_seq").fetchall() == [(1, 0)]
+
+
+@pytest.mark.parametrize("prior", ["0010", "0011"])
+async def test_trigger_migration_preserves_projected_prs_and_pending_actions(
+    tmp_path: Path,
+    prior: str,
+) -> None:
+    original = tmp_path / "before-triggers"
+    shutil.copytree(MIGRATIONS_DIR, original, ignore=shutil.ignore_patterns("__pycache__"))
+    for path in (original / "versions").glob("[0-9]*_*.py"):
+        if path.name.split("_", 1)[0] > prior:
+            path.unlink()
+    config = alembic_config(original)
+    repo = "fixture/project"
+    store = SqliteStore("demo", tmp_path)
+    catalog = replace(build_catalog(github_repository=repo), trigger_leaves=None)
+    ledger = Ledger(store, catalog, FixedClock(), github_repository=repo)
+    timestamp = "2026-11-23T12:00:00.000000Z"
+    details = GitHubResource((), attributes={"fixture": True}, generation=1, as_of=timestamp)
+
+    async def seed(uow: UnitOfWork) -> str:
+        pull = ObservedPull(7, "fixture", "a" * 40, repo, "merged", timestamp, "before upgrade")
+        assert await apply_pull_poll(uow, repo, None, (pull,), timestamp)
+        if prior == "0011":
+            await uow.save_github_resource(repo, "fixture_resource", "", details)
+        cause = (await uow.append(NewEvent("core", "core.tick", "before-upgrade"))).event
+        return await uow.enqueue_action(cause, "fixture", {"value": "keep"})
+
+    try:
+        await upgrade_to_head(store._engine, config)  # pyright: ignore[reportPrivateUsage]
+        assert await store.revision() == prior
+        ledger.start()
+        key = await ledger.run("system", seed)
+        await ledger.stop()
+        await store.migrate()
+        assert await store.revision() == head_revision()
+        projected = await store.pull_request(repo, 7)
+        assert projected is not None
+        assert projected.state == "merged"
+        if prior == "0011":
+            assert await store.github_resource(repo, "fixture_resource") == details
+        action = await store.pending_action()
+        assert action is not None
+        assert (action.key, action.payload) == (key, {"value": "keep"})
+        assert not await store.list_triggers(None)
+        async with store.transaction() as tx:
+            assert await tx.first_matching_pull(repo, "fixture*") == 7
+    finally:
+        await ledger.stop()
+        await store.close()
