@@ -1,4 +1,4 @@
-"""Fixture-only HTTP, writer and SQLite coverage for message embeddings."""
+"""Fixture-only HTTP, writer and SQLite coverage for search embeddings."""
 
 import asyncio
 import json
@@ -21,20 +21,34 @@ from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.app.config import ConfigError, EmbedderConfig, load_config
 from plotroom.app.serve import Daemon
 from plotroom.core import search
+from plotroom.core.envelope import ok
 from plotroom.core.events import LedgerError, NewEvent
+from plotroom.core.human_queue import Decision
 from plotroom.core.ledger import Ledger
-from plotroom.core.search import follow_message_embeddings, pack_vector
+from plotroom.core.search import (
+    SemanticSearch,
+    backfill_search,
+    follow_search_embeddings,
+    pack_vector,
+)
+from plotroom.core.snapshot import estimate_tokens, render_search
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.ports.search import (
-    EmbeddedMessage,
+    DECISION_KIND,
+    ISSUE_COMMENT_KIND,
+    MESSAGE_KIND,
+    BackfillSource,
+    EmbeddedRecord,
     EmbeddingError,
     EmbeddingIndex,
     EmbeddingModel,
+    EmbeddingReadiness,
     SearchHit,
     SearchPage,
 )
 from test_daemon import run_daemon, stop
 from test_search import message, opened_search
+from test_search_sources import COMMENT_ID, LATER, START, comment, project_comment
 
 MODEL = EmbeddingModel("fixture-model", 2)
 
@@ -121,7 +135,7 @@ async def following(
 ) -> AsyncGenerator[None]:
     async with httpx.AsyncClient(trust_env=False) as client:
         task = asyncio.create_task(
-            follow_message_embeddings(
+            follow_search_embeddings(
                 ledger, index, HttpEmbedder(client, endpoint.url, index.model), retry_seconds=0.01
             )
         )
@@ -152,15 +166,13 @@ async def test_stalled_or_failing_embedder_leaves_ledger_writable_and_catches_up
             stalled = await endpoint.next_request(MODEL, "seal the hatch")
             async with asyncio.timeout(3):
                 second = (await ledger.append("system", message("b", "prepare supper"))).event
-                skipped = await ledger.append(
-                    "system", NewEvent("core", "core.tick", "tick", {}, "excluded")
-                )
+                await ledger.append("system", NewEvent("core", "core.tick", "tick", {}, "excluded"))
             assert await index.cursor() == 0
             stalled.send({}, status=503)
             retry = await endpoint.next_request(MODEL, "seal the hatch", "prepare supper")
             assert await index.cursor() == 0
             retry.vectors([1, 0], [0, 1])
-            await await_cursor(ledger, index, skipped.event.seq)
+            await await_cursor(ledger, index, 2)
             # The fake vector for "secure doorway" finds a record with no shared words.
             assert await ledger.search("secure doorway", None, 20) == SearchPage((), 0)
             paraphrase = (0.9, 0.1)
@@ -200,11 +212,11 @@ async def test_embedding_decode_runs_outside_the_daemon_event_loop(
             try:
                 await asyncio.wait_for(decoding.wait(), timeout=3)
                 async with asyncio.timeout(3):
-                    last = await ledger.append("system", NewEvent("core", "core.tick", "tick", {}))
+                    await ledger.append("system", NewEvent("core", "core.tick", "tick", {}))
                 assert await index.cursor() == 0
             finally:
                 release.set()
-            await await_cursor(ledger, index, last.event.seq)
+            await await_cursor(ledger, index, 1)
 
 
 async def test_restart_resumes_and_model_or_dimension_change_revisits_history(
@@ -346,17 +358,17 @@ def test_vector_converts_large_integer_overflow_to_a_typed_error() -> None:
 async def test_cursor_passes_an_ineligible_page_before_requesting_messages(
     tmp_path: Path, endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(search, "EMBEDDING_BATCH_SIZE", 2)
+    monkeypatch.setattr(search, "EMBEDDING_BATCH_SIZE", 1)
     async with opened_search(tmp_path, "demo") as (store, ledger):
-        await ledger.append("system", message("blank", " "))
-        skipped = await ledger.append("system", NewEvent("core", "core.tick", "tick"))
-        last = await ledger.append("system", message("a", "only eligible message"))
+        await ledger.append("system", message("blank", " \u2003\n"))
+        await ledger.append("system", NewEvent("core", "core.tick", "tick"))
+        await ledger.append("system", message("a", "only eligible message"))
         index = store.embedding_index(MODEL)
         async with following(ledger, index, endpoint):
             request = await endpoint.next_request(MODEL, "only eligible message")
-            assert await index.cursor() == skipped.event.seq
+            assert await index.cursor() == 1
             request.vectors([1, 0])
-            await await_cursor(ledger, index, last.event.seq)
+            await await_cursor(ledger, index, 2)
 
 
 async def test_retry_log_omits_provider_error_details(
@@ -372,7 +384,7 @@ async def test_retry_log_omits_provider_error_details(
     async with opened_search(tmp_path, "demo") as (store, ledger):
         await ledger.append("system", message("a", "first"))
         task = asyncio.create_task(
-            follow_message_embeddings(ledger, store.embedding_index(MODEL), FixtureEmbedder())
+            follow_search_embeddings(ledger, store.embedding_index(MODEL), FixtureEmbedder())
         )
         try:
             await asyncio.wait_for(retrying.wait(), 5)
@@ -397,32 +409,32 @@ async def test_vector_writes_rollback_together_and_reject_stale_or_foreign_attem
         foreign = (await other_ledger.append("system", message("a", "other"))).event
         index = store.embedding_index(MODEL)
         blob = pack_vector((1, 0), MODEL.dimension)
-        record = EmbeddedMessage(first.id, blob)
-        foreign_record = EmbeddedMessage(foreign.id, blob)
+        record = EmbeddedRecord(1, first.kind, first.id, blob)
+        foreign_record = EmbeddedRecord(2, foreign.kind, foreign.id, blob)
 
         async def invalid_batch(uow: UnitOfWork) -> bool:
-            return await uow.save_embedding_batch(index, 0, first.seq, (record, foreign_record))
+            return await uow.save_embedding_batch(index, 0, 2, (record, foreign_record))
 
-        with pytest.raises(ValueError, match="messages within the batch interval"):
+        with pytest.raises(ValueError, match="revisions within the batch interval"):
             await ledger.run("system", invalid_batch)
         assert await index.cursor() == 0
         assert await index.query_vector("demo", (1, 0), 20) == SearchPage((), 0)
         with pytest.raises(RuntimeError, match="another project's transaction"):
             await other_ledger.run("system", invalid_batch)
 
-        async def save(expected: int, through: int, records: tuple[EmbeddedMessage, ...]) -> bool:
+        async def save(expected: int, through: int, records: tuple[EmbeddedRecord, ...]) -> bool:
             return await ledger.run(
                 "system", lambda uow: uow.save_embedding_batch(index, expected, through, records)
             )
 
-        with pytest.raises(ValueError, match="end at a committed event"):
-            await save(0, last.seq + 1, (record,))
-        with pytest.raises(ValueError, match="messages within the batch interval"):
-            await save(0, last.seq, (record, EmbeddedMessage(nonmessage.id, blob)))
-        with pytest.raises(ValueError, match="messages within the batch interval"):
-            await save(0, first.seq, (record, EmbeddedMessage(last.id, blob)))
-        with pytest.raises(IntegrityError, match="ck_message_vector_length"):
-            await save(0, last.seq, (record, EmbeddedMessage(last.id, b"short")))
+        with pytest.raises(ValueError, match="end within committed search revisions"):
+            await save(0, 3, (record,))
+        with pytest.raises(ValueError, match="revisions within the batch interval"):
+            await save(0, 2, (record, EmbeddedRecord(2, nonmessage.kind, nonmessage.id, blob)))
+        with pytest.raises(ValueError, match="revisions within the batch interval"):
+            await save(0, 1, (record, EmbeddedRecord(2, last.kind, last.id, blob)))
+        with pytest.raises(IntegrityError, match="ck_search_vector_length"):
+            await save(0, 2, (record, EmbeddedRecord(2, last.kind, last.id, b"short")))
         assert await index.cursor() == 0
         assert await index.query_vector("demo", (1, 0), 20) == SearchPage((), 0)
 
@@ -439,8 +451,8 @@ async def test_vector_writes_rollback_together_and_reject_stale_or_foreign_attem
         assert await index.query_vector("demo", (1, 0), 20) == SearchPage((), 0)
         assert await ledger.run("system", valid_batch)
         assert not await ledger.run("system", invalid_batch)
-        with pytest.raises(ValueError, match="messages within the batch interval"):
-            await save(first.seq, last.seq, (record,))
+        with pytest.raises(ValueError, match="revisions within the batch interval"):
+            await save(first.seq, 2, (record,))
         assert await index.cursor() == first.seq
         assert (await index.query_vector("demo", (1, 0), 20)).total == 1
         assert await other.embedding_index(MODEL).query_vector("other", (1, 0), 20) == SearchPage(
@@ -454,7 +466,9 @@ async def test_vector_excerpt_keeps_nul_and_caps_unicode_characters(tmp_path: Pa
         event = (await ledger.append("system", message("a", body))).event
         index = store.embedding_index(MODEL)
         vector = (1.0, 0.0)
-        record = EmbeddedMessage(event.id, pack_vector(vector, MODEL.dimension))
+        record = EmbeddedRecord(
+            event.seq, event.kind, event.id, pack_vector(vector, MODEL.dimension)
+        )
         await ledger.run(
             "system", lambda uow: uow.save_embedding_batch(index, 0, event.seq, (record,))
         )
@@ -464,18 +478,88 @@ async def test_vector_excerpt_keeps_nul_and_caps_unicode_characters(tmp_path: Pa
 
 
 async def test_unavailable_vector_extension_preserves_lexical_search(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def unavailable(_connection: aiosqlite.Connection, _path: str) -> None:
         raise sqlite3.OperationalError("fixture extension not installed")
 
     monkeypatch.setattr(aiosqlite.Connection, "load_extension", unavailable)
-    async with opened_search(tmp_path, "demo") as (store, ledger):
-        await ledger.append("system", message("a", "fixture needle"))
+    async with (
+        opened_search(tmp_path, "demo") as (store, ledger),
+        httpx.AsyncClient(trust_env=False) as client,
+    ):
+        event = (await ledger.append("system", message("a", "fixture needle"))).event
+        index = store.embedding_index(MODEL)
         with pytest.raises(LedgerError, match="requires sqlite-vec") as error:
-            await store.embedding_index(MODEL).query_vector("demo", (1, 0), 1)
+            await index.query_vector("demo", (1, 0), 1)
         assert error.value.code == "unavailable"
-        assert (await ledger.search("needle", None, 20)).total == 1
+        await backfill_search(ledger, store)
+        async with following(ledger, index, endpoint):
+            (await endpoint.next_request(MODEL, "fixture needle")).vectors([1, 0])
+            await await_cursor(ledger, index, 1)
+            semantic = SemanticSearch(index, HttpEmbedder(client, endpoint.url, MODEL))
+            result = asyncio.create_task(
+                semantic.query(store, "demo", "needle", (MESSAGE_KIND,), 20)
+            )
+            (await endpoint.next_request(MODEL, "needle")).vectors([1, 0])
+            assert await result == SearchPage(
+                (SearchHit(event.id, event.kind, event.body),), 1, "lexical", "vector_unavailable"
+            )
+
+
+async def test_revisions_edited_during_embedding_and_query_cannot_return_stale_vectors(
+    tmp_path: Path, endpoint: Endpoint
+) -> None:
+    async with (
+        opened_search(tmp_path, "demo") as (store, ledger),
+        httpx.AsyncClient(trust_env=False) as client,
+    ):
+        index = store.embedding_index(MODEL)
+        semantic = SemanticSearch(index, HttpEmbedder(client, endpoint.url, MODEL))
+        kinds = (ISSUE_COMMENT_KIND,)
+
+        async def save(body: str, updated: str) -> None:
+            await ledger.run("system", lambda uow: project_comment(uow, comment(body, updated)))
+
+        await save("original needle", START)
+        assert (await semantic.query(store, "demo", "needle", kinds, 5)).fallback_reason == (
+            "index_pending"
+        )
+        assert endpoint.requests.empty()
+        await backfill_search(ledger, store)
+        async with following(ledger, index, endpoint):
+            original = await endpoint.next_request(MODEL, "original needle")
+            await save("edited needle", LATER)
+            original.vectors([1, 0])
+            edited = await endpoint.next_request(MODEL, "edited needle")
+            assert await index.cursor() == 1
+            assert (await index.query_vector("demo", (1, 0), 5)).total == 0
+            assert await semantic.query(store, "demo", "needle", kinds, 5) == SearchPage(
+                (SearchHit(COMMENT_ID, ISSUE_COMMENT_KIND, "edited needle"),),
+                1,
+                "lexical",
+                "index_pending",
+            )
+            edited.vectors([0, 1])
+            await await_cursor(ledger, index, 2)
+
+            result = asyncio.create_task(semantic.query(store, "demo", "needle", kinds, 5))
+            request = await endpoint.next_request(MODEL, "needle")
+            await save("latest needle", "2026-01-01T00:00:03Z")
+            latest = await endpoint.next_request(MODEL, "latest needle")
+            request.vectors([0, 1])
+            assert await result == SearchPage(
+                (SearchHit(COMMENT_ID, ISSUE_COMMENT_KIND, "latest needle"),),
+                1,
+                "lexical",
+                "index_pending",
+            )
+            assert (await index.query_vector("demo", (0, 1), 5)).total == 0
+            latest.vectors([0.5, 0.5])
+            await await_cursor(ledger, index, 3)
+            assert (await index.query_vector("demo", (0, 1), 5)).hits == (
+                SearchHit(COMMENT_ID, ISSUE_COMMENT_KIND, "latest needle"),
+            )
 
 
 async def test_daemon_starts_embedding_only_for_configured_project(
@@ -502,15 +586,90 @@ async def test_daemon_starts_embedding_only_for_configured_project(
         disabled = daemon.ledgers["disabled"]
         enabled = daemon.ledgers["enabled"]
         await disabled.append("system", message("a", "disabled needle"))
-        first = (await enabled.append("system", message("a", "enabled fixture"))).event
+        public = (await enabled.append("system", message("a", "enabled fixture"))).event
         request = await endpoint.next_request(MODEL, "enabled fixture")
         request.vectors([1, 0])
         reader = SqliteStore("enabled", config.data_dir)
         try:
-            await await_cursor(enabled, reader.embedding_index(MODEL), first.seq)
+            index = reader.embedding_index(MODEL)
+            await await_cursor(enabled, index, 1)
+            decision = Decision("dec_fixture", "human", "  seal the hatch\n", {}, [], [], START)
+            await enabled.run("system", lambda uow: uow.insert_decision(decision))
+            pending = await endpoint.next_request(MODEL, decision.exact_words)
+            async with asyncio.timeout(5):
+                while True:
+                    committed = enabled.commit_signal
+                    positions = [
+                        await reader.backfill_position(source) for source in BackfillSource
+                    ]
+                    if all(position is None for position in positions):
+                        break
+                    await committed.wait()
+
+            assert await index.preflight((MESSAGE_KIND,)) is EmbeddingReadiness.READY
+            assert await index.preflight((DECISION_KIND,)) is EmbeddingReadiness.PENDING
+            assert await index.preflight((ISSUE_COMMENT_KIND,)) is EmbeddingReadiness.EMPTY
+            worker = asyncio.create_task(
+                enabled.search("find the phrase", None, 5, role="worker:fixture")
+            )
+            (await endpoint.next_request(MODEL, "find the phrase")).vectors([1, 0])
+            assert await worker == SearchPage(
+                (SearchHit(public.id, public.kind, public.body),), 1, "semantic"
+            )
+            assert (
+                await enabled.search("hatch", None, 5, role="orchestrator")
+            ).fallback_reason == ("index_pending")
+            assert await enabled.search(
+                "hatch", (DECISION_KIND,), 5, role="worker:fixture"
+            ) == SearchPage((), 0, "semantic")
+
+            pending.vectors([0, 1])
+            await await_cursor(enabled, index, 2)
+            task_result = asyncio.create_task(
+                enabled.search("secure doorway", None, 1, role="orchestrator")
+            )
+            (await endpoint.next_request(MODEL, "secure doorway")).vectors([0, 1])
+            result = await task_result
+            assert result == SearchPage(
+                (SearchHit(decision.decision_id, DECISION_KIND, decision.exact_words),),
+                2,
+                "semantic",
+            )
+            assert render_search(result, 100)["omitted"] == 1
+
+            for limit in (1, 5):
+                worker = asyncio.create_task(
+                    enabled.search("secure doorway", None, limit, role="worker:fixture")
+                )
+                (await endpoint.next_request(MODEL, "secure doorway")).vectors([0, 1])
+                assert await worker == SearchPage(
+                    (SearchHit(public.id, public.kind, public.body),), 1, "semantic"
+                )
+
+            for invalid in (None, {"data": [{"index": 0, "embedding": [1e100, 1]}]}):
+                fallback = asyncio.create_task(
+                    enabled.search("hatch", (DECISION_KIND,), 5, role="orchestrator")
+                )
+                request = await endpoint.next_request(MODEL, "hatch")
+                request.send(invalid, status=503 if invalid is None else 200)
+                page = await fallback
+                assert page.total == 1
+                assert page.hits[0].id == decision.decision_id
+                assert page.mode == "lexical"
+                assert page.fallback_reason == "provider_unavailable"
+                response = render_search(page, 42)
+                assert response == {
+                    "hits": [],
+                    "omitted": 1,
+                    "mode": "lexical",
+                    "fallback_reason": "provider_unavailable",
+                }
+                assert estimate_tokens(json.dumps(ok(response), indent=2)) <= 42
         finally:
             await reader.close()
-        assert (await disabled.search("needle", None, 20)).total == 1
+        disabled_result = await disabled.search("needle", None, 20)
+        assert disabled_result.total == 1
+        assert set(render_search(disabled_result, 100)) == {"hits", "omitted"}
     finally:
         await stop(daemon, task)
     async with opened_search(config.data_dir, "disabled") as (store, _):

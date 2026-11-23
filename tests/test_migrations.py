@@ -34,6 +34,7 @@ from plotroom.core.github_projection import (
 from plotroom.core.lanes import Lane
 from plotroom.core.ledger import Ledger
 from plotroom.core.unit_of_work import UnitOfWork
+from plotroom.ports.search import EmbeddingModel, EmbeddingRevision
 from test_daemon import bearer, make_config, run_daemon, stop
 
 
@@ -203,6 +204,109 @@ async def test_search_upgrade_preserves_existing_messages(tmp_path: Path) -> Non
         assert await store.head_seq() == original.event.seq
         with closing(sqlite3.connect(store.path)) as db:
             assert db.execute("SELECT count(*) FROM message_fts").fetchone() == (0,)
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+async def test_search_records_migration_preserves_populated_fts(tmp_path: Path) -> None:
+    prior = alembic_config(_migrations_at(tmp_path / "before-search-records", "0018"))
+    store = SqliteStore("demo", tmp_path)
+    ledger = Ledger(store, build_catalog(frozenset({"fixture"})), FixedClock())
+    try:
+        await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
+        ledger.start()
+        await ledger.execute(
+            "orchestrator",
+            "lane_start",
+            "legacy-lane",
+            {"lane": "lane", "worker": "fixture", "branch": "work", "work_items": []},
+        )
+        budget = await ledger.execute(
+            "orchestrator",
+            "budget_open",
+            "legacy-budget",
+            {
+                "run": "fixture-run",
+                "lane": "lane",
+                "cap_usd": 10,
+                "provider": "fixture",
+                "key_scope": "staging",
+            },
+        )
+        await ledger.execute(
+            "orchestrator", "route", "legacy-route", {"action_kind": "build", "lane": "lane"}
+        )
+        original = (
+            await ledger.append(
+                "system",
+                NewEvent(
+                    "switchboard",
+                    "switchboard.message",
+                    "old",
+                    {"sender": "fixture"},
+                    "legacy\x00needle",
+                ),
+            )
+        ).event
+        whitespace = "\u2003\u202f\u3000\t"
+        blank = (
+            await ledger.append(
+                "system",
+                NewEvent(
+                    "switchboard",
+                    "switchboard.message",
+                    "old-blank",
+                    {"sender": "fixture"},
+                    whitespace,
+                ),
+            )
+        ).event
+        await ledger.stop()
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.executemany(
+                "INSERT INTO message_fts (rowid, body) VALUES (?, ?)",
+                [(original.seq, "legacy needle"), (blank.seq, whitespace)],
+            )
+            db.execute(
+                "INSERT INTO embedding_cursors (model, dimension, index_seq) VALUES (?, ?, ?)",
+                ("fixture", 1, original.seq),
+            )
+            db.execute(
+                "INSERT INTO message_vectors (model, dimension, record_id, vector) "
+                "VALUES (?, ?, ?, ?)",
+                ("fixture", 1, original.id, bytes(4)),
+            )
+        await store.migrate()
+        assert await store.revision() == head_revision()
+        assert script_heads() == [head_revision()]
+        assert await ledger.budget_status("orchestrator") == [budget.result]
+        page = await store.query("demo", "needle", None, 10)
+        assert page.total == 1
+        assert [(hit.id, hit.kind, hit.excerpt) for hit in page.hits] == [
+            (original.id, original.kind, "legacy needle")
+        ]
+        index = store.embedding_index(EmbeddingModel("fixture", 1))
+        assert await index.cursor() == 0
+        assert await index.revisions_after(0, 32) == [
+            EmbeddingRevision(original.seq, None),
+            EmbeddingRevision(blank.seq, None),
+        ]
+        assert (await index.query_vector("demo", (0,), 10)).hits[0].id == original.id
+        with closing(sqlite3.connect(store.path)) as db:
+            assert db.execute(
+                "SELECT seq, kind, record_id, body FROM search_records ORDER BY seq"
+            ).fetchall() == [
+                (original.seq, original.kind, original.id, original.body),
+                (blank.seq, blank.kind, blank.id, whitespace),
+            ]
+            assert db.execute("SELECT index_seq FROM embedding_cursors").fetchall() == []
+            assert db.execute(
+                "SELECT model, dimension, record_seq, vector FROM search_vectors"
+            ).fetchall() == [("fixture", 1, original.seq, bytes(4))]
+            assert db.execute("SELECT action_kind, lane FROM routes").fetchall() == [
+                ("build", "lane")
+            ]
     finally:
         await ledger.stop()
         await store.close()
@@ -680,7 +784,8 @@ async def test_guardrail_upgrade_preserves_existing_ledger_and_enables_budgets_a
     assert guardrails.down_revision == "0021"
     prior = alembic_config(_migrations_at(tmp_path / "before-guardrails", "0021"))
     store = SqliteStore("demo", tmp_path)
-    ledger = Ledger(store, build_catalog(frozenset({"fixture"})), FixedClock(), search=store)
+    catalog = build_catalog(frozenset({"fixture"}))
+    ledger = Ledger(store, catalog, FixedClock())
     try:
         await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
         assert await store.revision() == "0021"
@@ -745,7 +850,15 @@ async def test_guardrail_upgrade_preserves_existing_ledger_and_enables_budgets_a
         assert saved_decision["decision_id"] == decision.result["decision_id"]
         original = await ledger.events_after(0)
         assert len(original) == 3
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.execute(
+                "INSERT INTO message_fts (rowid, body) VALUES (?, ?)",
+                (message.event.seq, message.event.body),
+            )
+        await ledger.stop()
         await store.migrate()
+        ledger = Ledger(store, catalog, FixedClock(), search=store)
+        ledger.start()
         assert await store.revision() == head_revision()
         assert await ledger.events_after(0) == original
         (hit,) = (await ledger.search("migrationneedle", None, 10)).hits

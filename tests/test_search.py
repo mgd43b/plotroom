@@ -1,5 +1,6 @@
-"""The Switchboard message search projection uses the project writer transaction."""
+"""The local search projection uses the project writer transaction."""
 
+import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -12,10 +13,12 @@ from sqlalchemy.exc import OperationalError
 from fakes import FixedClock
 from plotroom.adapters.store_sqlite import SqliteStore, search_sql
 from plotroom.core.catalog import build_catalog
+from plotroom.core.envelope import ok
 from plotroom.core.events import LedgerError, NewEvent
 from plotroom.core.ledger import Ledger
+from plotroom.core.snapshot import estimate_tokens, render_search
 from plotroom.core.unit_of_work import UnitOfWork
-from plotroom.ports.search import SearchHit, SearchPage
+from plotroom.ports.search import DECISION_KIND, SearchHit, SearchPage, SearchRecord
 
 
 def message(upstream_id: str, body: str) -> NewEvent:
@@ -81,6 +84,52 @@ async def test_search_bounds_excerpts_around_matches_and_limits_pages(tmp_path: 
     assert "matchphrase" in hit.excerpt
     assert len(hit.excerpt) <= 240
     assert hit.excerpt in body
+
+
+@pytest.mark.parametrize("phrase", ["x" * 240, " ".join(["a"] * 120)])
+async def test_search_excerpt_keeps_a_long_phrase_intact(tmp_path: Path, phrase: str) -> None:
+    async with opened_search(tmp_path, "demo") as (_, ledger):
+        body = "prefix" * 200 + " " + phrase + " " + "suffix" * 200
+        await ledger.append("system", message("first", body))
+        (hit,) = (await ledger.search(phrase, None, 20)).hits
+
+    assert phrase in hit.excerpt
+    assert hit.excerpt in body
+    assert len(hit.excerpt) <= 240
+
+
+async def test_worker_search_order_is_independent_of_private_text(tmp_path: Path) -> None:
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        first = (await ledger.append("system", message("first", "needle a"))).event
+        second = (
+            await ledger.append("system", message("second", "needle needle a b c d e f g h"))
+        ).event
+        before = await ledger.search("needle", None, 2, role="worker:fixture")
+
+        for body in ("private " * 100, "different"):
+            async with store.transaction() as tx:
+                await store.index_record(tx, SearchRecord(DECISION_KIND, "private", body))
+            assert await ledger.search("needle", None, 2, role="worker:fixture") == before
+            top = await ledger.search("needle", None, 1, role="worker:fixture")
+            assert top.hits == before.hits[:1]
+
+    assert [hit.id for hit in before.hits] == [first.id, second.id]
+
+
+async def test_search_budget_trims_escaped_context_before_the_match(tmp_path: Path) -> None:
+    async with opened_search(tmp_path, "demo") as (_, ledger):
+        phrase = "actualmatch" * 9
+        body = "\x01" * 90 + " " + phrase + " " + "\x01" * 180
+        event = (await ledger.append("system", message("first", body))).event
+        page = await ledger.search(phrase, None, 20)
+
+    assert phrase in page.hits[0].excerpt
+    rendered = render_search(page, 256)
+    assert rendered == {
+        "hits": [{"id": event.id, "kind": event.kind, "excerpt": phrase}],
+        "omitted": 0,
+    }
+    assert estimate_tokens(json.dumps(ok(rendered), ensure_ascii=False, indent=2)) <= 256
 
 
 async def test_search_excerpt_includes_matches_after_a_nul(tmp_path: Path) -> None:

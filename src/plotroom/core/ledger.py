@@ -32,6 +32,8 @@ from plotroom.core.merge_gate import GatePolicy, GateSnapshot, GateVerdict, eval
 from plotroom.core.next_items import Item
 from plotroom.core.roles import OwnershipView, role_family
 from plotroom.core.run_reports import validate_identity
+from plotroom.core.search import SemanticSearch
+from plotroom.core.search_sources import PRIVATE_KINDS, SEARCH_KINDS
 from plotroom.core.triggers import trigger_snapshot_is_too_deep
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.watchers import Watchers
@@ -81,11 +83,15 @@ class Ledger:
         human_login: str | None = None,
         ask_stale_days: int = DEFAULT_ASK_STALE_DAYS,
         search: Search | None = None,
+        semantic_search: SemanticSearch | None = None,
     ) -> None:
         if search is not None and search.project_id != store.project_id:
             raise ValueError("a ledger and its search index must belong to the same project")
+        if semantic_search is not None and semantic_search.index.project_id != store.project_id:
+            raise ValueError("a ledger and its embedding index must belong to the same project")
         self._store = store
         self._search = search
+        self._semantic_search = semantic_search
         self._catalog = catalog
         self._clock = clock
         self._writer = ProjectWriter(store)
@@ -134,7 +140,12 @@ class Ledger:
     def project_id(self) -> str:
         return self._store.project_id
 
-    async def search(self, text: str, kinds: tuple[str, ...] | None, limit: int) -> SearchPage:
+    async def search(
+        self, text: str, kinds: tuple[str, ...] | None, limit: int, *, role: str = "system"
+    ) -> SearchPage:
+        visible = SEARCH_KINDS
+        if _check_role(role) != "orchestrator":
+            visible -= PRIVATE_KINDS
         if self._search is None:
             raise LedgerError("unavailable", "the project search index is unavailable")
         if not text.strip() or len(text) > MAX_SEARCH_QUERY_LENGTH or "\x00" in text:
@@ -143,7 +154,14 @@ class Ledger:
             )
         if not 1 <= limit <= MAX_SEARCH_LIMIT:
             raise LedgerError("invalid", f"search limit must be between 1 and {MAX_SEARCH_LIMIT}")
-        return await self._search.query(self.project_id, text.strip(), kinds, limit)
+        if kinds is not None:
+            visible = visible.intersection(kinds)
+        selected = tuple(sorted(visible))
+        if self._semantic_search is not None:
+            return await self._semantic_search.query(
+                self._search, self.project_id, text.strip(), selected, limit
+            )
+        return await self._search.query(self.project_id, text.strip(), selected, limit)
 
     def start(self) -> None:
         self._stopping.clear()

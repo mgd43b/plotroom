@@ -21,6 +21,7 @@ from sqlalchemy.pool import ConnectionPoolEntry
 
 from plotroom.adapters.store_sqlite import (
     asks_sql,
+    backfill_sql,
     budgets_sql,
     checklists_sql,
     embedding_sql,
@@ -45,7 +46,7 @@ from plotroom.adapters.store_sqlite.ledger_sql import (
     event_from_row,
 )
 from plotroom.adapters.store_sqlite.migrate import upgrade_to_head
-from plotroom.adapters.store_sqlite.search_sql import search_messages
+from plotroom.adapters.store_sqlite.search_sql import search_records
 from plotroom.adapters.store_sqlite.work_items_sql import ready_work_items
 from plotroom.core.actions import Action, QueuedAction
 from plotroom.core.ask_checks import Ask
@@ -56,13 +57,19 @@ from plotroom.core.github_projection import GitHubResource
 from plotroom.core.merge_gate import GateSnapshot, load_gate_snapshot
 from plotroom.core.next_items import Item
 from plotroom.core.search import pack_vector
+from plotroom.core.search_sources import EVENT_KINDS
 from plotroom.ports.search import (
     MAX_SEARCH_LIMIT,
-    MESSAGE_KIND,
-    EmbeddedMessage,
+    BackfillPage,
+    BackfillPosition,
+    BackfillSource,
+    EmbeddedRecord,
     EmbeddingError,
     EmbeddingModel,
+    EmbeddingReadiness,
+    EmbeddingRevision,
     SearchPage,
+    SearchRecord,
 )
 from plotroom.ports.store import Board, Transaction
 from plotroom.ports.work_items import WorkItem
@@ -140,14 +147,29 @@ class SqliteEmbeddingIndex:
         async with self._engine.connect() as connection:
             return await embedding_sql.read_cursor(connection, self.model)
 
+    async def revisions_after(self, after: int, limit: int) -> list[EmbeddingRevision]:
+        async with self._engine.connect() as connection:
+            return await embedding_sql.read_page(connection, self.model, after, limit)
+
+    async def preflight(self, kinds: tuple[str, ...]) -> EmbeddingReadiness:
+        async with self._engine.connect() as connection:
+            return await embedding_sql.preflight(connection, self.model, kinds)
+
     async def commit(
-        self, tx: Transaction, expected: int, through: int, records: tuple[EmbeddedMessage, ...]
+        self, tx: Transaction, expected: int, through: int, records: tuple[EmbeddedRecord, ...]
     ) -> bool:
         if not isinstance(tx, SqliteTransaction):
             raise TypeError("the SQLite embedding index requires a SQLite writer transaction")
         return await tx.commit_embedding_batch(self._engine, self.model, expected, through, records)
 
-    async def query_vector(self, project: str, vector: tuple[float, ...], limit: int) -> SearchPage:
+    async def query_vector(
+        self,
+        project: str,
+        vector: tuple[float, ...],
+        limit: int,
+        *,
+        kinds: tuple[str, ...] | None = None,
+    ) -> SearchPage:
         if project != self.project_id:
             raise LedgerError("forbidden", "search is restricted to the current project")
         if not 1 <= limit <= MAX_SEARCH_LIMIT:
@@ -164,7 +186,7 @@ class SqliteEmbeddingIndex:
                 raise LedgerError(
                     "unavailable", "SQLite vector search requires sqlite-vec"
                 ) from exc
-            return await embedding_sql.query_vectors(connection, self.model, query, limit)
+            return await embedding_sql.query_vectors(connection, self.model, query, limit, kinds)
 
 
 class SqliteStore:
@@ -260,20 +282,50 @@ class SqliteStore:
             return [event_from_row(row) for row in result]
 
     async def index(self, tx: Transaction, event: Event) -> None:
-        if event.kind == MESSAGE_KIND:
+        if event.kind in EVENT_KINDS:
             if not isinstance(tx, SqliteTransaction):
                 raise TypeError("the SQLite index requires a SQLite writer transaction")
-            await tx.index_message(self._engine, event)
+            await tx.index_event(self._engine, event)
+
+    async def index_record(
+        self, tx: Transaction, record: SearchRecord, *, only_if_absent: bool = False
+    ) -> None:
+        if not isinstance(tx, SqliteTransaction):
+            raise TypeError("the SQLite index requires a SQLite writer transaction")
+        await tx.index_record(self._engine, record, only_if_absent=only_if_absent)
+
+    async def backfill_position(self, source: BackfillSource) -> BackfillPosition:
+        async with self._engine.connect() as connection:
+            return await backfill_sql.position(connection, source)
+
+    async def backfill_page(
+        self, source: BackfillSource, after: tuple[str | int, ...], limit: int
+    ) -> BackfillPage:
+        if limit < 1:
+            raise ValueError("search backfill requires a positive page size")
+        async with self._engine.connect() as connection:
+            return await backfill_sql.read_page(connection, source, after, limit)
+
+    async def commit_backfill(
+        self,
+        tx: Transaction,
+        source: BackfillSource,
+        expected: BackfillPosition,
+        page: BackfillPage,
+    ) -> bool:
+        if not isinstance(tx, SqliteTransaction):
+            raise TypeError("search backfill requires a SQLite writer transaction")
+        return await tx.commit_search_backfill(self._engine, source, expected, page)
 
     async def query(
         self, project: str, text: str, kinds: tuple[str, ...] | None, limit: int
     ) -> SearchPage:
         if project != self._project_id:
             raise LedgerError("forbidden", "search is restricted to the current project")
-        if kinds is not None and MESSAGE_KIND not in kinds:
+        if kinds == ():
             return SearchPage((), 0)
         async with self._engine.connect() as connection:
-            return await search_messages(connection, text, limit)
+            return await search_records(connection, text, kinds, limit)
 
     def embedding_index(self, model: EmbeddingModel) -> SqliteEmbeddingIndex:
         return SqliteEmbeddingIndex(self._engine, self._project_id, model)

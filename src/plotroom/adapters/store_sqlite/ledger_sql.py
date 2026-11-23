@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from plotroom.adapters.store_sqlite import (
     actions_sql,
     asks_sql,
+    backfill_sql,
     budgets_sql,
     checklists_sql,
     claims_sql,
@@ -35,7 +36,15 @@ from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
 from plotroom.core.github_projection import GitHubResource
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
-from plotroom.ports.search import EmbeddedMessage, EmbeddingModel
+from plotroom.core.search_sources import event_record
+from plotroom.ports.search import (
+    BackfillPage,
+    BackfillPosition,
+    BackfillSource,
+    EmbeddedRecord,
+    EmbeddingModel,
+    SearchRecord,
+)
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
@@ -49,6 +58,7 @@ FIND_EVENT = text(
     "SELECT seq, id, source, kind, upstream_id, lane_id, fields, body, observed_at "
     "FROM events WHERE source = :source AND kind = :kind AND upstream_id = :uid"
 )
+FIND_INDEX_EVENT = text("SELECT * FROM events WHERE seq = :seq AND id = :id AND kind = :kind")
 LATEST_EVENT = text("""
     SELECT events.* FROM events
     WHERE kind = :kind AND seq > :after
@@ -223,11 +233,40 @@ class SqliteTransaction:
             },
         )
 
-    async def index_message(self, engine: AsyncEngine, event: Event) -> None:
+    async def index_event(self, engine: AsyncEngine, event: Event) -> None:
         connection = self._live()
         if connection.engine is not engine:
             raise RuntimeError("cannot index an event through another project's transaction")
-        await search_sql.insert_message(connection, event)
+        row = (
+            await connection.execute(
+                FIND_INDEX_EVENT, {"seq": event.seq, "id": event.id, "kind": event.kind}
+            )
+        ).first()
+        if row is None:
+            raise RuntimeError("cannot index an event without its matching local event")
+        await search_sql.index_record(
+            connection, event_record(event_from_row(row)), only_if_absent=True
+        )
+
+    async def index_record(
+        self, engine: AsyncEngine, record: SearchRecord, *, only_if_absent: bool
+    ) -> None:
+        connection = self._live()
+        if connection.engine is not engine:
+            raise RuntimeError("cannot index a record through another project's transaction")
+        await search_sql.index_record(connection, record, only_if_absent=only_if_absent)
+
+    async def commit_search_backfill(
+        self,
+        engine: AsyncEngine,
+        source: BackfillSource,
+        expected: BackfillPosition,
+        page: BackfillPage,
+    ) -> bool:
+        connection = self._live()
+        if connection.engine is not engine:
+            raise RuntimeError("cannot backfill search through another project's transaction")
+        return await backfill_sql.commit(connection, source, expected, page)
 
     async def commit_embedding_batch(
         self,
@@ -235,7 +274,7 @@ class SqliteTransaction:
         model: EmbeddingModel,
         expected: int,
         through: int,
-        records: tuple[EmbeddedMessage, ...],
+        records: tuple[EmbeddedRecord, ...],
     ) -> bool:
         connection = self._live()
         if connection.engine is not engine:

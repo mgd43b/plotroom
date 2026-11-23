@@ -38,7 +38,7 @@ from plotroom.adapters.switchboard import Switchboard
 from plotroom.adapters.work_items_bmad import BmadTicketTree, read_ticket_body, read_ticket_tree
 from plotroom.adapters.work_items_github_issues import GitHubIssuesWorkItems
 from plotroom.app.clock import SystemClock
-from plotroom.app.config import Config, ConfigError, EmbedderConfig
+from plotroom.app.config import Config, ConfigError
 from plotroom.app.lock import DataDirLock
 from plotroom.app.portfile import (
     DirectoryIdentity,
@@ -61,21 +61,13 @@ from plotroom.core.ask_checks import DEFAULT_ASK_STALE_DAYS
 from plotroom.core.catalog import build_catalog
 from plotroom.core.ledger import Ledger
 from plotroom.core.routing import seed_routes
-from plotroom.core.search import follow_message_embeddings
+from plotroom.core.search import SemanticSearch, backfill_search, follow_search_embeddings
 from plotroom.ports import Clock
 from plotroom.ports.github_write import FixtureGitHubMerge
-from plotroom.ports.search import EmbeddingIndex
 from plotroom.ports.usage_meter import UsageMeter
 from plotroom.ports.work_items import WorkItemSource
 
 log = logging.getLogger("plotroom.serve")
-
-
-async def _run_embeddings(ledger: Ledger, index: EmbeddingIndex, config: EmbedderConfig) -> None:
-    async with httpx.AsyncClient(trust_env=False) as client:
-        await follow_message_embeddings(
-            ledger, index, HttpEmbedder(client, config.url, config.model)
-        )
 
 
 def _require_directory(data_dir: Path, identity: DirectoryIdentity) -> None:
@@ -210,6 +202,7 @@ class _Project:
     ledger: Ledger | None = None
     runtime: ProjectRuntime | None = None
     work_items: WorkItemSource | None = None
+    embedding_client: httpx.AsyncClient | None = None
 
 
 class Daemon:
@@ -404,6 +397,13 @@ class Daemon:
             policy = github.merge_gate_policy if github is not None else None
             live_merge = policy is not None and policy.ci_workflow is not None
             human_login = self._config.human_logins.get(project_id)
+            semantic_search = None
+            if (embedder := self._config.embedders.get(project_id)) is not None:
+                project.embedding_client = httpx.AsyncClient(trust_env=False)
+                semantic_search = SemanticSearch(
+                    project.store.embedding_index(embedder.model),
+                    HttpEmbedder(project.embedding_client, embedder.url, embedder.model),
+                )
             project.ledger = Ledger(
                 project.store,
                 build_catalog(
@@ -430,6 +430,7 @@ class Daemon:
                 human_login=human_login,
                 ask_stale_days=self._config.ask_stale_days.get(project_id, DEFAULT_ASK_STALE_DAYS),
                 search=project.store,
+                semantic_search=semantic_search,
             )
             project.ledger.start()
             if route_seeds := self._config.routes.get(project_id):
@@ -443,9 +444,16 @@ class Daemon:
                 else None
             )
             inputs = [switchboard.run] if switchboard is not None else []
-            if (embedder := self._config.embedders.get(project_id)) is not None:
-                index = project.store.embedding_index(embedder.model)
-                inputs.append(partial(_run_embeddings, project.ledger, index, embedder))
+            inputs.append(partial(backfill_search, project.ledger, project.store))
+            if semantic_search is not None:
+                inputs.append(
+                    partial(
+                        follow_search_embeddings,
+                        project.ledger,
+                        semantic_search.index,
+                        semantic_search.embedder,
+                    )
+                )
             if desktop is not None:
                 intake = SessionIntake(
                     project.ledger,
@@ -531,6 +539,13 @@ class Daemon:
                 except Exception:
                     log.exception("ledger stop failed", extra={"project": project.store.project_id})
         for project in projects:
+            if project.embedding_client is not None:
+                try:
+                    await project.embedding_client.aclose()
+                except Exception:
+                    log.exception(
+                        "embedding client close failed", extra={"project": project.store.project_id}
+                    )
             try:
                 await project.store.close()
             except Exception:

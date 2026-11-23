@@ -51,7 +51,7 @@ _ASK_HISTORIES = text("""
 """)
 
 
-def _ask(row: Row[Any]) -> Ask:
+def ask_from_row(row: Row[Any]) -> Ask:
     return Ask(
         ask_id=row.id,
         repository=row.repository,
@@ -73,12 +73,12 @@ async def ask_for_comment(
             _ASK_FROM_COMMENT, {"repository": repository, "comment_id": comment_id}
         )
     ).first()
-    return None if row is None else _ask(row)
+    return None if row is None else ask_from_row(row)
 
 
 async def find_ask(connection: AsyncConnection, ask_id: str) -> Ask | None:
     row = (await connection.execute(_ASK_BY_ID, {"id": ask_id})).first()
-    return None if row is None else _ask(row)
+    return None if row is None else ask_from_row(row)
 
 
 async def save_ask(connection: AsyncConnection, ask: Ask) -> None:
@@ -99,7 +99,10 @@ async def save_ask(connection: AsyncConnection, ask: Ask) -> None:
 
 
 async def list_asks(connection: AsyncConnection, stale_only: bool) -> list[Ask]:
-    return [_ask(row) for row in await connection.execute(_LIST_ASKS, {"stale_only": stale_only})]
+    return [
+        ask_from_row(row)
+        for row in await connection.execute(_LIST_ASKS, {"stale_only": stale_only})
+    ]
 
 
 async def pending_ask_issues(connection: AsyncConnection, repository: str) -> set[int]:
@@ -108,7 +111,10 @@ async def pending_ask_issues(connection: AsyncConnection, repository: str) -> se
 
 
 async def unsettled_asks(connection: AsyncConnection, repository: str) -> list[Ask]:
-    return [_ask(row) for row in await connection.execute(_UNSETTLED, {"repository": repository})]
+    return [
+        ask_from_row(row)
+        for row in await connection.execute(_UNSETTLED, {"repository": repository})
+    ]
 
 
 async def ask_comments(

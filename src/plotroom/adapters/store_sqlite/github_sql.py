@@ -88,10 +88,10 @@ async def pull_request(
     row = (await connection.execute(PULL, {"repository": repository, "number": number})).first()
     if row is None:
         return None
-    return _pull_from_row(row)
+    return pull_from_row(row)
 
 
-def _pull_from_row(row: Row[Any]) -> PullRequest:
+def pull_from_row(row: Row[Any]) -> PullRequest:
     return PullRequest(
         row.repository,
         row.number,
@@ -114,7 +114,7 @@ async def open_branch_pull(
     rows = (
         await connection.execute(BRANCH_HEAD, {"repository": repository, "branch": branch})
     ).all()
-    return _pull_from_row(rows[0]) if len(rows) == 1 else None
+    return pull_from_row(rows[0]) if len(rows) == 1 else None
 
 
 async def project_lane_heads(
@@ -220,7 +220,7 @@ OPEN_PULLS = text(
 
 async def open_pulls(connection: AsyncConnection, repository: str) -> tuple[PullRequest, ...]:
     rows = await connection.execute(OPEN_PULLS, {"repository": repository})
-    return tuple(_pull_from_row(row) for row in rows)
+    return tuple(pull_from_row(row) for row in rows)
 
 
 async def github_resource(
@@ -233,6 +233,10 @@ async def github_resource(
     ).first()
     if row is None:
         return None
+    return resource_from_row(row)
+
+
+def resource_from_row(row: Row[Any]) -> GitHubResource:
     return GitHubResource(
         tuple(GitHubRecord(**record) for record in json.loads(row.records)),
         bool(row.complete),
@@ -264,4 +268,4 @@ async def github_pull_targets(
     connection: AsyncConnection, repository: str
 ) -> tuple[PullRequest, ...]:
     rows = await connection.execute(PULL_TARGETS, {"repository": repository})
-    return tuple(_pull_from_row(row) for row in rows)
+    return tuple(pull_from_row(row) for row in rows)
