@@ -61,6 +61,9 @@ class HttpEmbedder:
                         content.extend(chunk)
         except (httpx.HTTPError, httpx.InvalidURL, TimeoutError) as exc:
             raise EmbeddingError("embedding endpoint request failed") from exc
+        return await asyncio.to_thread(self._decode_batch, content, len(texts))
+
+    def _decode_batch(self, content: bytearray, size: int) -> tuple[tuple[float, ...], ...]:
         try:
             payload: Any = json.loads(content)
         except (ValueError, RecursionError) as exc:
@@ -68,7 +71,7 @@ class HttpEmbedder:
         if not isinstance(payload, dict):
             raise EmbeddingError("embedding endpoint returned an invalid response")
         data = cast("dict[str, Any]", payload).get("data")
-        if not isinstance(data, list) or len(cast("list[Any]", data)) != len(texts):
+        if not isinstance(data, list) or len(cast("list[Any]", data)) != size:
             raise EmbeddingError("embedding endpoint returned an invalid vector count")
 
         vectors: dict[int, tuple[float, ...]] = {}
@@ -77,7 +80,7 @@ class HttpEmbedder:
                 raise EmbeddingError("embedding endpoint returned an invalid record")
             item = cast("dict[str, Any]", record)
             index, vector = item.get("index"), item.get("embedding")
-            if type(index) is not int or not 0 <= index < len(texts) or index in vectors:
+            if type(index) is not int or not 0 <= index < size or index in vectors:
                 raise EmbeddingError("embedding endpoint returned an invalid input index")
             if not isinstance(vector, list):
                 raise EmbeddingError("embedding endpoint returned an invalid vector")
@@ -90,4 +93,4 @@ class HttpEmbedder:
                 vectors[index] = tuple(float(number) for number in numbers)
             except OverflowError as exc:
                 raise EmbeddingError("embedding endpoint returned an out-of-range value") from exc
-        return tuple(vectors[index] for index in range(len(texts)))
+        return tuple(vectors[index] for index in range(size))

@@ -8,10 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from plotroom.core.events import Event
 from plotroom.ports.search import SearchHit, SearchPage
 
-INSERT_MESSAGE = text("""
-    INSERT INTO message_fts (rowid, body)
-    SELECT seq, body FROM events WHERE seq = :seq AND id = :id AND kind = :kind
+FIND_MESSAGE_BODY = text("""
+    SELECT body FROM events WHERE seq = :seq AND id = :id AND kind = :kind
 """)
+INSERT_MESSAGE = text("INSERT INTO message_fts (rowid, body) VALUES (:seq, :body)")
 COUNT_MATCHES = text("SELECT count(*) FROM message_fts WHERE message_fts MATCH :query")
 FIND_MATCHES = text("""
     WITH matches AS MATERIALIZED (
@@ -32,10 +32,13 @@ FIND_MATCHES = text("""
 
 async def insert_message(connection: AsyncConnection, event: Event) -> None:
     result = await connection.execute(
-        INSERT_MESSAGE, {"seq": event.seq, "id": event.id, "kind": event.kind}
+        FIND_MESSAGE_BODY, {"seq": event.seq, "id": event.id, "kind": event.kind}
     )
-    if result.rowcount != 1:
+    body: str | None = result.scalar_one_or_none()
+    if body is None:
         raise RuntimeError("cannot index a message without its matching local event")
+    # SQLite's text functions can stop at a NUL. Index it as a word separator.
+    await connection.execute(INSERT_MESSAGE, {"seq": event.seq, "body": body.replace("\x00", " ")})
 
 
 async def search_messages(connection: AsyncConnection, query: str, limit: int) -> SearchPage:

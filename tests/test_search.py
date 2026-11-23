@@ -83,6 +83,15 @@ async def test_search_bounds_excerpts_around_matches_and_limits_pages(tmp_path: 
     assert hit.excerpt in body
 
 
+async def test_search_excerpt_includes_matches_after_a_nul(tmp_path: Path) -> None:
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        event = (await ledger.append("system", message("first", "prefix\x00needle"))).event
+        assert await ledger.search("needle", None, 20) == SearchPage(
+            (SearchHit(event.id, event.kind, "prefix needle"),), 1
+        )
+        assert await store.events_after(0) == [event]
+
+
 async def test_index_refuses_a_foreign_transaction_or_project(tmp_path: Path) -> None:
     async with (
         opened_search(tmp_path, "demo") as (store, ledger),

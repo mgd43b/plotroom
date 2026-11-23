@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sqlite3
+import threading
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -172,6 +173,38 @@ async def test_stalled_or_failing_embedder_leaves_ledger_writable_and_catches_up
             ]
             with pytest.raises(LedgerError, match="current project"):
                 await index.query_vector("other", paraphrase, 20)
+
+
+async def test_embedding_decode_runs_outside_the_daemon_event_loop(
+    tmp_path: Path, endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decoding = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    decode = HttpEmbedder._decode_batch  # pyright: ignore[reportPrivateUsage]
+
+    def pause_decoder(
+        self: HttpEmbedder, content: bytearray, size: int
+    ) -> tuple[tuple[float, ...], ...]:
+        loop.call_soon_threadsafe(decoding.set)
+        assert release.wait(timeout=5)
+        return decode(self, content, size)
+
+    monkeypatch.setattr(HttpEmbedder, "_decode_batch", pause_decoder)
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        index = store.embedding_index(MODEL)
+        await ledger.append("system", message("a", "first fixture"))
+        async with following(ledger, index, endpoint):
+            request = await endpoint.next_request(MODEL, "first fixture")
+            request.vectors([1, 0])
+            try:
+                await asyncio.wait_for(decoding.wait(), timeout=3)
+                async with asyncio.timeout(3):
+                    last = await ledger.append("system", NewEvent("core", "core.tick", "tick", {}))
+                assert await index.cursor() == 0
+            finally:
+                release.set()
+            await await_cursor(ledger, index, last.event.seq)
 
 
 async def test_restart_resumes_and_model_or_dimension_change_revisits_history(

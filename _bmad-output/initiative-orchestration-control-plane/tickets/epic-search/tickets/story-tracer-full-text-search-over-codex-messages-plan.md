@@ -77,6 +77,7 @@ The four review lenses checked the combined #114/#115 diff. This plan records th
 | A very long match can be clipped | Low | Bounded excerpts can clip an unusually long phrase. The fixture covers the normal case of the matching word after a long adjacent token. |
 | Pre-upgrade messages are absent from FTS | Scope | Confirmed against the populated upgrade fixture. The separately assigned historical backfill is #117. |
 | Transport test seeds the ledger directly | Scope | The four-way transport contract covers real ledger-to-MCP wiring. The existing Switchboard adapter already appends these events through the same ledger; its fixture tests cover adapter intake. |
+| Opening Kodus found excerpts can lose matches after embedded NULs | Medium | Normalize NULs to separators only in the FTS projection. The regression verifies the matching word appears and the ledger retains the original body. |
 
 ## Verification
 
@@ -85,3 +86,4 @@ The four review lenses checked the combined #114/#115 diff. This plan records th
 - `uv run ruff check src tests`, `uv run ruff format --check src tests`, `uv run pyright`, and `uv run python tests/depcheck.py` passed.
 
 - Managed Python 3.14 and 3.15 full suites passed after the initial review fixes (864 tests each). The final focused run passed on both interpreters (68 tests each), including both HTTP size-split paths. Final Ruff, Pyright, dependency and whitespace checks passed.
+- [Built in PR #164](https://github.com/mgd43b/plotroom/pull/164)

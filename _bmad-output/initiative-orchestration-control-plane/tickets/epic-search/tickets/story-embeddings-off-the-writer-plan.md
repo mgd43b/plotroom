@@ -84,6 +84,7 @@ The four review lenses checked the combined #114/#115 diff. This plan records th
 | Batch commits evaluate existing trigger hooks | Low | The same serialized system unit of work maintains the project's trigger rules. The network wait completes outside it, and cursor-only pages make one bounded transaction each. |
 | Natural-language MCP semantic query is unavailable | Scope | Confirmed internal vector ranking with fixture-provided query vectors. The separately assigned query integration is #118. |
 | The index can commit an interval with no vectors | Low | A cursor-only page is valid. The follower selects eligible messages from committed events, verifies the provider count, and supplies all resulting vectors. The writer verifies every supplied record belongs to the local interval. |
+| Opening Kodus found response parsing could delay the daemon event loop | Medium | Dispatch bounded response decoding and validation to a worker thread. The loopback regression blocks decoding while the ledger commits another input. |
 
 ## Verification
 
@@ -91,3 +92,4 @@ The four review lenses checked the combined #114/#115 diff. This plan records th
 - `uv sync --locked` and the repository lint, formatting, typing and dependency checks
 
 - Managed Python 3.14 and 3.15 full suites passed after the initial review fixes (864 tests each). The final focused run passed on both interpreters (68 tests each), including both HTTP size-split paths. Final Ruff, Pyright, dependency and whitespace checks passed.
+- [Built in PR #164](https://github.com/mgd43b/plotroom/pull/164)
