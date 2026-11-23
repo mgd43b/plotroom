@@ -213,6 +213,7 @@ async def archive_lane(
         raise LedgerError("conflict", f"the lane has open checklist steps: {names}")
     await invalidate_checklist(uow, checklist)
     result = await _save(uow, replace(lane, state="archived", waiting_on=None))
+    await uow.retire_stale_outbox()
     await uow.delete_claims(lane.id)
     await uow.clear_item(ARCHIVE_PROPOSAL, lane.id)
     await refresh_idle_workers(uow, workers)

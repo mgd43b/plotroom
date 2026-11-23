@@ -24,6 +24,7 @@ log = logging.getLogger("plotroom.switchboard")
 NAME = "plotroom"
 WAIT_SECONDS = 15
 REGISTRATION_WAIT_SECONDS = 10
+PINNED_SEND_TIMEOUT_SECONDS = 5
 
 
 async def _call(
@@ -94,17 +95,29 @@ class Switchboard:
         async with asyncio.timeout(REGISTRATION_WAIT_SECONDS):
             while (session := self._session) is None:
                 await self._ready.wait()
-        response = await _call(
-            session,
-            "send",
-            {
-                "to": address,
-                "body": json.dumps({"action_key": action.key, "body": body}, ensure_ascii=False),
-                "idempotency_key": action.key,
-            },
-        )
-        if type(response.get("id")) is not int or response.get("to") != address:
-            raise ValueError("Switchboard did not accept the send")
+        arguments = {
+            "to": address,
+            "body": json.dumps({"action_key": action.key, "body": body}, ensure_ascii=False),
+            "idempotency_key": action.key,
+        }
+
+        async def submit() -> None:
+            response = await _call(session, "send", arguments)
+            if type(response.get("id")) is not int or response.get("to") != address:
+                raise ValueError("Switchboard did not accept the send")
+
+        lane, worker = action.payload.get("lane"), action.payload.get("worker")
+        if lane is None:
+            await submit()
+            return
+
+        async def submit_if_current(uow: UnitOfWork) -> None:
+            if await infer_lane(uow, worker=worker) == lane:
+                async with asyncio.timeout(PINNED_SEND_TIMEOUT_SECONDS):
+                    await submit()
+
+        # Registration has already finished. Serialize only the bounded send with lane changes.
+        await self._ledger.run("system", submit_if_current)
 
     async def receive(self, session: ClientSession) -> None:
         batch = await _call(session, "wait", {"timeout_s": WAIT_SECONDS}, WAIT_SECONDS + 5)

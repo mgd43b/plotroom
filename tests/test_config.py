@@ -43,6 +43,37 @@ def test_defaults_are_loopback(tmp_path: Path) -> None:
     assert config.search_budget == 2000
 
 
+def test_action_routes_are_project_local_and_independent_of_delivery(tmp_path: Path) -> None:
+    config = load_config(
+        write(
+            tmp_path,
+            '[projects.alpha.routes]\npublish = "future-lane"\n"release.sign" = "audit"\n'
+            '[projects.beta.routes]\npublish = "other-lane"\n',
+        ),
+        {},
+    )
+    assert config.routes == {
+        "alpha": {"publish": "future-lane", "release.sign": "audit"},
+        "beta": {"publish": "other-lane"},
+    }
+    assert config.delivery_routes == {"alpha": {}, "beta": {}}
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        'routes = "lane"',
+        "routes = { publish = true }",
+        'routes = { publish = "  " }',
+        'routes = { " " = "lane" }',
+        f'routes = {{ publish = "{"x" * 129}" }}',
+    ],
+)
+def test_action_route_config_validates_kind_and_lane(tmp_path: Path, settings: str) -> None:
+    with pytest.raises(ConfigError, match=r"projects\.alpha\.routes"):
+        load_config(write(tmp_path, f"[projects.alpha]\n{settings}\n"), {})
+
+
 @pytest.mark.parametrize("board", ["project", "team-", "team_"])
 def test_switchboard_requires_canonical_explicit_board(tmp_path: Path, board: str) -> None:
     config = write(tmp_path, f'[projects.alpha.switchboard]\nboard = "{board}"\n')
