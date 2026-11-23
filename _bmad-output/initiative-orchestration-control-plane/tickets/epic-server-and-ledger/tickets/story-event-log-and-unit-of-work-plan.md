@@ -107,6 +107,8 @@ Quick lens, one pass, 7 findings. Verdicts: medium patched = 2, low patched = 4 
 | `stop()` re-raises the writer task's own cancellation, so `_close_projects` could skip stores | low | patch | `await shield(task)` raises `CancelledError` for a cancelled task; AC 4 requires every store closed before the lock goes |
 | Two helpers named `_finish` | low | patch | Rename the store's to `_uninterrupted` |
 
+Second pass, 6 inline PR threads from a review bot and 1 from another, plus 2 comments outside the diff, all verified against the code: a retained transaction handle could write into the next input (medium, patched: handles expire with their transaction); `isfinite` overflowed on a huge integer in a `number` field (medium, patched); the receipt could record args a caller changed while the handler ran (low, patched with one snapshot); `stop()` from inside the writer's own work deadlocked, reported twice (medium, patched); a canceled child task awaited by work shut the writer down (medium, patched: only a cancel of the writer task ends it); `event.fields` could change between validation and storage (medium, patched with one copy). Each new test checked to fail without its fix. Declined, tracked for the refactor sweep (#26): the writer queue is unbounded (low; a cap needs a backpressure policy that belongs with the transport limits).
+
 ## Design Notes
 
 - Registry roles are role families (`system`, `orchestrator`, `worker`, …); `worker:<name>` matches `worker`. Event `source` must equal the kind's prefix (`github.pr_merged` → `github`). Fields: `str`, `int`, `bool`, `number`, `object`, `array`, each `required` or not; unknown fields are refused; values must be JSON.

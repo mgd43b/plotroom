@@ -6,6 +6,7 @@ consequences (adapter cursors, next items, triggers, actions).
 
 from __future__ import annotations
 
+import copy
 import uuid
 from collections.abc import Callable
 
@@ -71,7 +72,10 @@ class UnitOfWork:
         existing = await self._tx.find_event(event.source, event.kind, event.upstream_id)
         if existing is not None:
             return AppendResult(existing, False)
-        validate_fields(registered.fields, event.fields, event.kind)
+        # One copy is validated and stored: the caller owns event.fields and may change it while
+        # this input awaits the store.
+        fields = copy.deepcopy(event.fields)
+        validate_fields(registered.fields, fields, event.kind)
         stored = Event(
             seq=await self._tx.allocate_seq(),
             id=self._id_factory(),
@@ -79,7 +83,7 @@ class UnitOfWork:
             kind=event.kind,
             upstream_id=event.upstream_id,
             lane_id=event.lane_id,
-            fields=event.fields,
+            fields=fields,
             body=event.body,
             observed_at=format_time(self._clock.now()),
         )
