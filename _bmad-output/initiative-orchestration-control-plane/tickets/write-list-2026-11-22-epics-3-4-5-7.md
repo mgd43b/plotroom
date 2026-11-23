@@ -1,6 +1,6 @@
 # Write-list: tree pass 2026-11-22, epics 3, 4, 5 and 7 (branch tree/epics-3-4-5-7; its PR opens from main after #47 merges)
 
-Status: HELD, waiting for mgd43b's go-ahead, typed in the ticketer's session. Nothing below has been done.
+Status: PUBLISHED 2026-11-22 on "Yes, publish" (mgd43b, typed in the ticketer's session). Created #52 to #89 (epic 3: #52-#62, epic 4: #63-#75, epic 5: #76-#81, epic 7: #82-#89, in table order); verified 11, 13, 6 and 8 sub-issues under #3, #4, #5 and #7, 111 blocked-by relations on the new issues, #4, #5 and #7 blocked by #1; 18 bodies edited; #13 and #31 commented on, unlabeled and closed as completed.
 
 Summary: 38 new issues, 18 body edits, 38 parent links, 111 blocked-by relations on new issues and 3 on existing epics, 2 label removals, 2 comments and 2 closes (#13, #31).
 
