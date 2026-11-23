@@ -1,0 +1,111 @@
+"""Shared fixtures: config files and real ``plotroom`` subprocesses driven without sleeps."""
+
+from __future__ import annotations
+
+import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import pytest
+from mcp_types import TextContent
+
+CHILD_TIMEOUT = 60.0
+
+
+def write_config(directory: Path, *, projects: tuple[str, ...] = ("demo",)) -> Path:
+    """A config file with its own data directory, an ephemeral port and the given projects."""
+    path = directory / "config.toml"
+    tables = "\n".join(f"[projects.{name}]" for name in projects)
+    path.write_text(
+        f'data_dir = "{directory / "data"}"\nhost = "127.0.0.1"\nport = 0\n\n{tables}\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+def child_env() -> dict[str, str]:
+    """The test process's environment without any PLOTROOM_* setting leaking in."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("PLOTROOM_")}
+
+
+@dataclass
+class Child:
+    """A running ``plotroom`` process whose JSON log lines are read through a queue."""
+
+    process: subprocess.Popen[str]
+    lines: queue.Queue[str | None] = field(default_factory=lambda: queue.Queue[str | None]())
+    seen: list[dict[str, Any]] = field(default_factory=lambda: [])
+
+    def __post_init__(self) -> None:
+        threading.Thread(target=self._drain, daemon=True).start()
+
+    def _drain(self) -> None:
+        assert self.process.stdout is not None
+        for line in self.process.stdout:
+            self.lines.put(line)
+        self.lines.put(None)
+
+    def wait_for_log(self, msg: str) -> dict[str, Any]:
+        """The first log line whose ``msg`` matches; fails with what was seen if the child ends."""
+        while True:
+            try:
+                line = self.lines.get(timeout=CHILD_TIMEOUT)
+            except queue.Empty:
+                pytest.fail(f"no {msg!r} log line within {CHILD_TIMEOUT}s; saw {self.seen}")
+            if line is None:
+                pytest.fail(f"plotroom exited before logging {msg!r}; saw {self.seen}")
+            entry: dict[str, Any] = json.loads(line)
+            self.seen.append(entry)
+            if entry.get("msg") == msg:
+                return entry
+
+    def stop(self) -> int:
+        if self.process.poll() is None:
+            self.process.terminate()
+        try:
+            return self.process.wait(timeout=CHILD_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            return self.process.wait()
+
+
+def start_plotroom(*args: str) -> Child:
+    process = subprocess.Popen(
+        [sys.executable, "-m", "plotroom", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=child_env(),
+    )
+    return Child(process)
+
+
+@pytest.fixture
+def config_path(tmp_path: Path) -> Path:
+    return write_config(tmp_path)
+
+
+@pytest.fixture
+def server(config_path: Path) -> Iterator[tuple[Child, str]]:
+    """A running ``plotroom serve`` and its MCP URL."""
+    child = start_plotroom("serve", "--config", str(config_path))
+    try:
+        serving = child.wait_for_log("serving")
+        yield child, f"http://127.0.0.1:{serving['port']}/mcp"
+    finally:
+        child.stop()
+
+
+def tool_json(result: Any) -> dict[str, Any]:
+    """The JSON object a tool call returned as text."""
+    content = result.content[0]
+    assert isinstance(content, TextContent)
+    decoded: dict[str, Any] = json.loads(content.text)
+    return decoded

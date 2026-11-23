@@ -26,8 +26,8 @@ Run the scripts from the repository root (or any worktree of it), so `.claude/sk
 | Setting | Value |
 |---|---|
 | `ORCH_STATE_DIR` | default, `~/.local/state/agent-orchestration/mgd43b-plotroom` (outside git) |
-| `ORCH_MIN_CHECKS` | not set yet: CI does not exist until story #13 lands. Count a typical PR's checks then and record the number here |
-| `ORCH_CI_WORKFLOW` | the CI workflow story #13 adds |
+| `ORCH_MIN_CHECKS` | `2`: the `check (python 3.14)` and `check (python 3.15)` jobs of `ci.yml`, counted from `gh pr checks` on PR #28 |
+| `ORCH_CI_WORKFLOW` | `ci.yml` |
 | `ORCH_MERGE_METHOD` | `merge` (the default) |
 
 ## Bootstrap order
