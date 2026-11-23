@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from functools import partial
 from pathlib import Path
 
+from plotroom.app.clerk_import import run_import
 from plotroom.app.config import ConfigError, load_config
 from plotroom.app.lock import LockError
 from plotroom.app.logging import setup_logging
@@ -63,6 +64,14 @@ def _parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="how long to wait for a daemon started on demand (default: %(default)s)",
     )
+    connect.add_argument("--existing-local", action="store_true", help=argparse.SUPPRESS)
+    command = commands.add_parser("import", help="import a clerk template into the local daemon")
+    command.add_argument("--config", type=Path, help="TOML config file (default: PLOTROOM_CONFIG)")
+    command.add_argument(
+        "--token-id", help="local orchestrator token ID (default: PLOTROOM_TOKEN_ID)"
+    )
+    command.add_argument("--triggers", type=Path, help="copy of the clerk triggers.md file")
+    command.add_argument("--ledger", type=Path, help="copy of the clerk ledger.md file")
     watch = commands.add_parser("watch", help="wait until the next visible board change")
     watch.add_argument("--config", type=Path, help="TOML config file (default: PLOTROOM_CONFIG)")
     watch.add_argument("--token-id", help="local token ID (default: PLOTROOM_TOKEN_ID)")
@@ -96,7 +105,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _token(args)
     if args.command == "watch":
         return _watch(args.url, args.config, args.token_id, args.cursor)
-    return _connect(args.url, args.config, args.start_timeout, args.token_id)
+    if args.command == "import":
+        return run_import(args.config, args.token_id, args.triggers, args.ledger)
+    return _connect(
+        args.url, args.config, args.start_timeout, args.token_id, existing_local=args.existing_local
+    )
 
 
 def _token(args: argparse.Namespace) -> int:
@@ -215,16 +228,23 @@ def _watch(url: str | None, config: Path | None, token_id: str | None, cursor: i
 
 
 def _connect(
-    url: str | None, config_path: Path | None, start_timeout: float, token_id: str | None
+    url: str | None,
+    config_path: Path | None,
+    start_timeout: float,
+    token_id: str | None,
+    *,
+    existing_local: bool = False,
 ) -> int:
     from plotroom.adapters.mcp.proxy import EndpointError, StdioProxy, UpstreamStartError
-    from plotroom.app.daemon_start import DaemonLocation, ensure_daemon
+    from plotroom.app.daemon_start import DaemonLocation, ensure_daemon, require_daemon
 
     env = os.environ.copy()
     target = url or env.get("PLOTROOM_URL")
     bearer = env.get("PLOTROOM_TOKEN")
     token_id = token_id or env.get("PLOTROOM_TOKEN_ID")
     try:
+        if existing_local and (target is not None or bearer is not None):
+            raise TokenError("this connection requires a locally stored token and daemon")
         if token_id is not None and (target is not None or bearer is not None):
             raise TokenError("--token-id is for locally stored credentials and config-derived URLs")
         if target is not None:
@@ -240,9 +260,16 @@ def _connect(
                 bearer = select_local_token(config.data_dir, token_id)
                 if bearer is not None and location.identity is None:
                     raise TokenError("the local token's data directory no longer exists")
+            if existing_local and bearer is None:
+                raise TokenError("no local credential is available for import")
+            ensure = (
+                partial(require_daemon, location, within=start_timeout)
+                if existing_local
+                else partial(ensure_daemon, location, config_path, env=env, wait=start_timeout)
+            )
             proxy = StdioProxy(
                 config.url,
-                ensure=partial(ensure_daemon, location, config_path, env=env, wait=start_timeout),
+                ensure=ensure,
                 bearer=bearer,
                 current_endpoint=location.current_endpoint,
             )

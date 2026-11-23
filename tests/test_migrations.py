@@ -150,8 +150,21 @@ async def test_checklist_upgrade_preserves_existing_ready_lane(tmp_path: Path) -
     )
     try:
         await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
-        async with store.transaction() as tx:
-            await tx.save_lane(lane)
+        # Seed using the predecessor schema, before later lane metadata columns exist.
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.execute(
+                "INSERT INTO lanes (id, worker, work_items, branch, state, pr, head_sha) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    lane.id,
+                    lane.worker,
+                    json.dumps(lane.work_items),
+                    lane.branch,
+                    lane.state,
+                    lane.pr,
+                    lane.head_sha,
+                ),
+            )
         await store.migrate()
         assert await store.revision() == head_revision()
         board, *_ = await store.read_snapshot("orchestrator", None, checklist_lane=lane.id)
@@ -524,18 +537,56 @@ async def test_merge_controller_upgrade_preserves_existing_lane_and_pull(tmp_pat
         await store.close()
 
 
+async def test_clerk_import_upgrade_keeps_populated_lane_and_trigger(tmp_path: Path) -> None:
+    revision = ScriptDirectory.from_config(alembic_config()).get_revision("0019")
+    assert revision is not None
+    predecessor = revision.down_revision
+    assert isinstance(predecessor, str)
+    prior = alembic_config(_migrations_at(tmp_path / "before-clerk-import", predecessor))
+    store = SqliteStore("demo", tmp_path)
+    try:
+        await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.execute(
+                "INSERT INTO lanes (id, worker, work_items, branch, state) "
+                "VALUES ('lane', 'worker', '[\"ticket\"]', 'work', 'active')"
+            )
+            db.execute(
+                "INSERT INTO triggers (id, predicate, action_kind, action_payload, state, "
+                "bindings, created_seq, fired_seq, action_key) "
+                "VALUES ('old', ?, 'notify_orchestrator', ?, 'fired', '{}', 1, 2, 'delivery')",
+                (json.dumps({"pr_merged": {"number": 7}}), json.dumps({"text": "already sent"})),
+            )
+            db.execute("UPDATE project_seq SET value = 2")
+        await store.migrate()
+        assert await store.revision() == head_revision()
+        board, *_ = await store.read_snapshot("orchestrator", None, checklist_lane="lane")
+        assert board[3] == [Lane("lane", "worker", ("ticket",), "work")]
+        [trigger] = await store.list_triggers(None)
+        assert (trigger.id, trigger.state, trigger.fired_seq, trigger.action_key) == (
+            "old",
+            "fired",
+            2,
+            "delivery",
+        )
+        assert trigger.import_note is None
+        assert not trigger.notify_on_fire
+    finally:
+        await store.close()
+
+
 async def test_guardrail_upgrade_preserves_existing_ledger_and_enables_budgets_and_routes(
     tmp_path: Path,
 ) -> None:
     guardrails = ScriptDirectory.from_config(alembic_config()).get_revision("0018")
     assert guardrails is not None
-    assert guardrails.down_revision == "0020"
-    prior = alembic_config(_migrations_at(tmp_path / "before-guardrails", "0020"))
+    assert guardrails.down_revision == "0019"
+    prior = alembic_config(_migrations_at(tmp_path / "before-guardrails", "0019"))
     store = SqliteStore("demo", tmp_path)
     ledger = Ledger(store, build_catalog(frozenset({"fixture"})), FixedClock(), search=store)
     try:
         await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
-        assert await store.revision() == "0020"
+        assert await store.revision() == "0019"
         ledger.start()
         await ledger.execute(
             "orchestrator",
@@ -553,6 +604,12 @@ async def test_guardrail_upgrade_preserves_existing_ledger_and_enables_budgets_a
             "active",
             (ChecklistStep("smoke", "fixture", "check-7", "verified"),),
         )
+
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.execute(
+                "UPDATE lanes SET imported_channel = ?, imported_trigger_id = ? WHERE id = ?",
+                ("switchboard", "fixture-trigger", "lane"),
+            )
         await ledger.run("system", lambda uow: uow.save_checklist(checklist))
         message = await ledger.append(
             "system",
@@ -572,6 +629,12 @@ async def test_guardrail_upgrade_preserves_existing_ledger_and_enables_budgets_a
         (hit,) = (await ledger.search("migrationneedle", None, 10)).hits
         assert hit.id == message.event.id
         assert await ledger.run("system", lambda uow: uow.find_checklist("lane")) == checklist
+        lane = await ledger.run("system", lambda uow: uow.find_lane("lane"))
+        assert lane is not None
+        assert (lane.imported_channel, lane.imported_trigger_id) == (
+            "switchboard",
+            "fixture-trigger",
+        )
         assert await ledger.budget_status("orchestrator") == []
         expected: list[dict[str, Any]] = []
         for scope in ("production", "staging"):
