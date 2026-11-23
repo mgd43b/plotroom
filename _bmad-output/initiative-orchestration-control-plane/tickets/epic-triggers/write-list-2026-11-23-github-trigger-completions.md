@@ -4,7 +4,9 @@ Status: PUBLISHED 2026-11-23 under routine tracker delegation. All 10 completion
 
 ## Decision log
 
-- Decision: 2026-11-23, coordinator handoff in the Codex ticketer chat, on the routine tracker pass: "Publish the combined verified closure wave for five GitHub stories #34/#35/#36/#37/#38 and five triggers #52/#53/#54/#55/#59 under confirmed routine delegation, in one tracker mirror PR."
+The [standing tracker delegation](../epic-server-and-ledger/write-list-2026-11-23-local-mcp-completions.md#decision-log) applies to these verified completions.
+
+- Routing decision: 2026-11-23, coordinator handoff in the Codex ticketer chat, on the routine tracker pass: "Publish the combined verified closure wave for five GitHub stories #34/#35/#36/#37/#38 and five triggers #52/#53/#54/#55/#59 under confirmed routine delegation, in one tracker mirror PR."
 
 ## Tracker writes
 
