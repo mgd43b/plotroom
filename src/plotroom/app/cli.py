@@ -90,7 +90,7 @@ def _connect(url: str | None, config_path: Path | None, start_timeout: float) ->
     from plotroom.adapters.mcp.proxy import EndpointError, StdioProxy
 
     target = url or os.environ.get("PLOTROOM_URL")
-    ensure: Callable[[], Awaitable[None]] | None = None
+    ensure: Callable[[], Awaitable[str | None]] | None = None
     if target is None:
         try:
             config = load_config(config_path, os.environ, require_projects=False)
@@ -113,10 +113,10 @@ def _connect(url: str | None, config_path: Path | None, start_timeout: float) ->
 
 def _starter(
     config: Config, config_path: Path | None, timeout: float
-) -> Callable[[], Awaitable[None]]:
+) -> Callable[[], Awaitable[str | None]]:
     from plotroom.app.daemon_start import ensure_daemon  # keeps `serve` from loading the proxy
 
-    async def start() -> None:
-        await ensure_daemon(config, config_path, env=os.environ, wait=timeout)
+    async def start() -> str | None:
+        return await ensure_daemon(config, config_path, env=os.environ, wait=timeout)
 
     return start

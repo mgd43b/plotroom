@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-import socket
 import threading
 from collections.abc import AsyncIterator
 from typing import Any
@@ -234,16 +233,11 @@ async def test_cancelling_a_request_aborts_it_and_forwards_nothing() -> None:
 # --- failures ------------------------------------------------------------------------------
 
 
-def closed_port_url() -> str:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    return f"http://127.0.0.1:{port}/mcp"
-
-
-async def test_an_unreachable_server_answers_the_request_with_an_error() -> None:
+async def test_an_unreachable_server_answers_the_request_with_an_error(held_port: int) -> None:
     stdout = Output()
-    proxy = StdioProxy(closed_port_url(), stdin=lines(modern("tools/list", 9, {})), stdout=stdout)
+    proxy = StdioProxy(
+        f"http://127.0.0.1:{held_port}/mcp", stdin=lines(modern("tools/list", 9, {})), stdout=stdout
+    )
     await asyncio.wait_for(proxy.run(), timeout=60)
     [answer] = stdout.messages()
     assert answer["id"] == 9
@@ -251,10 +245,12 @@ async def test_an_unreachable_server_answers_the_request_with_an_error() -> None
     assert "plotroom serve" in answer["error"]["message"]
 
 
-async def test_an_unreachable_server_is_silent_for_notifications() -> None:
+async def test_an_unreachable_server_is_silent_for_notifications(held_port: int) -> None:
     stdout = Output()
     proxy = StdioProxy(
-        closed_port_url(), stdin=lines(request("notifications/initialized", None)), stdout=stdout
+        f"http://127.0.0.1:{held_port}/mcp",
+        stdin=lines(request("notifications/initialized", None)),
+        stdout=stdout,
     )
     await asyncio.wait_for(proxy.run(), timeout=60)
     assert stdout.messages() == []
@@ -549,12 +545,10 @@ async def test_requests_over_the_pending_limit_are_refused_but_a_cancel_still_wo
     assert "too many pending" in refusal["error"]["message"]
 
 
-async def test_error_messages_never_carry_userinfo_or_a_query() -> None:
+async def test_error_messages_never_carry_userinfo_or_a_query(held_port: int) -> None:
     stdout = Output()
     secret = "s3cret-token"
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    port = held_port
     url = f"http://user:{secret}@127.0.0.1:{port}/mcp?token={secret}#frag"
     proxy = StdioProxy(url, stdin=lines(modern("tools/list", 9, {})), stdout=stdout)
     await asyncio.wait_for(proxy.run(), timeout=60)
@@ -864,6 +858,52 @@ async def test_a_refused_connection_restarts_the_server_and_retries_the_request_
     assert starts == [1, 1], "once at the first request, once after the refusal"
     assert posts == [1, 1]
     assert [m["id"] for m in stdout.messages()] == [1]
+
+
+async def test_a_start_that_reports_where_the_server_listens_moves_the_proxy_there() -> None:
+    reported = ["http://127.0.0.1:41001/mcp", "http://127.0.0.1:41002/mcp"]
+    reached: list[str] = []
+
+    async def ensure() -> str:
+        return reported.pop(0)
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        reached.append(str(http_request.url))
+        if len(reached) == 1:  # the first daemon is gone by the time the request arrives
+            raise httpx.ConnectError("refused", request=http_request)
+        return ok_handler(http_request)
+
+    stdout = Output()
+    proxy = StdioProxy(
+        "http://127.0.0.1:0/mcp",
+        stdin=lines(modern("tools/list", 1, {})),
+        stdout=stdout,
+        http=client_for(handler),
+        ensure=ensure,
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    assert reached == ["http://127.0.0.1:41001/mcp", "http://127.0.0.1:41002/mcp"]
+    assert [m["id"] for m in stdout.messages()] == [1]
+
+
+async def test_errors_name_the_address_a_start_reported_not_the_configured_one() -> None:
+    async def ensure() -> str:
+        return "http://127.0.0.1:41003/mcp"
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=http_request)
+
+    stdout = Output()
+    proxy = StdioProxy(
+        "http://127.0.0.1:0/mcp",
+        stdin=lines(modern("tools/list", 1, {})),
+        stdout=stdout,
+        http=client_for(handler),
+        ensure=ensure,
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    (reply,) = stdout.messages()
+    assert "http://127.0.0.1:41003/mcp" in reply["error"]["message"]
 
 
 async def test_a_refusal_after_the_restart_is_an_error_and_not_a_loop() -> None:

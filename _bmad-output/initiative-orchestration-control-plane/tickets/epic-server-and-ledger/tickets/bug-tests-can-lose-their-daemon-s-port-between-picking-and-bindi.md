@@ -11,6 +11,7 @@ risk: medium
 tracker_id: "91"
 remote: "https://github.com/mgd43b/plotroom/issues/91"
 tracker_status: backlog
+status: built
 ---
 
 # Tests can lose their daemon's port between picking and binding it
@@ -26,3 +27,8 @@ Verify: The daemon started with port 0 reports the port it bound and serves on i
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md
+
+## Notes
+
+- Decision: a port of 0 means "discover"; the port file is `plotroom.port` in the data directory (see the epic's notes).
+- Built: https://github.com/mgd43b/plotroom/pull/128
