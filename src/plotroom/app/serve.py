@@ -382,7 +382,13 @@ class Daemon:
             live_merge = policy is not None and policy.ci_workflow is not None
             project.ledger = Ledger(
                 project.store,
-                build_catalog(workers, github_repository=repository, delivery_routes=routes),
+                build_catalog(
+                    workers,
+                    github_repository=repository,
+                    delivery_routes=routes,
+                    image_jobs=github.image_jobs if github is not None else (),
+                    lane_idle_minutes=self._config.lane_idle_minutes,
+                ),
                 self._clock,
                 watcher_roles=self._config.watchers.get(project_id, ()),
                 wait_cap=self._config.wait_cap,

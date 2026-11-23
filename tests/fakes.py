@@ -7,7 +7,7 @@ import copy
 import json
 import sqlite3
 from collections import Counter
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -336,6 +336,44 @@ class _MemoryTransaction:
             pull = self.pulls[repo, number]
             if pull.complete and pull.branch == branch:
                 return number
+        return None
+
+    async def latest_event(
+        self,
+        kind: str,
+        *,
+        fields: Mapping[str, str | bool] | None = None,
+        after: int = 0,
+    ) -> StoredEvent | None:
+        self._live()
+        for event in reversed(self.events):
+            if (
+                event.seq > after
+                and event.kind == kind
+                and all(event.fields.get(key) == value for key, value in (fields or {}).items())
+            ):
+                return copy.deepcopy(event)
+        return None
+
+    async def latest_run_report(self, run_id: str) -> StoredEvent | None:
+        return await self.latest_event("run.status", fields={"run_id": run_id})
+
+    async def lane_activity(self, lane: str) -> StoredEvent | None:
+        self._live()
+        commands = {
+            "core.lane_start",
+            "core.lane_update",
+            "core.lane_ready",
+            "core.lane_archive",
+            "core.claim",
+            "core.release",
+        }
+        for event in reversed(self.events):
+            if (
+                event.lane_id == lane
+                and event.kind not in {"core.trigger_fired", "core.lane_marked"}
+            ) or (event.kind in commands and event.fields["args"]["lane"] == lane):
+                return copy.deepcopy(event)
         return None
 
     async def insert_event(self, event: StoredEvent) -> None:

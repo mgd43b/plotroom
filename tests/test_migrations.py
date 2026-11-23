@@ -1,3 +1,4 @@
+import json
 import shutil
 import sqlite3
 from contextlib import closing
@@ -208,6 +209,51 @@ async def test_populated_claims_upgrade_reconciles_existing_tree_move(
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
             head_revision(),
         )
+
+
+async def test_recurring_upgrade_keeps_populated_once_trigger_state(tmp_path: Path) -> None:
+    legacy = tmp_path / "pre-recurring"
+    shutil.copytree(
+        MIGRATIONS_DIR,
+        legacy,
+        ignore=shutil.ignore_patterns(
+            "__pycache__", "0015_recurring_triggers.py", "0016_merge_controller.py"
+        ),
+    )
+    prior = alembic_config(legacy)
+    assert head_revision(prior) == "0013"
+    store = SqliteStore("demo", tmp_path)
+    predicate = json.dumps({"pr_merged": {"number": 7}})
+    action = json.dumps({"text": "fixture"})
+    try:
+        await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
+        with sqlite3.connect(store.path) as db:
+            db.executemany(
+                """
+                INSERT INTO triggers
+                    (id, predicate, action_kind, action_payload, state, bindings,
+                     created_seq, fired_seq, action_key)
+                VALUES (?, ?, 'notify_orchestrator', ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    ("open", predicate, action, "open", "{}", 1, None, None),
+                    ("fired", predicate, action, "fired", '{"$":7}', 2, 3, "original-key"),
+                ],
+            )
+            db.execute("UPDATE project_seq SET value = 3")
+        await store.migrate()
+        assert await store.revision() == head_revision()
+        first, second = await store.list_triggers(None)
+        assert (first.mode, first.state, first.was_true) == ("once", "open", False)
+        assert (second.mode, second.state, second.fired_seq, second.action_key) == (
+            "once",
+            "fired",
+            3,
+            "original-key",
+        )
+        assert second.bindings == {"$": 7}
+    finally:
+        await store.close()
 
 
 async def test_a_file_with_an_unknown_revision_is_not_migrated(tmp_path: Path) -> None:

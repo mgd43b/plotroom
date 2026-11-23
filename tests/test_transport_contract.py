@@ -43,6 +43,8 @@ TOOL_NAMES = {
     "lane_update",
     "lane_ready",
     "lane_archive",
+    "deploy_report",
+    "run_report",
     "claim",
     "release",
     "claims",
@@ -64,10 +66,21 @@ WRITER_TOOLS = {
     "lane_update",
     "lane_ready",
     "lane_archive",
+    "deploy_report",
+    "run_report",
     "trigger",
     "cancel",
     "outbox_lease",
     "outbox_done",
+}
+REPORT_ARGUMENTS = {
+    "deploy_report": {
+        "lane": "lane",
+        "environment": "fixture",
+        "sha": "a" * 40,
+        "state": "success",
+    },
+    "run_report": {"lane": "lane", "run_id": "fixture-run", "state": "succeeded"},
 }
 type Message = dict[str, Any]
 type Request = Callable[[Message], Awaitable[Message]]
@@ -253,6 +266,11 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         for tool in listed["result"]["tools"]:
             if tool["name"] in WRITER_TOOLS:
                 assert "request_id" in tool["inputSchema"]["required"]
+            if tool["name"] in REPORT_ARGUMENTS:
+                assert set(tool["inputSchema"]["required"]) == {
+                    "request_id",
+                    *REPORT_ARGUMENTS[tool["name"]],
+                }
         called: set[str] = set()
         request_ids = count(21)
 
@@ -288,6 +306,32 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         assert await call("merge_gate", pr=1) == gate
         assert "freezes" not in await call("snapshot")
         await call("lane_start", lane="lane", worker="fixture", branch="demo", work_items=[])
+        for name, args in REPORT_ARGUMENTS.items():
+            reply = await send(
+                message(
+                    era,
+                    next(request_ids),
+                    "tools/call",
+                    name=name,
+                    arguments={**args, "request_id": f"orchestrator-{name}"},
+                )
+            )
+            payload = json.loads(reply["result"]["content"][0]["text"])
+            assert payload["error"]["code"] == "forbidden"
+        async with connection(replace(endpoint, token=endpoint.worker), transport, era) as worker:
+            for name, args in REPORT_ARGUMENTS.items():
+                reply = await worker(
+                    message(
+                        era,
+                        next(request_ids),
+                        "tools/call",
+                        name=name,
+                        arguments={**args, "request_id": f"worker-{name}"},
+                    )
+                )
+                payload = json.loads(reply["result"]["content"][0]["text"])
+                assert payload["ok"], payload
+                called.add(name)
         await call("lane_update", lane="lane", waiting_on="orchestrator")
         item = (await call("next"))["items"][0]
         assert (await call("wait", cursor=0, timeout=0))["item"] == item
@@ -347,6 +391,7 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             firing["action_key"]: ("fixture-session", "synthetic native delivery")
         }
         arguments: dict[str, dict[str, Any]] = {
+            **REPORT_ARGUMENTS,
             "ack": {"item": "fixture"},
             "merge_gate": {"pr": 1},
             "freeze": {"reason": "fixture"},

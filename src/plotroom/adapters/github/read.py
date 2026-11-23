@@ -19,10 +19,14 @@ def obj(value: Any) -> Row:
     return cast("Row", value)
 
 
-def rows(value: Any) -> list[Row]:
+def _array(value: Any) -> list[Any]:
     if not isinstance(value, list):
         raise ValueError("expected a list")
-    return [obj(row) for row in cast("list[Any]", value)]
+    return cast("list[Any]", value)
+
+
+def rows(value: Any) -> list[Row]:
+    return [obj(row) for row in _array(value)]
 
 
 def string(value: Any) -> str:
@@ -116,13 +120,38 @@ class GitHubReadClient:
         verify_total: bool = False,
         verify_terminal: bool = False,
     ) -> tuple[list[Row], bool]:
+        records, more = await self.raw_page(
+            client,
+            token,
+            path,
+            page,
+            params=params,
+            key=key,
+            verify_total=verify_total,
+            verify_terminal=verify_terminal,
+        )
+        return rows(records), more
+
+    async def raw_page(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+        path: str,
+        page: int,
+        *,
+        params: Mapping[str, Any] | None = None,
+        key: str | None = None,
+        verify_total: bool = False,
+        verify_terminal: bool = False,
+    ) -> tuple[list[Any], bool]:
+        """Read a validated page with its members available for individual decoding."""
         value, response = await self._read(
             client,
             token,
             self.endpoint + path,
             params={**(params or {}), "per_page": 100, "page": page},
         )
-        records = rows(obj(value)[key] if key is not None else value)
+        records = _array(obj(value)[key] if key is not None else value)
         if len(records) > 100:
             raise GitHubUnavailable("GitHub returned an oversized page")
         link = response.links.get("next")

@@ -20,6 +20,7 @@ from plotroom.core.github_projection import (
     THREADS,
     GitHubRecord,
     GitHubResource,
+    checks_for_head,
     unresolved_threads,
 )
 from plotroom.core.merge_flakes import FAILURES as MAIN_FAILURES
@@ -147,29 +148,11 @@ def _projection_reason(
 
 
 def _check_buckets(checks: GitHubResource, head_sha: str) -> list[tuple[str, str]] | None:
-    latest: dict[tuple[str, int | None, int | None], GitHubRecord] = {}
-    for check in checks.records:
-        fields = check.fields
-        if (
-            check.kind != "check_run"
-            or type(fields.get("id")) is not int
-            or fields["id"] < 1
-            or not isinstance(fields.get("name"), str)
-            or not fields["name"]
-            or fields.get("head_sha") != head_sha
-        ):
-            return None
-        app_id = check.details.get("app_id")
-        # Unidentified runs cannot establish that they supersede one another.
-        if type(app_id) is int and app_id > 0:
-            key = (fields["name"], app_id, None)
-        else:
-            key = (fields["name"], None, fields["id"])
-        prior = latest.get(key)
-        if prior is None or fields["id"] > prior.fields["id"]:
-            latest[key] = check
+    latest = checks_for_head(checks, head_sha)
+    if latest is None:
+        return None
     buckets: list[tuple[str, str]] = []
-    for check in latest.values():
+    for check in latest:
         status, conclusion = check.fields.get("status"), check.fields.get("conclusion")
         if not isinstance(status, str) or (
             conclusion is not None and not isinstance(conclusion, str)

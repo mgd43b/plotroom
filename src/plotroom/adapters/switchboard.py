@@ -132,14 +132,18 @@ class Switchboard:
             raise ValueError("Switchboard returned an invalid claim")
 
         async def record(uow: UnitOfWork) -> None:
-            lane = await infer_lane(uow, worker=self._senders.get(sender))
+            worker = self._senders.get(sender)
+            lane = await infer_lane(uow, worker=worker)
+            fields = {"sender": sender}
+            if worker is not None:
+                fields["worker"] = worker
             await append_inbound(
                 uow,
                 NewEvent(
                     "switchboard",
                     "switchboard.message",
                     f"{self._board}:{message_id}",
-                    {"sender": sender},
+                    fields,
                     body,
                     lane,
                 ),

@@ -237,6 +237,7 @@ class Repository:
             return httpx.Response(200, json=counted("check_runs", checks))
 
         rows: dict[str, object] = {
+            "/deployments": [],
             "": {"default_branch": "main"},
             "/branches/main": {"commit": {"sha": MAIN}},
             "/actions/runs": counted("workflow_runs", [run.row() for run in self.runs]),
