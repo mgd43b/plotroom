@@ -133,6 +133,7 @@ class ProjectRuntime:
             if items is not None:
                 await uow.replace_work_items(items)
             await record_budget_observations(uow, readings)
+            await uow.retire_stale_outbox()
             await refresh_idle_workers(uow, self.workers)
             await self.ledger.watchers.reconcile(uow)
             uow.all_merge_pulls = True

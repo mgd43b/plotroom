@@ -295,6 +295,9 @@ class UnitOfWork:
     async def complete_outbox(self, lease_id: str, now: str) -> str | None:
         return await self._tx.complete_outbox(lease_id, now)
 
+    async def retire_stale_outbox(self) -> None:
+        await self._tx.retire_stale_outbox(format_time(self.now()))
+
     async def find_trigger(self, trigger_id: str) -> Trigger | None:
         return await self._tx.find_trigger(trigger_id)
 

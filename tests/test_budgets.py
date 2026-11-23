@@ -1,17 +1,20 @@
 import asyncio
 import json
+import sqlite3
 import sys
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
+from mcp import ClientSession
 
 from drain_standin import DrainStandIn
 from fakes import FixedClock
+from plotroom.adapters import switchboard as switchboard_adapter
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.adapters.switchboard import Switchboard
 from plotroom.adapters.usage_fixture import FixtureUsageMeter
@@ -543,7 +546,7 @@ async def test_budget_stop_key_requires_its_matching_cap_cause(tmp_path: Path) -
             await ledger.run("system", mismatched)
 
 
-@pytest.mark.parametrize("lease_state", ["unleased", "active", "expired"])
+@pytest.mark.parametrize("lease_state", ["unleased", "active", "expired-before", "expired-after"])
 async def test_staged_cap_stop_is_hidden_after_reassignment(
     tmp_path: Path, lease_state: str
 ) -> None:
@@ -551,6 +554,13 @@ async def test_staged_cap_stop_is_hidden_after_reassignment(
 
     async def progress(_elapsed: float, _cap: float) -> None:
         pass
+
+    def retired(key: str) -> bool:
+        with closing(sqlite3.connect(tmp_path / "demo.db")) as db:
+            (done,) = db.execute(
+                "SELECT done FROM claude_outbox WHERE action_key = ?", (key,)
+            ).fetchone()
+            return bool(done)
 
     async with open_ledger(tmp_path, clock, with_stop_routes=True) as ledger:
         cap_key = await cap_lane(ledger, clock, "desktop")
@@ -566,12 +576,19 @@ async def test_staged_cap_stop_is_hidden_after_reassignment(
             lease = (await ledger.execute("drain", "outbox_lease", "prior", {})).result["lease"]
             assert lease is not None
             assert lease["action_key"] == cap_key
+        assert not retired(cap_key)
 
     async with open_ledger(tmp_path, clock, with_stop_routes=True) as restarted:
-        await restarted.execute(ORCHESTRATOR, "lane_archive", "archive", {"lane": "lane"})
-        await start_lane(restarted, "different-lane", "desktop")
-        if lease_state == "expired":
+        if lease_state == "expired-before":
             clock.advance(LEASE_DURATION.total_seconds() + 1)
+        await restarted.execute(ORCHESTRATOR, "lane_archive", "archive", {"lane": "lane"})
+        assert retired(cap_key) == (lease_state in {"unleased", "expired-before"})
+        await start_lane(restarted, "different-lane", "desktop")
+        if lease_state == "expired-after":
+            runner = ProjectRuntime(restarted, clock, tick_seconds=60, action_attempts=2)
+            clock.advance(LEASE_DURATION.total_seconds() + 1)
+            assert await runner.tick_if_due()
+            assert retired(cap_key)
         _, ready = await restarted.wait_for_item("drain", None, 0, progress)
         assert ready is None
         assert (await restarted.execute("drain", "outbox_lease", "no-stale-stop", {})).result[
@@ -582,6 +599,7 @@ async def test_staged_cap_stop_is_hidden_after_reassignment(
                 "drain", "outbox_done", "prior-done", {"act_id": lease["act_id"]}
             )
             assert done.result == {"action_key": cap_key, "state": "done"}
+            assert retired(cap_key)
 
 
 async def test_relay_checks_lane_again_after_registration_wait(tmp_path: Path) -> None:
@@ -625,6 +643,62 @@ async def test_relay_checks_lane_again_after_registration_wait(tmp_path: Path) -
             await asyncio.gather(send_task, return_exceptions=True)
         assert await ledger.pending_action() is None
         assert not (relay_dir / "send-requests.jsonl").exists()
+
+
+async def test_relay_submission_serializes_with_lane_reassignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = FixedClock()
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir()
+    (relay_dir / "available").touch()
+    (relay_dir / "acked").touch()
+    submitting = asyncio.Event()
+    release_submission = asyncio.Event()
+    original_call = switchboard_adapter._call  # pyright: ignore[reportPrivateUsage]
+
+    async def call(
+        session: ClientSession, name: str, arguments: dict[str, Any], read_seconds: float = 5
+    ) -> dict[str, Any]:
+        if name != "send":
+            return await original_call(session, name, arguments, read_seconds)
+        submitting.set()
+        await release_submission.wait()
+        return {"id": 11, "to": arguments["to"]}
+
+    monkeypatch.setattr(switchboard_adapter, "_call", call)
+    async with open_ledger(tmp_path, clock, with_stop_routes=True) as ledger:
+        await cap_lane(ledger, clock, "fixture")
+        relay = fixture_relay(ledger, relay_dir)
+        runner = ProjectRuntime(
+            ledger,
+            clock,
+            tick_seconds=60,
+            action_attempts=2,
+            delivery_routes=STOP_ROUTES,
+            handlers={SWITCHBOARD_SEND: relay.send},
+        )
+        relay_task = asyncio.create_task(relay.run())
+        send_task = asyncio.create_task(runner.run_one_action())
+        try:
+            async with asyncio.timeout(8):
+                await submitting.wait()
+                archive = asyncio.create_task(
+                    ledger.execute(ORCHESTRATOR, "lane_archive", "archive", {"lane": "lane"})
+                )
+                reassign = asyncio.create_task(start_lane(ledger, "replacement", "fixture"))
+                try:
+                    done, _ = await asyncio.wait((archive, reassign), timeout=0.1)
+                    assert not done
+                finally:
+                    release_submission.set()
+                    await asyncio.gather(archive, reassign)
+                assert await send_task
+        finally:
+            release_submission.set()
+            send_task.cancel()
+            relay_task.cancel()
+            await asyncio.gather(send_task, relay_task, return_exceptions=True)
 
 
 async def test_live_cap_stop_waits_for_route_after_restart(tmp_path: Path) -> None:

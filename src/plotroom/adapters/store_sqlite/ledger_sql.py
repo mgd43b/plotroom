@@ -355,6 +355,9 @@ class SqliteTransaction:
     async def complete_outbox(self, lease_id: str, now: str) -> str | None:
         return await outbox_sql.complete_outbox(self._live(), lease_id, now)
 
+    async def retire_stale_outbox(self, now: str) -> None:
+        await outbox_sql.retire_stale_outbox(self._live(), now)
+
     async def find_trigger(self, trigger_id: str) -> Trigger | None:
         return await triggers_sql.find_trigger(self._live(), trigger_id)
 

@@ -35,7 +35,7 @@ Refs #103.
 
 - `core/budgets.py` records the 100% threshold and queues the existing `send` action keyed `budget:<id>:100`, with the owning worker, the lane binding, and the literal message `stop` (initiative R20). Use the same budget key for the orchestrator item.
 - `core/unit_of_work.py::enqueue_action` currently expects a kind-prefixed stable key. Permit the budget key explicitly for a matching system threshold cause while preserving the other key checks.
-- `app/runtime.py::_dispatch` already maps send to Switchboard or native outbox, passing the action key through. Check the budget's pinned lane before delivery. A native outbox row and its final check should share the writer transaction. Keep the existing Switchboard network call outside the writer.
+- `app/runtime.py::_dispatch` already maps send to Switchboard or native outbox, passing the action key through. Check the budget's pinned lane before delivery. A native outbox row and its final check should share the writer transaction. Wait for Switchboard registration before entering the writer. Serialize the final owner check and bounded relay call with lane changes.
 - `tests/test_trigger_actions.py`, `tests/switchboard_child.py`, and `tests/test_trigger_recovery.py` show how to run isolated channels.
 
 ## Tasks & Acceptance
@@ -67,7 +67,9 @@ Refs #103.
 - Medium · Patch. A single overwritten relay record hid duplicate requests. The fixture records request history and verifies the durable action key.
 - Medium · Patch. The relay restart case now verifies recovery after the reply is interrupted and checks per-key delivery.
 - Medium · Patch. The native restart case exercises an expired lease after delivery and verifies deduplication when the same keyed stop is re-leased. An expired lease for a reassigned lane cannot wake the drain or be leased again.
-- Medium · Existing handoff. A previously issued lease or a relay request in flight retains the delivery protocol's handoff semantics.
+- Medium · Existing handoff. A previously issued drain lease retains its receipt semantics. A relay request already written to the transport may still be accepted after a local timeout or lost reply, and the retry carries the same key.
+- High · Kody patch. The final lane check and relay submission now share a writer turn with a five-second request deadline and bounded client cancellation. A controlled test verifies reassignment waits for that handoff.
+- Medium · Kody patch. Archive and tick writer turns retire stale outbox rows after any active lease expires. Tests verify retirement and completion of an active lease.
 
 ## Verification
 

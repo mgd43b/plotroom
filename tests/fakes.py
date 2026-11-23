@@ -83,6 +83,16 @@ class FixedClock:
         self._now += timedelta(seconds=seconds)
 
 
+def _outbox_deliverable(
+    message: OutboxMessage, actions: dict[str, Action], lanes: dict[str, Lane]
+) -> bool:
+    if not message.action_key.startswith("budget:"):
+        return True
+    action = actions.get(message.action_key)
+    lane = lanes.get(action.payload["lane"]) if action is not None else None
+    return lane is not None and lane.state != "archived" and lane.worker == message.worker
+
+
 class _MemoryTransaction:
     """Works on staged copies; ``MemoryStore.transaction`` publishes them on commit."""
 
@@ -327,8 +337,10 @@ class _MemoryTransaction:
     async def lease_outbox(self, lease_id: str, now: str, expires_at: str) -> OutboxLease | None:
         self._live()
         for key, message in self.outbox.items():
-            if key not in self.delivered and (
-                key not in self.leases or self.leases[key].expires_at <= now
+            if (
+                key not in self.delivered
+                and (key not in self.leases or self.leases[key].expires_at <= now)
+                and _outbox_deliverable(message, self.actions, self.lanes)
             ):
                 lease = OutboxLease(message, lease_id, expires_at)
                 self.leases[key] = lease
@@ -342,6 +354,15 @@ class _MemoryTransaction:
                 self.delivered.add(key)
                 return key
         return None
+
+    async def retire_stale_outbox(self, now: str) -> None:
+        self._live()
+        self.delivered.update(
+            key
+            for key, message in self.outbox.items()
+            if (key not in self.leases or self.leases[key].expires_at <= now)
+            and not _outbox_deliverable(message, self.actions, self.lanes)
+        )
 
     async def find_trigger(self, trigger_id: str) -> Trigger | None:
         self._live()
@@ -560,7 +581,9 @@ class MemoryStore:
         ready: list[int] = []
         expiries: list[str] = []
         for key, message in self._outbox.items():
-            if key in self._delivered:
+            if key in self._delivered or not _outbox_deliverable(
+                message, self._actions, self._lanes
+            ):
                 continue
             lease = self._leases.get(key)
             if lease is None or lease.expires_at <= now:

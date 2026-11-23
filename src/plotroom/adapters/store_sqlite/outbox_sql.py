@@ -38,6 +38,10 @@ _READINESS = text(f"""
            MIN(CASE WHEN expires_at > :now THEN expires_at END) AS next_expiry
     FROM claude_outbox AS o WHERE done = 0 AND {_DELIVERABLE}
 """)  # noqa: S608 - fixed SQL predicate
+_RETIRE_STALE = text(f"""
+    UPDATE claude_outbox AS o SET done = 1
+    WHERE done = 0 AND (expires_at IS NULL OR expires_at <= :now) AND NOT {_DELIVERABLE}
+""")  # noqa: S608 - fixed SQL predicate
 
 
 async def insert_outbox(connection: AsyncConnection, message: OutboxMessage) -> None:
@@ -63,6 +67,10 @@ async def complete_outbox(connection: AsyncConnection, lease_id: str, now: str) 
         await connection.execute(_COMPLETE, {"lease_id": lease_id, "now": now})
     ).scalar_one_or_none()
     return None if key is None else str(key)
+
+
+async def retire_stale_outbox(connection: AsyncConnection, now: str) -> None:
+    await connection.execute(_RETIRE_STALE, {"now": now})
 
 
 async def readiness(connection: AsyncConnection, head: int, now: str) -> OutboxReadiness:
