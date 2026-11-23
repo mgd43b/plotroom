@@ -185,13 +185,35 @@ hitl = false
 risk = "medium"
 
 [[entry]]
+id = 19
+type = "bug"
+title = "A SIGTERM'd daemon may skip its teardown"
+description = "From uvicorn's source, a daemon stopped with SIGTERM appears to skip Daemon.run's teardown, including _close_projects, which would leave project files without a clean close (found by the #91 lane; inferred, untested). The first step is a test that sends SIGTERM to a running daemon and checks that teardown ran; if it did not, the fix makes SIGTERM shut down through the same teardown as a normal stop."
+verify = "A test that sends SIGTERM to a running daemon with an open project shows _close_projects ran and the project file closed cleanly, and passes in CI."
+covers = ["R1", "R8"]
+after = [2]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 20
+type = "bug"
+title = "lock_owner's probe can briefly take a stale lock"
+description = "When a stale lock file names a live pid, lock_owner's probe can briefly take the lock; it heals itself but logs one spurious \"locked\" line (found by the #91 lane). The probe should read the lock's owner without taking it."
+verify = "With a stale lock file naming a live pid, lock_owner reports the owner without taking the lock, and no \"locked\" line is logged."
+covers = ["R8"]
+after = [2]
+hitl = false
+risk = "low"
+
+[[entry]]
 id = 12
 type = "story"
 title = "Refactor sweep"
 description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred, including the stdio proxy blocking on readline when a client breaks stdout but keeps stdin open and silent (deferred in PR #51), and the unbounded writer queue in src/plotroom/core/writer.py (declined in PR #50; a cap needs a backpressure policy that belongs with the transport limits)."
 verify = "Deferred findings are resolved or re-filed, and CI passes."
 covers = []
-after = [2, 3, 4, 5, 6, 7, 8, 13, 9, 10, 14, 15, 11, 17, 18]
+after = [2, 3, 4, 5, 6, 7, 8, 13, 9, 10, 14, 15, 11, 17, 18, 19, 20]
 hitl = false
 risk = "low"
 
