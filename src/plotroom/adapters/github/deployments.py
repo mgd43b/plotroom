@@ -4,12 +4,12 @@ import json
 import logging
 from dataclasses import replace
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable
-from plotroom.adapters.github.read import GitHubReadClient, Row, number, rows, string
+from plotroom.adapters.github.read import GitHubReadClient, Row, number, obj, rows, string
 from plotroom.core.events import NewEvent
 from plotroom.core.github import FetchCursor
 from plotroom.core.lanes import infer_lane
@@ -122,32 +122,36 @@ async def _poll_statuses(
 ) -> Row | None:
     resource = f"deployment_statuses/{identifier}"
     path = f"/deployments/{identifier}/statuses"
-    recent, has_history = await api.page(client, token, path, 1)
+    recent, has_history = await api.raw_page(client, token, path, 1)
     cursor = await ledger.fetch_cursor(api.repository, resource)
     page = int(cursor.watermark) if cursor else 2
-    history, more = [], False
+    history: list[Any] = []
+    watermark = "2"
+    rate_limit = None
     if has_history:
+        watermark = str(page)
         try:
-            history, more = await api.page(client, token, path, page)
-        except GitHubRateLimited:
-            raise
+            history, more = await api.raw_page(client, token, path, page)
+        except GitHubRateLimited as exc:
+            rate_limit = exc
         except _READ_ERRORS:
             log.warning(
                 "GitHub deployment status history refresh failed",
                 extra={"project": ledger.project_id},
             )
-    watermark = str(page + 1 if more else 2)
+        else:
+            watermark = str(page + 1 if more else 2)
     sha = validate_report_sha(string(deployment["sha"]))
     ref = string(deployment.get("ref") or "")
     branch = ref.removeprefix("refs/heads/")
     if branch == sha or branch.startswith("refs/"):
         branch = ""
 
-    def valid_events(statuses: list[Row]) -> list[NewEvent]:
+    def valid_events(statuses: list[Any]) -> list[NewEvent]:
         events: list[NewEvent] = []
         for row in statuses:
             try:
-                events.append(_status_event(api.repository, deployment, identifier, sha, row))
+                events.append(_status_event(api.repository, deployment, identifier, sha, obj(row)))
             except KeyError, ValueError, TypeError, OverflowError:
                 log.warning(
                     "GitHub deployment status row was invalid", extra={"project": ledger.project_id}
@@ -160,6 +164,8 @@ async def _poll_statuses(
         unseen = await ledger.run("system", lambda uow: _unseen(uow, events))
         for event in unseen:
             await ledger.run("system", partial(_record, branch=branch, event=event))
+    if rate_limit is not None:
+        raise rate_limit
     if watermark != (cursor.watermark if cursor else "2"):
         progress = FetchCursor(watermark, as_of, cursor.generation + 1 if cursor else 1)
         await ledger.run(

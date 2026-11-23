@@ -322,7 +322,6 @@ class _MemoryTransaction:
         self,
         kind: str,
         *,
-        lane: str | None = None,
         fields: Mapping[str, str | bool] | None = None,
         after: int = 0,
     ) -> StoredEvent | None:
@@ -331,11 +330,13 @@ class _MemoryTransaction:
             if (
                 event.seq > after
                 and event.kind == kind
-                and (lane is None or event.lane_id == lane)
                 and all(event.fields.get(key) == value for key, value in (fields or {}).items())
             ):
                 return copy.deepcopy(event)
         return None
+
+    async def latest_run_report(self, run_id: str) -> StoredEvent | None:
+        return await self.latest_event("run.status", fields={"run_id": run_id})
 
     async def lane_activity(self, lane: str) -> StoredEvent | None:
         self._live()

@@ -37,3 +37,9 @@ def upgrade() -> None:
             "'core.lane_archive', 'core.claim', 'core.release')"
         ),
     )
+    op.create_index(
+        "ix_events_run_id_seq",
+        "events",
+        [sa.text("json_extract(fields, '$.run_id')"), "seq"],
+        sqlite_where=sa.text("kind = 'run.status'"),
+    )

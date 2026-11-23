@@ -399,7 +399,10 @@ async def test_main_images_trigger_requires_configured_image_evidence(tmp_path: 
         await store.close()
 
 
-async def test_every_keeps_a_pending_event_in_an_unsatisfied_branch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("message_before_fire", [True, False])
+async def test_nested_events_use_the_shared_last_fire_and_per_leaf_plateau_cursors(
+    tmp_path: Path, message_before_fire: bool
+) -> None:
     clock = FixedClock()
     async with opened(tmp_path, clock) as ledger:
         created = await ledger.execute(
@@ -423,16 +426,14 @@ async def test_every_keeps_a_pending_event_in_an_unsatisfied_branch(tmp_path: Pa
         )
         identity = created.result["id"]
         closed = GitHubRecord("issue/7", "issue_closed", {"state": "closed"})
-        await resource(ledger, ISSUES, GitHubResource((closed,)))
-        await ledger.append(
-            "system",
-            NewEvent(
-                "switchboard",
-                "switchboard.message",
-                "nested",
-                {"sender": "peer", "worker": "fixture"},
-            ),
+        message = NewEvent(
+            "switchboard", "switchboard.message", "nested", {"sender": "peer", "worker": "fixture"}
         )
+        if message_before_fire:
+            await ledger.append("system", message)
+        await resource(ledger, ISSUES, GitHubResource((closed,)))
+        if not message_before_fire:
+            await ledger.append("system", message)
         assert len(await occurrences(ledger, identity)) == 1
 
     async with opened(tmp_path, clock) as ledger:
@@ -441,4 +442,8 @@ async def test_every_keeps_a_pending_event_in_an_unsatisfied_branch(tmp_path: Pa
         assert len(await occurrences(ledger, identity)) == 1
         second = GitHubRecord("issue/8", "issue_closed", {"state": "closed"})
         await resource(ledger, ISSUES, GitHubResource((reopened, second)))
-        assert len(await occurrences(ledger, identity)) == 2
+        expected = 1 if message_before_fire else 2
+        assert len(await occurrences(ledger, identity)) == expected
+        if message_before_fire:
+            await ledger.append("system", replace(message, upstream_id="fresh"))
+            assert len(await occurrences(ledger, identity)) == 2

@@ -61,6 +61,8 @@ Given a recurring trigger and local typed facts, when messages replay or a lane 
 
 - The review after the main merge found that a message in an unsatisfied nested branch could be lost during a true plateau. The writer now tracks per-leaf cursors for satisfied branches and preserves events waiting on other clauses.
 
+- Opening Kodus asked whether a pending event should survive an actual sibling firing. Story #58 and AD-15 specify the trigger-wide last-fired cursor. The regression proves that a pre-fire event is consumed and an event arriving during a true plateau stays eligible until its branch can match.
+
 ## Verification
 
 Run `uv run python -m pytest -q tests/test_trigger_predicates.py tests/test_migrations.py`.

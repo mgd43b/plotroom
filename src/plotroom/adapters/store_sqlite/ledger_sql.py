@@ -39,11 +39,16 @@ FIND_EVENT = text(
 )
 LATEST_EVENT = text("""
     SELECT events.* FROM events
-    WHERE kind = :kind AND seq > :after AND (:lane IS NULL OR lane_id = :lane)
+    WHERE kind = :kind AND seq > :after
       AND NOT EXISTS (
         SELECT 1 FROM json_each(:fields) AS expected
         WHERE json_extract(events.fields, '$.' || expected.key) IS NOT expected.value
       )
+    ORDER BY seq DESC LIMIT 1
+""")
+LATEST_RUN_REPORT = text("""
+    SELECT * FROM events
+    WHERE kind = 'run.status' AND json_extract(fields, '$.run_id') = :run_id
     ORDER BY seq DESC LIMIT 1
 """)
 LANE_ACTIVITY = text("""
@@ -141,15 +146,18 @@ class SqliteTransaction:
         self,
         kind: str,
         *,
-        lane: str | None = None,
         fields: Mapping[str, str | bool] | None = None,
         after: int = 0,
     ) -> Event | None:
         result = await self._live().execute(
             LATEST_EVENT,
-            {"kind": kind, "lane": lane, "after": after, "fields": json.dumps(fields or {})},
+            {"kind": kind, "after": after, "fields": json.dumps(fields or {})},
         )
         row = result.first()
+        return None if row is None else event_from_row(row)
+
+    async def latest_run_report(self, run_id: str) -> Event | None:
+        row = (await self._live().execute(LATEST_RUN_REPORT, {"run_id": run_id})).first()
         return None if row is None else event_from_row(row)
 
     async def lane_activity(self, lane: str) -> Event | None:

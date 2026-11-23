@@ -275,8 +275,10 @@ async def test_every_trigger_fires_for_each_valid_status_on_a_mixed_page(
         return httpx.Response(
             200,
             json=[
+                None,
                 {"id": 5, "state": "invalid-fixture-state"},
                 {"id": 4, "state": "success"},
+                "invalid-fixture-scalar",
                 {"id": 3, "state": "pending", "environment": ["invalid-fixture-environment"]},
                 {"id": 2, "state": "failure"},
             ],
@@ -286,6 +288,8 @@ async def test_every_trigger_fires_for_each_valid_status_on_a_mixed_page(
     api = GitHubReadClient(API, REPO)
     ledger = Ledger(deploy_store, build_catalog(github_repository=REPO), clock)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(ValueError, match="expected an object"):
+            await api.page(client, "fixture", "/deployments/1/statuses", 1)
         ledger.start()
         try:
             trigger = await ledger.execute(
@@ -302,7 +306,7 @@ async def test_every_trigger_fires_for_each_valid_status_on_a_mixed_page(
             warnings = [
                 record.message for record in caplog.records if record.name == "plotroom.github"
             ]
-            assert warnings == ["GitHub deployment status row was invalid"] * 2
+            assert warnings == ["GitHub deployment status row was invalid"] * 4
             await poll_deployments(ledger, api, client, "fixture", format_time(clock.now()))
             events = await ledger.events_after(0)
         finally:
@@ -312,6 +316,67 @@ async def test_every_trigger_fires_for_each_valid_status_on_a_mixed_page(
     assert [
         event.fields["trigger_id"] for event in events if event.kind == "core.trigger_fired"
     ] == [trigger.result["id"]] * 2
+
+
+async def test_status_history_read_error_retries_same_page(deploy_store: SqliteStore) -> None:
+    current_status = 100
+    status_pages: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix(f"/repos/{REPO}")
+        page = int(request.url.params["page"])
+        if path == "/deployments":
+            return httpx.Response(200, json=[{"id": 1, "sha": SHA, "environment": "Preview"}])
+        assert path == "/deployments/1/statuses"
+        status_pages.append(page)
+        if page == 3 and current_status == 101:
+            return httpx.Response(503)
+        if page == 4:
+            return httpx.Response(200, json=[])
+        status = current_status if page == 1 else page
+        return DeploymentFixture.page_response(path, [{"id": status, "state": "success"}], page, 4)
+
+    clock = FixedClock()
+    api = GitHubReadClient(API, REPO)
+    ledger = Ledger(deploy_store, build_catalog(github_repository=REPO), clock)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        ledger.start()
+        try:
+            resource = "deployment_statuses/1"
+            await poll_deployments(ledger, api, client, "fixture", format_time(clock.now()))
+            cursor = await ledger.fetch_cursor(REPO, resource)
+            assert cursor is not None
+            assert cursor.watermark == "3"
+
+            current_status = 101
+            await poll_deployments(ledger, api, client, "fixture", format_time(clock.now()))
+            assert await ledger.fetch_cursor(REPO, resource) == cursor
+            assert [event.fields["status_id"] for event in await ledger.events_after(0)] == [
+                100,
+                2,
+                101,
+            ]
+
+            current_status = 102
+            await poll_deployments(ledger, api, client, "fixture", format_time(clock.now()))
+            cursor = await ledger.fetch_cursor(REPO, resource)
+            assert cursor is not None
+            assert cursor.watermark == "4"
+
+            await poll_deployments(ledger, api, client, "fixture", format_time(clock.now()))
+            cursor = await ledger.fetch_cursor(REPO, resource)
+            assert cursor is not None
+            assert cursor.watermark == "2"
+            assert [event.fields["status_id"] for event in await ledger.events_after(0)] == [
+                100,
+                2,
+                101,
+                102,
+                3,
+            ]
+        finally:
+            await ledger.stop()
+    assert status_pages == [1, 2, 1, 3, 1, 3, 1, 4]
 
 
 async def test_pending_deployments_rotate_after_leaving_the_newest_set_and_restart(

@@ -21,7 +21,7 @@ from plotroom.core.github_projection import (
 )
 from plotroom.core.reports import DEPLOY_STATUS, validate_deploy_environment, validate_report_sha
 from plotroom.core.roles import role_family
-from plotroom.core.run_reports import RUN_ID, RUN_STATUS, validate_identity
+from plotroom.core.run_reports import RUN_ID, validate_identity
 from plotroom.core.trigger_actions import validate_action
 
 if TYPE_CHECKING:
@@ -179,7 +179,7 @@ class LeafRegistry:
             if match.holds and not trigger.was_true:
                 updated = await self._fire(uow, updated)
                 if trigger.mode == "every":
-                    # Event leaves are consumed through the sequence of this occurrence.
+                    # Last fire is the shared cursor. It supersedes any per-leaf cursors.
                     updated = replace(updated, was_true=match.level_holds, event_floors={})
             elif match.holds and match.events:
                 # During a true plateau, acknowledge only events in satisfied branches.
@@ -330,7 +330,7 @@ def _validate_run(args: dict[str, Any]) -> None:
 
 
 async def _run_finished(evaluation: Evaluation, _path: str, args: dict[str, Any]) -> bool:
-    event = await evaluation.uow.latest_event(RUN_STATUS, fields={"run_id": args["run_id"]})
+    event = await evaluation.uow.latest_run_report(args["run_id"])
     return event is not None and bool(event.fields["finished"])
 
 

@@ -85,11 +85,13 @@ class UnitOfWork:
         self,
         kind: str,
         *,
-        lane: str | None = None,
         fields: Mapping[str, str | bool] | None = None,
         after: int = 0,
     ) -> Event | None:
-        return await self._tx.latest_event(kind, lane=lane, fields=fields, after=after)
+        return await self._tx.latest_event(kind, fields=fields, after=after)
+
+    async def latest_run_report(self, run_id: str) -> Event | None:
+        return await self._tx.latest_run_report(run_id)
 
     async def lane_activity(self, lane: str) -> Event | None:
         return await self._tx.lane_activity(lane)

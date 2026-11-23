@@ -35,7 +35,7 @@ async def run_report(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
     current = await uow.find_lane(lane)
     if current is None or current.state == "archived":
         raise LedgerError("conflict", "a run report requires a current lane")
-    previous = await uow.latest_event(RUN_STATUS, fields={"run_id": run_id})
+    previous = await uow.latest_run_report(run_id)
     if previous is not None:
         if previous.lane_id != lane:
             raise LedgerError("conflict", "run_id already belongs to another lane")

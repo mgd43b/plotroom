@@ -61,6 +61,8 @@ Given a running lane-owned run and incomplete or mismatched main facts, when the
 
 - The review after the main merge found that a same-SHA PR workflow could satisfy main readiness, a late progress fact could clear completion, and a send recipient lane could incorrectly scope a project-unique run. Main verdicts now require positive attribution, terminal runs reject nonterminal reports, and run predicates use the project-wide run ID.
 
+- Opening Kodus flagged the retained-event scan by run ID. Both report ownership and run_finished use an indexed exact-ID lookup. SQLite EXPLAIN QUERY PLAN selects the new run ID index.
+
 ## Verification
 
 Run `uv run python -m pytest -q tests/test_trigger_predicates.py`.

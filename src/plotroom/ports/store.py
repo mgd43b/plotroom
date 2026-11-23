@@ -34,10 +34,11 @@ class Transaction(Protocol):
         self,
         kind: str,
         *,
-        lane: str | None = None,
         fields: Mapping[str, str | bool] | None = None,
         after: int = 0,
     ) -> Event | None: ...
+
+    async def latest_run_report(self, run_id: str) -> Event | None: ...
 
     async def lane_activity(self, lane: str) -> Event | None: ...
 
