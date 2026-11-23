@@ -41,6 +41,12 @@ def _parser() -> argparse.ArgumentParser:
 
     serve = commands.add_parser("serve", help="own a data directory and serve the tools over HTTP")
     serve.add_argument("--config", type=Path, help="TOML config file (default: PLOTROOM_CONFIG)")
+    serve.add_argument(
+        "--log-file",
+        type=Path,
+        metavar="PATH",
+        help="write the log to this size-rotating file instead of stdout",
+    )
 
     connect = commands.add_parser("connect", help="reach a running server")
     connect.add_argument("--stdio", action="store_true", required=True, help="proxy stdio to HTTP")
@@ -59,23 +65,33 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "serve":
-        setup_logging(sys.stdout)
-        return _serve(args.config)
+        return _serve(args.config, args.log_file)
     setup_logging(sys.stderr)  # stdout is the protocol channel
     return _connect(args.url, args.config, args.start_timeout)
 
 
-def _serve(config_path: Path | None) -> int:
+def _serve(config_path: Path | None, log_file: Path | None) -> int:
     from plotroom.app.serve import Daemon
 
+    # The limits come from the config, so it is read before logging is set up; until then, and when
+    # it cannot be read, errors go to a plain stream handler (stderr is the daemon's own file).
+    setup_logging(sys.stdout if log_file is None else sys.stderr)
     try:
         config = load_config(config_path, os.environ)
     except ConfigError as exc:
         log.error("invalid configuration", extra={"reason": str(exc)})
         return EXIT_CONFIG
+    if log_file is not None:
+        try:
+            setup_logging(file=log_file, max_bytes=config.log_max_bytes, backups=config.log_backups)
+        except OSError as exc:
+            log.error("cannot open the log file", extra={"path": str(log_file), "reason": str(exc)})
+            return EXIT_FAILURE
     try:
         asyncio.run(Daemon(config).run())
     except LockError as exc:
+        # The winner owns the log file: a loser must not roll or delete it through its own handler.
+        setup_logging(sys.stderr)
         log.error("data directory is locked", extra={"reason": str(exc)})
         return EXIT_LOCKED
     except KeyboardInterrupt:

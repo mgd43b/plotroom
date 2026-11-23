@@ -26,6 +26,8 @@ def write_config(
     projects: tuple[str, ...] = ("demo",),
     port: int = 0,
     name: str = "config",
+    log_max_bytes: int | None = None,
+    log_backups: int | None = None,
 ) -> Path:
     """A config file with its own data directory and the given projects.
 
@@ -34,8 +36,13 @@ def write_config(
     """
     path = directory / f"{name}.toml"
     tables = "\n".join(f"[projects.{project}]" for project in projects)
+    settings = ""
+    if log_max_bytes is not None:
+        settings += f"log_max_bytes = {log_max_bytes}\n"
+    if log_backups is not None:
+        settings += f"log_backups = {log_backups}\n"
     path.write_text(
-        f'data_dir = "{directory / "data"}"\nhost = "127.0.0.1"\nport = {port}\n\n{tables}\n',
+        f'data_dir = "{directory / "data"}"\nhost = "127.0.0.1"\nport = {port}\n{settings}\n{tables}\n',
         encoding="utf-8",
     )
     return path

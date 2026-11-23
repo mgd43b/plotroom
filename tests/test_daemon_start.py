@@ -19,7 +19,7 @@ from mcp.client.client import Client
 from mcp.client.stdio import StdioServerParameters
 
 from conftest import child_env, start_plotroom, tool_json, write_config
-from plotroom.app.cli import main
+from plotroom.app.cli import EXIT_LOCKED, main
 from plotroom.app.config import load_config
 from plotroom.app.daemon_start import (
     LOG_FILE_NAME,
@@ -186,6 +186,28 @@ def test_the_last_logged_error_after_an_offset_is_the_reason(tmp_path: Path) -> 
     log.write_text(old + new, encoding="utf-8")
     assert logged_reason(log, len(old)) == "data directory is locked: pid 7"
     assert logged_reason(tmp_path / "missing.log", 0) is None
+
+
+def test_the_daemon_command_names_an_absolute_log_file(tmp_path: Path) -> None:
+    command = serve_command(None, tmp_path / "data" / LOG_FILE_NAME)
+    assert command[command.index("--log-file") + 1] == str(
+        (tmp_path / "data" / LOG_FILE_NAME).resolve()
+    )
+    assert "--log-file" not in serve_command(None)
+
+
+def test_the_reason_is_read_from_the_start_of_a_file_that_rolled_since_the_offset(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / LOG_FILE_NAME
+    before = json.dumps({"level": "error", "msg": "old failure", "pad": "x" * 100}) + "\n"
+    log.write_text(before, encoding="utf-8")
+    offset = log.stat().st_size
+    log.write_text(  # rolled: the old file is `.1` now, and the new one is smaller than the offset
+        json.dumps({"level": "error", "msg": "new failure"}) + "\n", encoding="utf-8"
+    )
+    assert log.stat().st_size < offset
+    assert logged_reason(log, offset) == "new failure"
 
 
 # --- the readiness probe ------------------------------------------------------------------
@@ -584,3 +606,165 @@ def test_the_start_timeout_is_a_command_line_option() -> None:
         check=True,
     )
     assert "--start-timeout" in result.stdout
+
+
+# --- the daemon's own rotating log ----------------------------------------------------------
+
+
+def wait_for_published_port(data_dir: Path) -> None:
+    """Return once a daemon has published its port, i.e. once it is serving."""
+    deadline = time.monotonic() + WAIT
+    while read_port(data_dir) is None:
+        assert time.monotonic() < deadline, "the daemon published no port"
+        time.sleep(0.02)
+
+
+def daemon_log_files(data_dir: Path) -> list[str]:
+    return sorted(entry.name for entry in data_dir.glob("*.log*"))
+
+
+def log_files(directory: Path) -> list[str]:
+    return sorted(entry.name for entry in directory.iterdir() if entry.name.startswith("serve.log"))
+
+
+def every_line_is_json(path: Path) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line)
+        assert isinstance(entry, dict)
+        entries.append(entry)  # pyright: ignore[reportUnknownArgumentType]
+    return entries
+
+
+@pytest.mark.parametrize("backups", [1, 2])
+def test_a_serve_with_a_log_file_rotates_it_and_keeps_only_the_configured_backups(
+    tmp_path: Path, backups: int
+) -> None:
+    config = write_config(tmp_path, log_max_bytes=300, log_backups=backups)
+    log_dir = tmp_path / "logs"
+    log = log_dir / "serve.log"
+    child = start_plotroom("serve", "--config", str(config), "--log-file", str(log))
+    try:
+        wait_for_published_port(tmp_path / "data")
+    finally:
+        child.stop()
+    assert log_files(log_dir) == ["serve.log", *(f"serve.log.{n}" for n in range(1, backups + 1))]
+    for name in log_files(log_dir):
+        every_line_is_json(log_dir / name)
+    last = every_line_is_json(log)[-1]
+    assert last["logger"] == "uvicorn.error"
+    assert last["msg"].startswith("Finished server process"), "the shutdown line is the newest"
+    assert child.lines.get(timeout=WAIT) is None, "nothing went to stdout"
+    assert child.seen == []
+
+
+def test_a_hand_started_serve_logs_json_to_stdout_and_writes_no_file(tmp_path: Path) -> None:
+    config = write_config(tmp_path)
+    child = start_plotroom("serve", "--config", str(config))
+    try:
+        serving = child.wait_for_log("serving")
+    finally:
+        child.stop()
+    assert serving["level"] == "info"
+    data_dir = tmp_path / "data"
+    assert not any(".log" in entry.name for entry in data_dir.iterdir())
+    assert not (data_dir / LOG_FILE_NAME).exists()
+
+
+def test_a_log_path_that_cannot_be_written_is_a_logged_error_and_exit_one(tmp_path: Path) -> None:
+    blocker = tmp_path / "file"
+    blocker.write_text("not a directory", encoding="utf-8")
+    config = write_config(tmp_path)
+    child = start_plotroom("serve", "--config", str(config), "--log-file", str(blocker / "s.log"))
+    failure = child.wait_for_log("cannot open the log file")
+    assert failure["level"] == "error"
+    assert child.process.wait(timeout=WAIT) == 1
+    assert not (tmp_path / "data" / LOCK_FILE_NAME).exists(), "it never took the data directory"
+
+
+async def test_a_daemon_started_on_demand_logs_to_the_data_directory_with_the_default_limits(
+    tmp_path: Path, data_dir: Path
+) -> None:
+    config = write_config(tmp_path)
+    async with Client(proxy_params(config), mode="auto") as client:
+        assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
+    assert daemon_log_files(data_dir) == [LOG_FILE_NAME]
+    [announced] = serving_lines(data_dir)
+    assert announced["data_dir"] == str(data_dir)
+
+
+async def test_the_rotation_settings_in_the_config_reach_a_daemon_started_on_demand(
+    tmp_path: Path, data_dir: Path
+) -> None:
+    config = write_config(tmp_path, log_max_bytes=300, log_backups=1)
+    async with Client(proxy_params(config), mode="auto") as client:
+        assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
+    await asyncio.to_thread(stop_owner, data_dir)  # nothing rolls the files while they are read
+    assert daemon_log_files(data_dir) == [
+        LOG_FILE_NAME,
+        f"{LOG_FILE_NAME}.1",
+    ]
+    for name in (LOG_FILE_NAME, f"{LOG_FILE_NAME}.1"):
+        every_line_is_json(data_dir / name)
+
+
+async def test_the_rotation_settings_reach_the_daemon_from_the_environment(
+    tmp_path: Path, data_dir: Path
+) -> None:
+    config = write_config(tmp_path)
+    params = proxy_params(config)
+    params.env = {
+        **(params.env or {}),
+        "PLOTROOM_LOG_MAX_BYTES": "300",
+        "PLOTROOM_LOG_BACKUPS": "1",
+    }
+    async with Client(params, mode="auto") as client:
+        assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
+    await asyncio.to_thread(stop_owner, data_dir)  # nothing rolls the files while they are read
+    assert (data_dir / f"{LOG_FILE_NAME}.1").exists()
+    assert not (data_dir / f"{LOG_FILE_NAME}.2").exists()
+
+
+@pytest.mark.parametrize("era", ERAS)
+async def test_a_config_that_fails_to_load_leaves_its_reason_in_the_daemons_log_file(
+    tmp_path: Path, data_dir: Path, era: str
+) -> None:
+    path = tmp_path / "noprojects.toml"
+    path.write_text(f'data_dir = "{data_dir}"\nport = 0\n', encoding="utf-8")
+    message = await first_error(await spawn_proxy("--config", str(path)), era)
+    assert "no projects configured" in message
+    entries = every_line_is_json(data_dir / LOG_FILE_NAME)
+    assert [entry["msg"] for entry in entries if entry["level"] == "error"] == [
+        "invalid configuration"
+    ]
+    assert "no projects configured" in entries[-1]["reason"]
+
+
+def test_output_written_before_logging_is_set_up_stays_readable_in_the_log_file(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "data" / LOG_FILE_NAME
+    script = "import sys; sys.stderr.write('early trouble\\n'); sys.stdout.write('early output\\n')"
+    child = start_daemon([sys.executable, "-c", script], child_env(), tmp_path / "data", log)
+    assert child.wait(timeout=WAIT) == 0
+    assert log.read_text(encoding="utf-8").splitlines() == ["early trouble", "early output"]
+    assert logged_reason(log, 0) == "early output"
+
+
+def test_a_second_serve_that_loses_the_lock_never_writes_through_the_winners_log_file(
+    tmp_path: Path,
+) -> None:
+    config = write_config(tmp_path)
+    log = tmp_path / "logs" / "serve.log"
+    winner = start_plotroom("serve", "--config", str(config), "--log-file", str(log))
+    try:
+        wait_for_published_port(tmp_path / "data")
+        before = log.read_text(encoding="utf-8")
+        loser = start_plotroom("serve", "--config", str(config), "--log-file", str(log))
+        refusal = loser.wait_for_log("data directory is locked")
+        assert refusal["level"] == "error"
+        assert loser.process.wait(timeout=WAIT) == EXIT_LOCKED
+        assert "data directory is locked" not in log.read_text(encoding="utf-8")
+        assert log.read_text(encoding="utf-8").startswith(before)
+    finally:
+        winner.stop()

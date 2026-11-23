@@ -46,6 +46,8 @@ _CONFIG_KEYS = (
     "PLOTROOM_PORT",
     "PLOTROOM_ALLOWED_HOSTS",
     "PLOTROOM_PROJECTS",
+    "PLOTROOM_LOG_MAX_BYTES",
+    "PLOTROOM_LOG_BACKUPS",
 )
 _PATH_KEYS = ("PLOTROOM_CONFIG", "PLOTROOM_DATA_DIR")
 
@@ -62,9 +64,12 @@ def daemon_env(env: Mapping[str, str]) -> dict[str, str]:
     return clean
 
 
-def serve_command(config_path: Path | None) -> list[str]:
+def serve_command(config_path: Path | None, log_path: Path | None = None) -> list[str]:
     # -P: the daemon runs in the data directory, which must not shadow the installed package
     command = [sys.executable, "-P", "-m", "plotroom", "serve"]
+    if log_path is not None:
+        # The daemon rotates its own log; it runs in the data directory, so the path is absolute.
+        command += ["--log-file", str(log_path.expanduser().resolve())]
     if config_path is not None:
         command += ["--config", str(config_path.expanduser().resolve())]
     return command
@@ -142,7 +147,8 @@ def logged_reason(log_path: Path, since: int) -> str | None:
     """
     try:
         with log_path.open("rb") as handle:
-            handle.seek(since)
+            # a file smaller than the offset was rolled since: all of it is newer
+            handle.seek(since if since <= os.fstat(handle.fileno()).st_size else 0)
             text = handle.read().decode("utf-8", errors="replace")
     except OSError:
         return None
@@ -238,7 +244,7 @@ async def ensure_daemon(
     if url is not None and await speaks_mcp(url):
         return url
     log_path = config.data_dir / LOG_FILE_NAME
-    argv = list(command) if command is not None else serve_command(config_path)
+    argv = list(command) if command is not None else serve_command(config_path, log_path)
     deadline = time.monotonic() + wait
     reason: str | None = None
     while True:
