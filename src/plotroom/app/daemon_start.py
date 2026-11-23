@@ -24,7 +24,6 @@ from urllib.parse import urlsplit
 import httpx
 
 from plotroom.adapters.mcp.proxy import LocalEndpoint, UpstreamStartError
-from plotroom.adapters.mcp.server import allowed_host
 from plotroom.app.cli import DEFAULT_START_TIMEOUT, EXIT_LOCKED
 from plotroom.app.config import Config
 from plotroom.app.lock import LOCK_FILE_NAME, DataDirLock, LockError
@@ -34,8 +33,7 @@ from plotroom.app.portfile import (
     PublishedListener,
     directory_identity,
     directory_key,
-    local_socket_path,
-    private_socket_directory,
+    published_socket,
     read_listener,
 )
 
@@ -245,26 +243,17 @@ class DaemonLocation:
             return None
         if published.local_unavailable:
             raise UpstreamStartError("the running plotroom serve has no private local listener")
-        socket_path = local_socket_path(self.identity)
-        if published.local_socket != str(socket_path) or not private_socket_directory(
-            socket_path.parent
-        ):
+        socket_path = (
+            published_socket(self.identity, published.local_socket)
+            if published.local_socket is not None
+            else None
+        )
+        if socket_path is None:
             return None
         config = replace(self.config, port=published.port)
         url = replace(config, host=published.host).url
-        published_host = urlsplit(url).netloc
         alias = urlsplit(config.url).netloc.lower()
-        candidates = (
-            alias,
-            published_host,
-            alias.rsplit(":", 1)[0],
-            published_host.rsplit(":", 1)[0],
-        )
-        host = next(
-            (name for name in candidates if allowed_host(name, config.allowed_hosts)),
-            published_host,
-        )
-        return LocalEndpoint(url, host, str(socket_path), published.pid)
+        return LocalEndpoint(url, alias, str(socket_path), published.pid)
 
     async def current_endpoint(self) -> LocalEndpoint | None:
         return await asyncio.to_thread(self._current_endpoint)
@@ -279,14 +268,15 @@ async def _ready_endpoint(location: DaemonLocation, within: float) -> LocalEndpo
     endpoint = await location.current_endpoint()
     if endpoint is None:
         return None
-    status = await probe_status(endpoint, within=deadline - time.monotonic())
-    published_host = urlsplit(endpoint.url).netloc
-    if status == 421 and endpoint.host != published_host:
-        endpoint = replace(endpoint, host=published_host)
-        status = await probe_status(endpoint, within=deadline - time.monotonic())
-    if status != 401:
-        return None
-    return endpoint if endpoint == await location.current_endpoint() else None
+    alias, bound = endpoint.host, urlsplit(endpoint.url).netloc
+    for host in dict.fromkeys((alias, alias.rsplit(":", 1)[0], bound, bound.rsplit(":", 1)[0])):
+        candidate = replace(endpoint, host=host)
+        status = await probe_status(candidate, within=deadline - time.monotonic())
+        if status == 401:
+            return candidate if candidate == await location.current_endpoint() else None
+        if status != 421:
+            break
+    return None
 
 
 async def ensure_daemon(

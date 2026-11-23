@@ -12,7 +12,7 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
@@ -41,9 +41,10 @@ from plotroom.app.daemon_start import (
 from plotroom.app.lock import LOCK_FILE_NAME, DataDirLock, LockError
 from plotroom.app.portfile import (
     PORT_FILE_NAME,
-    DirectoryIdentity,
     prepare_local_socket,
+    read_listener,
     read_port,
+    remove_local_socket,
     write_port,
 )
 from plotroom.app.tokens import TokenRegistry, select_local_token
@@ -97,6 +98,20 @@ def data_dir(tmp_path: Path) -> Iterator[Path]:
         yield directory
     finally:
         stop_owner(directory)
+
+
+@pytest.fixture
+def make_local_socket() -> Iterator[Callable[[Path], Path]]:
+    paths: list[Path] = []
+
+    def make(directory: Path) -> Path:
+        path = prepare_local_socket(directory)
+        paths.append(path)
+        return path
+
+    yield make
+    for path in paths:
+        remove_local_socket(path)
 
 
 def proxy_params(config: Path, *extra: str) -> StdioServerParameters:
@@ -272,9 +287,13 @@ def http_reply(status: str, body: str, content_type: str = "application/json") -
     ],
 )
 async def test_readiness_requires_a_401_from_the_verified_peer(
-    tmp_path: Path, status: str, matches: bool, expected: bool
+    make_local_socket: Callable[[Path], Path],
+    tmp_path: Path,
+    status: str,
+    matches: bool,
+    expected: bool,
 ) -> None:
-    path = prepare_local_socket(tmp_path)
+    path = make_local_socket(tmp_path)
     server, requests = await answer_on_unix(path, http_reply(status, ""))
     endpoint = LocalEndpoint(
         "http://127.0.0.1:41000/mcp",
@@ -294,8 +313,10 @@ async def test_readiness_requires_a_401_from_the_verified_peer(
         assert received == b""
 
 
-async def test_the_verified_probe_is_bounded_when_the_peer_stalls(tmp_path: Path) -> None:
-    path = prepare_local_socket(tmp_path)
+async def test_the_verified_probe_is_bounded_when_the_peer_stalls(
+    make_local_socket: Callable[[Path], Path], tmp_path: Path
+) -> None:
+    path = make_local_socket(tmp_path)
     server, requests = await answer_on_unix(path, None)
     endpoint = LocalEndpoint(
         "http://127.0.0.1:41000/mcp", "localhost:41000", str(path), os.getpid()
@@ -307,9 +328,10 @@ async def test_the_verified_probe_is_bounded_when_the_peer_stalls(tmp_path: Path
 
 
 async def test_a_reconnect_sends_no_http_to_a_different_peer_at_the_same_path(
+    make_local_socket: Callable[[Path], Path],
     tmp_path: Path,
 ) -> None:
-    path = prepare_local_socket(tmp_path)
+    path = make_local_socket(tmp_path)
     endpoint = LocalEndpoint(
         "http://127.0.0.1:41000/mcp", "localhost:41000", str(path), os.getpid()
     )
@@ -542,6 +564,10 @@ async def test_a_killed_daemons_file_is_not_trusted_and_a_new_client_reaches_the
     async with Client(proxy_params(config), mode="auto") as client:
         assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
     first, first_port = published(data_dir)
+    first_listener = read_listener(data_dir)
+    assert first_listener is not None
+    assert first_listener.local_socket is not None
+    first_socket = Path(first_listener.local_socket)
     os.kill(first, signal.SIGKILL)
     await asyncio.to_thread(wait_until_unlocked, data_dir)
     assert published(data_dir) == (first, first_port), "a killed daemon leaves its file behind"
@@ -550,6 +576,7 @@ async def test_a_killed_daemons_file_is_not_trusted_and_a_new_client_reaches_the
     second, second_port = published(data_dir)
     assert second == owner_pid(data_dir) != first
     assert len(serving_lines(data_dir)) == 2
+    assert not first_socket.parent.exists(), "the successor removed the stale socket directory"
     async with httpx.AsyncClient(trust_env=False) as http:
         assert (await http.head(f"http://127.0.0.1:{second_port}/mcp")).status_code == 401
 
@@ -637,6 +664,7 @@ async def test_the_proxy_selects_the_requested_project_token_by_id(
         ("127.0.0.1", "127.0.0.2", "127.0.0.2:*", "127.0.0.2:*"),
         ("127.0.0.1", "::1", "[::1]:*", "[::1]:*"),
         ("127.0.0.1", "127.0.0.2", "127.0.0.2:*", "127.0.0.1:*"),
+        ("localhost", "localhost", "127.0.0.1:*", "localhost:*"),
     ],
 )
 async def test_loopback_host_aliases_preserve_or_fall_back_to_an_allowed_host(
@@ -734,11 +762,13 @@ def test_lock_owner_checks_pid_liveness(
     assert lock_owner(tmp_path) == (pid if error is PermissionError else None)
 
 
-async def test_a_fixed_port_requires_a_matching_publication(tmp_path: Path, held_port: int) -> None:
+async def test_a_fixed_port_requires_a_matching_publication(
+    make_local_socket: Callable[[Path], Path], tmp_path: Path, held_port: int
+) -> None:
     config = load_config(write_config(tmp_path, port=held_port), {})
     assert await DaemonLocation(config).current_endpoint() is None
     with DataDirLock(config.data_dir):
-        path = prepare_local_socket(config.data_dir)
+        path = make_local_socket(config.data_dir)
         location = DaemonLocation(config)
         write_port(
             config.data_dir,
@@ -754,11 +784,12 @@ async def test_a_fixed_port_requires_a_matching_publication(tmp_path: Path, held
 
 
 async def test_a_local_bearer_uses_the_published_host_even_with_a_different_config_host(
+    make_local_socket: Callable[[Path], Path],
     tmp_path: Path,
 ) -> None:
     config = replace(load_config(write_config(tmp_path, port=41000), {}), host="127.0.0.2")
     with DataDirLock(config.data_dir):
-        path = prepare_local_socket(config.data_dir)
+        path = make_local_socket(config.data_dir)
         location = DaemonLocation(config)
         write_port(config.data_dir, config.port, host="127.0.0.1")
         assert await location.current_endpoint() is None
@@ -823,13 +854,14 @@ async def test_a_running_daemon_without_a_private_socket_receives_no_probe(
 
 
 async def test_a_port_of_zero_is_the_published_port_only_while_its_pid_owns_the_lock(
+    make_local_socket: Callable[[Path], Path],
     tmp_path: Path,
 ) -> None:
     config = load_config(write_config(tmp_path), {})
     config.data_dir.mkdir()
     location = DaemonLocation(config)
     assert await location.current_endpoint() is None, "nothing published"
-    path = prepare_local_socket(config.data_dir)
+    path = make_local_socket(config.data_dir)
     write_port(config.data_dir, 41000, host="127.0.0.1", local_socket=path)
     assert await location.current_endpoint() is None, "this process does not hold the lock yet"
     with DataDirLock(config.data_dir):
@@ -851,14 +883,16 @@ async def test_a_port_of_zero_is_the_published_port_only_while_its_pid_owns_the_
     assert await location.current_endpoint() is None, "the lock is free again"
 
 
-async def test_a_replaced_data_directory_is_never_used_by_the_pinned_proxy(tmp_path: Path) -> None:
+async def test_a_replaced_data_directory_is_never_used_by_the_pinned_proxy(
+    make_local_socket: Callable[[Path], Path], tmp_path: Path
+) -> None:
     path = write_config(tmp_path)
     config = load_config(path, {})
     config.data_dir.mkdir()
     location = DaemonLocation(config)
     config.data_dir.rename(tmp_path / "previous")
     with DataDirLock(config.data_dir):
-        socket_path = prepare_local_socket(config.data_dir)
+        socket_path = make_local_socket(config.data_dir)
         write_port(config.data_dir, 41000, host="127.0.0.1", local_socket=socket_path)
         assert await location.current_endpoint() is None
         with pytest.raises(UpstreamStartError, match="canonical plotroom data directory changed"):
@@ -887,21 +921,26 @@ async def test_the_child_refuses_a_directory_replaced_during_launch(
 
 
 async def test_a_published_socket_in_a_nonprivate_directory_is_ignored(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    make_local_socket: Callable[[Path], Path],
 ) -> None:
     config = load_config(write_config(tmp_path), {})
-    socket_dir = tmp_path / "shared"
-    socket_dir.mkdir(mode=0o755)
-    socket_dir.chmod(0o755)
-    path = socket_dir / "daemon.sock"
-
-    def fixture_socket(_identity: DirectoryIdentity) -> Path:
-        return path
-
-    monkeypatch.setattr("plotroom.app.daemon_start.local_socket_path", fixture_socket)
     with DataDirLock(config.data_dir):
+        path = make_local_socket(config.data_dir)
+        path.parent.chmod(0o755)
         write_port(config.data_dir, 41000, host="127.0.0.1", local_socket=path)
         assert await DaemonLocation(config).current_endpoint() is None
+
+
+def test_each_socket_attempt_uses_a_fresh_private_directory(
+    tmp_path: Path,
+    make_local_socket: Callable[[Path], Path],
+) -> None:
+    first, second = make_local_socket(tmp_path), make_local_socket(tmp_path)
+    assert first.parent != second.parent
+    assert first.name == second.name
+    assert first.parent.stat().st_mode & 0o777 == 0o700
+    assert second.parent.stat().st_mode & 0o777 == 0o700
 
 
 @pytest.mark.parametrize("pid", [10**12, 2**63, 2**200])

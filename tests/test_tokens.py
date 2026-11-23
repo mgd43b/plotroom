@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -199,6 +200,39 @@ def test_invalid_local_snapshots_report_configuration_errors_at_connect(
     assert "invalid connection configuration" in output.err
     assert "invalid" in json.loads(output.err)["reason"]
     assert token.bearer not in output.err + output.out
+
+
+async def test_token_read_io_errors_remain_operational(
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    registry = TokenRegistry(config_path.parent / "data")
+    token = registry.issue("demo", "orchestrator", local=False)
+    open_file = os.open
+
+    def fail_read(
+        name: str | bytes | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if os.fsdecode(name) == str(registry.path) and flags & os.O_NONBLOCK:
+            raise OSError(errno.EIO, "input/output error")
+        return open_file(name, flags, mode, dir_fd=dir_fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", fail_read)
+        assert await registry.authenticate(token.bearer) is None
+        assert (
+            main(["token", "revoke", "--no-local", "--config", str(config_path), token.token_id])
+            == EXIT_FAILURE
+        )
+    output = capsys.readouterr()
+    assert "input/output error" in output.err
+    assert token.bearer not in output.err + output.out
+    assert await registry.authenticate(token.bearer) == Identity("demo", "orchestrator")
 
 
 @pytest.mark.parametrize("role", ["system", "worker", "worker:bad name", "admin"])

@@ -27,6 +27,9 @@ from plotroom.app.portfile import (
     directory_key,
     pin_directory,
     prepare_local_socket,
+    published_socket,
+    read_listener,
+    remove_local_socket,
     remove_port,
     write_port,
 )
@@ -63,6 +66,7 @@ class _Server(uvicorn.Server):
         self._data_dir = data_dir
         self._directory_fd = directory_fd
         self._identity = directory_identity(directory_fd)
+        self._local_socket: Path | None = None
 
     _shutdown_task: asyncio.Task[None] | None = None
 
@@ -77,6 +81,8 @@ class _Server(uvicorn.Server):
         with contextlib.suppress(OSError):
             remove_port(self._data_dir, directory_fd=self._directory_fd)
         await uvicorn.Server.shutdown(self, sockets)
+        if self._local_socket is not None:
+            remove_local_socket(self._local_socket)
 
     async def shutdown(self, sockets: Any = None) -> None:
         # Shielded: a cancel must not abort a shutdown that is draining requests and lifespan
@@ -124,6 +130,7 @@ class _Server(uvicorn.Server):
         listener: asyncio.Server | None = None
         try:
             local_socket = prepare_local_socket(self._directory_fd)
+            self._local_socket = local_socket
             listener = await loop.create_unix_server(
                 protocol, path=local_socket, start_serving=False
             )
@@ -132,6 +139,9 @@ class _Server(uvicorn.Server):
         except OSError as exc:
             if listener is not None:
                 listener.close()
+            if self._local_socket is not None:
+                remove_local_socket(self._local_socket)
+                self._local_socket = None
             log.warning("private local listener unavailable", extra={"reason": str(exc)})
             return None
         return local_socket
@@ -234,7 +244,12 @@ class Daemon:
     ) -> None:
         config = self._config
         # Clear a publication left by a previous owner of the directory we locked.
+        old = read_listener(config.data_dir, directory_fd=directory_fd)
         remove_port(config.data_dir, directory_fd=directory_fd)
+        if old is not None and old.local_socket is not None:
+            stale_socket = published_socket(identity, old.local_socket)
+            if stale_socket is not None:
+                remove_local_socket(stale_socket)
         try:
             problem = floor_problem(self._sqlite_version)
             if problem is not None:

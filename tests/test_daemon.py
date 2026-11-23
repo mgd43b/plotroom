@@ -22,9 +22,8 @@ from plotroom.app.config import Config, ConfigError
 from plotroom.app.lock import LockError
 from plotroom.app.portfile import (
     PORT_FILE_NAME,
-    PublishedListener,
     directory_identity,
-    local_socket_path,
+    published_socket,
     read_listener,
     read_port,
 )
@@ -230,10 +229,12 @@ async def test_cancelling_while_the_unix_listener_starts_cleans_up_its_socket(
     listening = asyncio.Event()
     hold = asyncio.Event()
     start_serving = asyncio.Server.start_serving
+    paths: list[Path] = []
 
     async def start_then_wait(listener: asyncio.Server) -> None:
         await start_serving(listener)
         if listener.sockets[0].family == socket.AF_UNIX:
+            paths.append(Path(str(listener.sockets[0].getsockname())))
             listening.set()
             await hold.wait()
 
@@ -241,13 +242,14 @@ async def test_cancelling_while_the_unix_listener_starts_cleans_up_its_socket(
     task = asyncio.create_task(Daemon(config).run())
     try:
         await asyncio.wait_for(listening.wait(), timeout=10)
-        path = local_socket_path(directory_identity(config.data_dir))
+        [path] = paths
         assert path.is_socket()
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
     assert not path.exists()
+    assert not path.parent.exists()
 
 
 async def test_startup_cannot_unpublish_or_displace_the_replacement_daemon(
@@ -400,10 +402,13 @@ async def test_the_bound_port_is_published_with_the_pid_and_answers(tmp_path: Pa
     try:
         assert port != 0, "the config's port of 0 became the port that was bound"
         assert read_port(config.data_dir) == (os.getpid(), port)
-        path = local_socket_path(directory_identity(config.data_dir))
-        assert read_listener(config.data_dir) == PublishedListener(
-            os.getpid(), port, "127.0.0.1", str(path)
-        )
+        publication = read_listener(config.data_dir)
+        assert publication is not None
+        assert publication.host == "127.0.0.1"
+        assert publication.local_socket is not None
+        path = published_socket(directory_identity(config.data_dir), publication.local_socket)
+        assert path is not None
+        assert path.is_socket()
         async with authenticated_client(f"http://127.0.0.1:{port}/mcp", bearer(config)) as client:
             assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
     finally:

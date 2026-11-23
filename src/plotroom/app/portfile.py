@@ -11,6 +11,7 @@ import ipaddress
 import json
 import os
 import stat
+import tempfile
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Any, cast
 PORT_FILE_NAME = "plotroom.port"
 START_DIRECTORY_ENV = "_PLOTROOM_START_DIRECTORY"
 _MAX_PORT = 65535
+_SOCKET_ROOT = Path("/tmp")  # noqa: S108 - use a short path and create a private directory
 
 type DirectoryIdentity = tuple[int, int]
 
@@ -49,36 +51,43 @@ def directory_identity(data_dir: Path | int) -> DirectoryIdentity:
     return info.st_dev, info.st_ino
 
 
-def local_socket_path(identity: DirectoryIdentity) -> Path:
-    # Keep the path within the Unix socket length limit even for deep data directories or TMPDIR.
-    return Path("/tmp") / f"plotroom-{os.geteuid()}" / f"{directory_key(identity)}.sock"  # noqa: S108
-
-
 def directory_key(identity: DirectoryIdentity) -> str:
     device, inode = identity
     return f"{device:x}-{inode:x}"
 
 
-def private_socket_directory(path: Path) -> bool:
+def published_socket(identity: DirectoryIdentity, published: str) -> Path | None:
+    path = Path(published)
+    if (
+        path.parent.parent != _SOCKET_ROOT
+        or not path.parent.name.startswith(f"plotroom-{os.geteuid()}-")
+        or path.name != f"{directory_key(identity)}.sock"
+    ):
+        return None
     try:
-        info = path.lstat()
+        info = path.parent.lstat()
     except OSError:
-        return False
-    return (
+        return None
+    private = (
         stat.S_ISDIR(info.st_mode)
         and info.st_uid == os.geteuid()
         and stat.S_IMODE(info.st_mode) == 0o700
     )
+    return path if private else None
 
 
 def prepare_local_socket(data_dir: Path | int) -> Path:
-    path = local_socket_path(directory_identity(data_dir))
-    path.parent.mkdir(mode=0o700, exist_ok=True)
-    if not private_socket_directory(path.parent):
-        raise PermissionError(
-            f"local socket directory must be private and owned by this user: {path.parent}"
-        )
-    return path
+    # Keep the path short even for deep data directories or TMPDIR.
+    socket_name = f"{directory_key(directory_identity(data_dir))}.sock"
+    directory = tempfile.mkdtemp(prefix=f"plotroom-{os.geteuid()}-", dir=_SOCKET_ROOT)
+    return Path(directory) / socket_name
+
+
+def remove_local_socket(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        if path.is_socket():
+            path.unlink()
+        path.parent.rmdir()
 
 
 def write_port(
@@ -132,18 +141,18 @@ def read_port(data_dir: Path) -> tuple[int, int] | None:
     return None if listener is None else (listener.pid, listener.port)
 
 
-def read_listener(data_dir: Path) -> PublishedListener | None:
+def read_listener(data_dir: Path, *, directory_fd: int | None = None) -> PublishedListener | None:
     """Read the listener, with no host for legacy records or invalid addresses."""
     try:
         with open(
-            data_dir / PORT_FILE_NAME,
+            _publication_path(data_dir, directory_fd),
             encoding="utf-8",
-            opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK),
+            opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK, dir_fd=directory_fd),
         ) as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 return None
             decoded: Any = json.load(handle)
-    except OSError, ValueError:
+    except OSError, ValueError, RecursionError:
         return None
     if not isinstance(decoded, dict):
         return None

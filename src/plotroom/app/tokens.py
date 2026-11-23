@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import fcntl
 import hashlib
 import hmac
@@ -79,15 +80,15 @@ def _read(path: Path) -> dict[str, Any]:
     except FileNotFoundError:
         return {}
     except OSError as exc:
-        raise TokenError(f"cannot read token file {path}") from exc
+        if exc.errno == errno.ELOOP:
+            raise TokenError(f"token file {path} must be a regular file with mode 0600") from exc
+        raise
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != _PRIVATE_MODE:
             raise TokenError(f"token file {path} must be a regular file with mode 0600")
         with os.fdopen(fd, encoding="utf-8", closefd=False) as handle:
             raw: Any = json.load(handle)
-    except OSError as exc:
-        raise TokenError(f"cannot read token file {path}") from exc
     except ValueError, RecursionError:
         raise TokenError(f"invalid token file {path}") from None
     finally:

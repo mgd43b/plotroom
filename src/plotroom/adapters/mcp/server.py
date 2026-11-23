@@ -29,7 +29,7 @@ class ProjectRequest:
     ledger: Ledger | None
 
 
-def allowed_host(host: str, patterns: Sequence[str]) -> bool:
+def _allowed_host(host: str, patterns: Sequence[str]) -> bool:
     if host in patterns:
         return bool(host)
     for pattern in patterns:
@@ -62,7 +62,7 @@ class _AccessMiddleware:
         if scope["type"] == "http":
             headers = Headers(scope=scope)
             hosts = headers.getlist("host")
-            if len(hosts) != 1 or not allowed_host(hosts[0], self._allowed_hosts):
+            if len(hosts) != 1 or not _allowed_host(hosts[0], self._allowed_hosts):
                 await Response(status_code=421)(scope, receive, send)
                 return
             authorization = headers.getlist("authorization")
