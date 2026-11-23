@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fakes import FixedClock
-from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.adapters.store_sqlite import SqliteStore, triggers_sql
 from plotroom.adapters.store_sqlite.ledger_sql import SqliteTransaction
 from plotroom.app.runtime import ProjectRuntime
 from plotroom.core.actions import Action
@@ -201,6 +202,70 @@ async def test_glob_uses_first_matching_branch_observation(tmp_path: Path) -> No
         )
         [trigger] = await ledger.list_triggers(ORCHESTRATOR, None)
         assert trigger["bindings"] == {"$": 1}
+
+
+async def test_returning_to_a_projected_branch_preserves_its_original_order(tmp_path: Path) -> None:
+    async with open_ledger(tmp_path) as (ledger, _):
+        await project(ledger, observed(20, "open", 1))
+        await project(ledger, observed(20, "open", 2, "other/20"))
+        await project(ledger, observed(1, "open", 3))
+        await project(ledger, observed(20, "open", 4))
+        spec = notification({"pr_merged": {"branch_glob": "topic/*"}})
+        await ledger.execute(ORCHESTRATOR, "trigger", "glob", spec)
+        [trigger] = await ledger.list_triggers(ORCHESTRATOR, None)
+        assert trigger["bindings"] == {"$": 20}
+
+
+async def test_glob_ignores_unprojected_branch_facts(tmp_path: Path) -> None:
+    async with open_ledger(tmp_path) as (ledger, _):
+        await ledger.append(
+            "system",
+            NewEvent(
+                "github",
+                PR_MERGED,
+                "unprojected",
+                {
+                    "repository": REPO,
+                    "number": 20,
+                    "branch": "topic/20",
+                    "head_sha": SHA,
+                    "state": "merged",
+                    "updated_at": "2026-11-23T12:00:00.000000Z",
+                },
+            ),
+        )
+        await project(ledger, observed(1, "open", 1), observed(20, "open", 2))
+        spec = notification({"pr_merged": {"branch_glob": "topic/*"}})
+        await ledger.execute(ORCHESTRATOR, "trigger", "glob", spec)
+        [trigger] = await ledger.list_triggers(ORCHESTRATOR, None)
+        assert trigger["bindings"] == {"$": 1}
+
+
+async def test_glob_leaves_share_the_projection_read_in_a_writer_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with open_ledger(tmp_path) as (ledger, _):
+        await project(ledger, observed(1, "open", 1))
+        reads: list[str] = []
+        load = triggers_sql.branch_candidates
+
+        async def counted(conn: AsyncConnection, repository: str) -> tuple[tuple[int, str], ...]:
+            reads.append(repository)
+            return await load(conn, repository)
+
+        monkeypatch.setattr(triggers_sql, "branch_candidates", counted)
+        spec = notification(
+            {
+                "all_of": [
+                    {"pr_merged": {"branch_glob": "feature/*"}},
+                    {"pr_merged": {"branch_glob": "fix/*"}},
+                ]
+            }
+        )
+        await ledger.execute(ORCHESTRATOR, "trigger", "glob", spec)
+        assert reads == [REPO]
+        await ledger.append("system", NewEvent("core", "core.tick", "subsequent-input"))
+        assert reads == [REPO, REPO]
 
 
 async def test_excessive_predicate_nesting_returns_invalid(tmp_path: Path) -> None:

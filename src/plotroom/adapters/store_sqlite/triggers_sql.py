@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from fnmatch import fnmatchcase
 from typing import Any
 
 from sqlalchemy import Row, text
@@ -26,22 +25,12 @@ _SAVE = text("""
     ON CONFLICT(id) DO UPDATE SET state = excluded.state, bindings = excluded.bindings,
       fired_seq = excluded.fired_seq, action_key = excluded.action_key
 """)
-# The projection supplies current branch and completeness. Its typed facts preserve
-# when each current branch was first observed, even if a PR changed its head branch.
 _BRANCHES = text("""
-    WITH first_observed AS (
-        SELECT json_extract(fields, '$.number') AS number,
-               json_extract(fields, '$.branch') AS branch, MIN(seq) AS seq
-        FROM events WHERE source = 'github'
-          AND kind IN ('github.pr_opened', 'github.pr_closed', 'github.pr_merged',
-                       'github.pr_reopened', 'github.pr_head_changed')
-          AND json_extract(fields, '$.repository') = :repository
-        GROUP BY 1, 2
-    )
     SELECT p.number, p.branch FROM github_pull_requests AS p
-    LEFT JOIN first_observed AS f ON p.number = f.number AND p.branch = f.branch
+    JOIN trigger_pr_branch_order AS o
+       ON p.repository = o.repository AND p.number = o.number AND p.branch = o.branch
     WHERE p.repository = :repository AND p.complete
-    ORDER BY f.seq NULLS LAST, p.rowid
+    ORDER BY o.observation_order
 """)
 
 
@@ -102,11 +91,8 @@ async def save_trigger(connection: AsyncConnection, trigger: Trigger) -> None:
     )
 
 
-async def first_matching_pull(
-    connection: AsyncConnection, repository: str, pattern: str
-) -> int | None:
-    async with connection.stream(_BRANCHES, {"repository": repository}) as rows:
-        async for row in rows:
-            if fnmatchcase(row.branch, pattern):
-                return int(row.number)
-    return None
+async def branch_candidates(
+    connection: AsyncConnection, repository: str
+) -> tuple[tuple[int, str], ...]:
+    rows = await connection.execute(_BRANCHES, {"repository": repository})
+    return tuple((row.number, row.branch) for row in rows)

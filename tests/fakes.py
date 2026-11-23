@@ -22,7 +22,6 @@ from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
 from plotroom.core.github import (
-    PR_KINDS,
     PULL_REQUESTS,
     FetchCursor,
     FetchRetry,
@@ -89,6 +88,7 @@ class _MemoryTransaction:
         self.work_items: tuple[WorkItem, ...] = ()
         self.claude_turns: dict[tuple[str, str], set[str]] = {}
         self.pulls: dict[tuple[str, int], PullRequest] = {}
+        self.branch_order: dict[tuple[str, int, str], None] = {}
         self.fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
         self.fetch_retries: dict[tuple[str, str], FetchRetry] = {}
         self.seq = seq
@@ -181,6 +181,8 @@ class _MemoryTransaction:
     async def save_pull_request(self, pull: PullRequest) -> None:
         self._live()
         self.pulls[pull.repository, pull.number] = pull
+        if pull.complete:
+            self.branch_order[pull.repository, pull.number, pull.branch] = None
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         self._live()
@@ -248,22 +250,13 @@ class _MemoryTransaction:
 
     async def first_matching_pull(self, repository: str, pattern: str) -> int | None:
         self._live()
-        matches = {
-            pull.number: pull.branch
-            for pull in self.pulls.values()
-            if pull.repository == repository and pull.complete and fnmatchcase(pull.branch, pattern)
-        }
-        for event in self.events:
-            number = event.fields.get("number")
-            if (
-                event.kind in PR_KINDS
-                and event.fields.get("repository") == repository
-                and isinstance(number, int)
-                and number in matches
-                and event.fields.get("branch") == matches[number]
-            ):
+        for repo, number, branch in self.branch_order:
+            if repo != repository or not fnmatchcase(branch, pattern):
+                continue
+            pull = self.pulls[repo, number]
+            if pull.complete and pull.branch == branch:
                 return number
-        return next(iter(matches), None)
+        return None
 
     async def insert_event(self, event: StoredEvent) -> None:
         self._live()
@@ -336,6 +329,7 @@ class MemoryStore:
         self._work_items: tuple[WorkItem, ...] = ()
         self._claude_turns: dict[tuple[str, str], set[str]] = {}
         self._pulls: dict[tuple[str, int], PullRequest] = {}
+        self._branch_order: dict[tuple[str, int, str], None] = {}
         self._fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
         self._fetch_retries: dict[tuple[str, str], FetchRetry] = {}
         self._open = False
@@ -369,6 +363,7 @@ class MemoryStore:
         tx.work_items = self._work_items
         tx.claude_turns = {key: ids.copy() for key, ids in self._claude_turns.items()}
         tx.pulls = self._pulls.copy()
+        tx.branch_order = self._branch_order.copy()
         tx.fetch_cursors = self._fetch_cursors.copy()
         tx.fetch_retries = self._fetch_retries.copy()
         try:
@@ -387,6 +382,7 @@ class MemoryStore:
             self._work_items = tx.work_items
             self._claude_turns = tx.claude_turns
             self._pulls = tx.pulls
+            self._branch_order = tx.branch_order
             self._fetch_cursors = tx.fetch_cursors
             self._fetch_retries = tx.fetch_retries
             self.commits += 1

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Row, text
@@ -85,6 +86,7 @@ class SqliteTransaction:
     def __init__(self, connection: AsyncConnection) -> None:
         self._connection = connection
         self._expired = False
+        self._branch_candidates: dict[str, tuple[tuple[int, str], ...]] = {}
 
     def expire(self) -> None:
         """End the handle's life with its transaction: the connection serves the next input."""
@@ -185,6 +187,7 @@ class SqliteTransaction:
 
     async def save_pull_request(self, pull: PullRequest) -> None:
         await github_sql.save_pull_request(self._live(), pull)
+        self._branch_candidates.pop(pull.repository, None)
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         return await github_sql.fetch_cursor(self._live(), repository, resource)
@@ -225,7 +228,12 @@ class SqliteTransaction:
         await triggers_sql.save_trigger(self._live(), trigger)
 
     async def first_matching_pull(self, repository: str, pattern: str) -> int | None:
-        return await triggers_sql.first_matching_pull(self._live(), repository, pattern)
+        connection = self._live()
+        candidates = self._branch_candidates.get(repository)
+        if candidates is None:
+            candidates = await triggers_sql.branch_candidates(connection, repository)
+            self._branch_candidates[repository] = candidates
+        return next((number for number, branch in candidates if fnmatchcase(branch, pattern)), None)
 
     async def save_item(self, item: Item) -> None:
         await items_sql.save_item(self._live(), item)

@@ -208,6 +208,8 @@ async def test_trigger_migration_preserves_projected_prs_and_pending_actions(
         assert action is not None
         assert (action.key, action.payload) == (key, {"value": "keep"})
         assert not await store.list_triggers(None)
+        async with store.transaction() as tx:
+            assert await tx.first_matching_pull(repo, "fixture*") == 7
     finally:
         await ledger.stop()
         await store.close()

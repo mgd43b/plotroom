@@ -28,6 +28,44 @@ def upgrade() -> None:
     op.create_index("ix_trigger_state", "triggers", ["state", "created_seq"])
     op.create_index("ix_trigger_lane", "triggers", ["lane", "created_seq"])
     op.create_table(
+        "trigger_pr_branch_order",
+        sa.Column("observation_order", sa.Integer(), primary_key=True),
+        sa.Column("repository", sa.Text(), nullable=False),
+        sa.Column("number", sa.Integer(), nullable=False),
+        sa.Column("branch", sa.Text(), nullable=False),
+        sa.UniqueConstraint("repository", "number", "branch"),
+        sa.ForeignKeyConstraint(
+            ["repository", "number"],
+            ["github_pull_requests.repository", "github_pull_requests.number"],
+            ondelete="CASCADE",
+        ),
+    )
+    # Old projections have no accepted per-branch observation order. Seed their current
+    # heads in projection insertion order without reading unprojected event records.
+    op.execute("""
+        INSERT INTO trigger_pr_branch_order (repository, number, branch)
+        SELECT repository, number, branch FROM github_pull_requests WHERE complete ORDER BY rowid
+    """)
+    op.execute("""
+        CREATE TRIGGER trigger_observe_pr_insert AFTER INSERT ON github_pull_requests
+        WHEN NEW.complete
+        BEGIN
+            INSERT INTO trigger_pr_branch_order (repository, number, branch)
+            VALUES (NEW.repository, NEW.number, NEW.branch)
+            ON CONFLICT(repository, number, branch) DO NOTHING;
+        END
+    """)
+    op.execute("""
+        CREATE TRIGGER trigger_observe_pr_branch AFTER UPDATE OF branch, complete
+        ON github_pull_requests
+        WHEN NEW.complete AND (NEW.branch != OLD.branch OR NOT OLD.complete)
+        BEGIN
+            INSERT INTO trigger_pr_branch_order (repository, number, branch)
+            VALUES (NEW.repository, NEW.number, NEW.branch)
+            ON CONFLICT(repository, number, branch) DO NOTHING;
+        END
+    """)
+    op.create_table(
         "claude_outbox",
         sa.Column("action_key", sa.Text(), sa.ForeignKey("actions.action_key"), primary_key=True),
         sa.Column("worker", sa.Text(), nullable=False),

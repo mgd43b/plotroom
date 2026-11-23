@@ -59,6 +59,8 @@ Given a synthetic project daemon, when the relevant input is submitted through t
 
 - Independent native review and follow-up. Fixed ordering when an existing PR first matches after a rename. Exercised background dispatch after restart and upgrades that preserve old projected PRs and action rows.
 
+- Opening Kodus review. Persisted branch observation order only on accepted projection writes and shared the ordered candidate read within each writer transaction. Migration seeds existing complete PRs in projection insertion order. Added regressions for an unprojected event that would misrank a PR and for repeated candidate reads.
+
 ## Verification
 
 The local trigger, recovery, action, transport, and migration suite passed all 50 tests on Python 3.14. Ruff, Pyright, and the core dependency check passed. Independent native review confirmed the corrected acceptance paths.
