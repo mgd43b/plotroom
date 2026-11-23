@@ -16,10 +16,20 @@ from typing import Any, cast
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_ALLOWED_HOSTS = ("localhost:*", "127.0.0.1:*", "[::1]:*")
+DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_LOG_BACKUPS = 5
 
 _WILDCARD_TO_LOOPBACK = {"0.0.0.0": "127.0.0.1", "::": "::1"}  # noqa: S104
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
-_TOP_LEVEL_KEYS = {"data_dir", "host", "port", "allowed_hosts", "projects"}
+_TOP_LEVEL_KEYS = {
+    "data_dir",
+    "host",
+    "port",
+    "allowed_hosts",
+    "projects",
+    "log_max_bytes",
+    "log_backups",
+}
 
 
 class ConfigError(Exception):
@@ -35,6 +45,8 @@ class Config:
     port: int
     allowed_hosts: tuple[str, ...]
     projects: tuple[str, ...]
+    log_max_bytes: int = DEFAULT_LOG_MAX_BYTES
+    log_backups: int = DEFAULT_LOG_BACKUPS
 
     @property
     def url(self) -> str:
@@ -97,12 +109,24 @@ def load_config(
             "no projects configured: add a [projects.<id>] table to the config file "
             "or set PLOTROOM_PROJECTS to a comma-separated list of project ids"
         )
+    log_max_bytes = _integer(
+        "log_max_bytes",
+        env.get("PLOTROOM_LOG_MAX_BYTES", raw.get("log_max_bytes", DEFAULT_LOG_MAX_BYTES)),
+        minimum=1,
+    )
+    log_backups = _integer(
+        "log_backups",
+        env.get("PLOTROOM_LOG_BACKUPS", raw.get("log_backups", DEFAULT_LOG_BACKUPS)),
+        minimum=0,
+    )
     return Config(
         data_dir=data_dir,
         host=host,
         port=port,
         allowed_hosts=allowed_hosts,
         projects=projects,
+        log_max_bytes=log_max_bytes,
+        log_backups=log_backups,
     )
 
 
@@ -132,6 +156,19 @@ def _port(value: Any) -> int:
     if not 0 <= port <= 65535:
         raise ConfigError(f"port must be an integer between 0 and 65535, got {port}")
     return port
+
+
+def _integer(name: str, value: Any, *, minimum: int) -> int:
+    message = f"{name} must be an integer of at least {minimum}, got {value!r}"
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        raise ConfigError(message)
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise ConfigError(message) from exc
+    if number < minimum:
+        raise ConfigError(message)
+    return number
 
 
 def _string_list(name: str, value: Any, default: tuple[str, ...]) -> tuple[str, ...]:

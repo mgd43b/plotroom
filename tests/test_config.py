@@ -2,7 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from plotroom.app.config import DEFAULT_ALLOWED_HOSTS, ConfigError, load_config
+from plotroom.app.config import (
+    DEFAULT_ALLOWED_HOSTS,
+    DEFAULT_LOG_BACKUPS,
+    DEFAULT_LOG_MAX_BYTES,
+    ConfigError,
+    load_config,
+)
 
 
 def write(tmp_path: Path, text: str) -> Path:
@@ -135,3 +141,54 @@ def test_a_config_file_that_is_not_utf8_is_a_config_error(tmp_path: Path) -> Non
     path.write_bytes(b"data_dir = '\xff\xfe'\n")
     with pytest.raises(ConfigError, match="cannot read config"):
         load_config(path, {})
+
+
+def test_log_rotation_defaults_are_ten_mebibytes_and_five_files(tmp_path: Path) -> None:
+    config = load_config(write(tmp_path, "[projects.a]\n"), {})
+    assert config.log_max_bytes == DEFAULT_LOG_MAX_BYTES == 10 * 1024 * 1024
+    assert config.log_backups == DEFAULT_LOG_BACKUPS == 5
+
+
+def test_log_rotation_settings_come_from_the_file_and_the_environment_wins(tmp_path: Path) -> None:
+    path = write(tmp_path, "log_max_bytes = 2048\nlog_backups = 0\n[projects.a]\n")
+    config = load_config(path, {})
+    assert (config.log_max_bytes, config.log_backups) == (2048, 0)
+    env = {"PLOTROOM_LOG_MAX_BYTES": "4096", "PLOTROOM_LOG_BACKUPS": "7"}
+    config = load_config(path, env)
+    assert (config.log_max_bytes, config.log_backups) == (4096, 7)
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        ("log_max_bytes = 0", "log_max_bytes"),
+        ("log_max_bytes = -5", "log_max_bytes"),
+        ('log_max_bytes = "big"', "log_max_bytes"),
+        ("log_max_bytes = 1.5", "log_max_bytes"),
+        ("log_max_bytes = true", "log_max_bytes"),
+        ("log_backups = -1", "log_backups"),
+        ('log_backups = "many"', "log_backups"),
+        ("log_backups = [1]", "log_backups"),
+    ],
+)
+def test_a_bad_log_rotation_setting_names_its_key(tmp_path: Path, text: str, key: str) -> None:
+    with pytest.raises(ConfigError, match=key):
+        load_config(write(tmp_path, f"{text}\n[projects.a]\n"), {})
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("PLOTROOM_LOG_MAX_BYTES", "0"),
+        ("PLOTROOM_LOG_MAX_BYTES", "-1"),
+        ("PLOTROOM_LOG_MAX_BYTES", "10MB"),
+        ("PLOTROOM_LOG_BACKUPS", "-1"),
+        ("PLOTROOM_LOG_BACKUPS", "2.5"),
+    ],
+)
+def test_a_bad_log_rotation_environment_value_is_a_config_error(
+    tmp_path: Path, name: str, value: str
+) -> None:
+    key = name.removeprefix("PLOTROOM_").lower()
+    with pytest.raises(ConfigError, match=key):
+        load_config(write(tmp_path, "[projects.a]\n"), {name: value})
