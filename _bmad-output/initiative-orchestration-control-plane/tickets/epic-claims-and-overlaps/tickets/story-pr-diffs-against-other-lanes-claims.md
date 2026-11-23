@@ -25,3 +25,7 @@ Verify: A PR from lane A touching a file lane B claims opens one item and none f
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-claims-and-overlaps/epic-claims-and-overlaps.md
+
+## Notes
+
+- Built: https://github.com/mgd43b/plotroom/pull/150
