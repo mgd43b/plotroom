@@ -31,3 +31,5 @@ Verify: The scripted participant's message to plotroom becomes one event on the 
 
 - Check beyond its criteria: a switchboard that is down at startup is retried with backoff, and nothing is lost when it comes back.
 - Decision: 2026-11-22, settled from the switchboard's own README: spawn its stdio server, register a protected name, loop on wait() (it blocks up to its timeout and claims mail with receipts).
+- Hands on from #15 (PRs #50, #92): event kinds and commands register in core/catalog.py build_catalog(); an event's source must equal its kind's prefix; a duplicate returns the stored event whatever its fields, only after role, kind and source pass; migration 0002 carries CHECK(seq > 0) and CHECK(json_valid(fields)), and the next revision's parent is 0002; Ledger.execute checks no role yet. An adapter's cursor write goes through UnitOfWork in the same transaction as its events.
+- Hands on: switchboard.message events to epic 10's search tracer (entry 10.1).

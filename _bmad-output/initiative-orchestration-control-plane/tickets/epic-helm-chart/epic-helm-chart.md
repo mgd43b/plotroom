@@ -8,8 +8,8 @@ covers: [R24]
 sources: []
 companions:
   - _bmad-output/initiative-orchestration-control-plane/architecture-orchestration-control-plane/architecture-orchestration-control-plane.md
-after: [epic-server-and-ledger, epic-one-inbox]
-refined: false
+after: []
+refined: true
 risk: low
 ---
 
@@ -22,6 +22,16 @@ A Helm chart deploys plotroom on Kubernetes as one replica with the Recreate str
 ## Outcome
 
 Anyone can run plotroom on Kubernetes from a chart, which closes the initiative's Kubernetes check.
+
+## Requirements
+
+- R1 (parent R24): A Helm chart deploys plotroom on Kubernetes as one replica with the Recreate strategy, a block volume, mounted secrets and optional scheduled backups, published as an OCI chart.
+- R2 (parent R24): The same Claude Code and Codex clients that use a local instance work against the chart's instance, Codex through plotroom bridge.
+
+## Constraints
+
+- From the initiative: C2, C14 (one build).
+- From the spine: AD-3, AD-4, AD-7 and AD-12 bind this epic's stories.
 
 ## Done when
 
@@ -39,5 +49,7 @@ Anyone can run plotroom on Kubernetes from a chart, which closes the initiative'
 
 ## Notes
 
-- Waits on epic-server-and-ledger because: the container image and health endpoints.
-- Waits on epic-one-inbox because: plotroom bridge for Codex workers.
+- Waits on epic-server-and-ledger, story by story, for: the container image and health endpoints.
+- Waits on epic-one-inbox, story by story, for: plotroom bridge for Codex workers.
+- Decision: 2026-11-22, build order 1 (helm install on kind, the tracer), 2, 3, 4, 5 (publishing, which needs the owner), with a refactor sweep (6) and an end-to-end suite (7); this epic closes the initiative's Kubernetes check. Prerequisites are story by story, with no whole-epic gate.
+- Decision: 2026-11-22, from the set check: the instance token file lives on the data volume and the first token comes from a one-off Job in the tracer; per-project secrets are mounted Secrets; backups go through a server command to their own volume; a person checks real clients against the chart (entry 3).

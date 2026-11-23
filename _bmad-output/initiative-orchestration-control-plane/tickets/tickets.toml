@@ -45,7 +45,7 @@ slug = "epic-briefs-and-checklists"
 title = "Briefs and checklists"
 description = "brief() fills a lane's brief with scope, claims to avoid and standing rules, and a READY lane's post-merge checklist becomes its active state until empty, when a checklist_empty trigger proposes the archive."
 covers = ["R15", "R16"]
-after = [{ epic = 5, needs = "current claims for the don't-touch section" }, { epic = 3, needs = "the trigger engine and the propose_archive action" }]
+after = [{ epic = 1, needs = "workers and lanes, and the local work-item mirror" }, { epic = 2, needs = "the lane's PR in the GitHub projection" }, { epic = 5, needs = "current claims for the don't-touch section" }, { epic = 3, needs = "the trigger engine and the propose_archive action" }]
 
 [[epic]]
 id = 7
@@ -61,7 +61,7 @@ slug = "epic-guardrails"
 title = "Guardrails"
 description = "A usage adapter reads provider spend; paid runs carry hard caps that raise next() items at 50% and 80% and stop the lane at 100%; and hands-on requests are routed to their owning lane."
 covers = ["R7", "R20", "R21"]
-after = [{ epic = 3, needs = "the trigger engine and send to workers" }]
+after = [{ epic = 1, needs = "next items, the action runner and the container" }, { epic = 2, needs = "the secret-file reader for credentials" }, { epic = 3, needs = "the trigger engine and send to workers" }]
 
 [[epic]]
 id = 9
@@ -69,7 +69,7 @@ slug = "epic-clerk-migration"
 title = "Clerk migration"
 description = "The clerk's markdown ledger and triggers are imported through the server's commands, and the clerk runs its merge sweep and triggers on plotroom's MCP calls with no cutover day."
 covers = ["R23"]
-after = [{ epic = 3, needs = "trigger records and fired state" }, { epic = 4, needs = "MERGE next items and merge_gate for the clerk's sweep" }]
+after = [{ epic = 1, needs = "the writer-rule table, lanes and wait()" }, { epic = 2, needs = "PR head branches in the GitHub projection" }, { epic = 3, needs = "trigger records and fired state" }, { epic = 4, needs = "MERGE next items and merge_gate for the clerk's sweep" }, { epic = 6, needs = "checklist rows for imported post-merge steps" }]
 
 [[epic]]
 id = 10
@@ -77,7 +77,7 @@ slug = "epic-search"
 title = "Search"
 description = "The orchestrator finds past events, decisions, asks, lane reports and flakes by full text everywhere and by meaning where an embedder is deployed, within one project, including records written before search landed."
 covers = ["R28"]
-after = [{ epic = 2, needs = "inbox events and lane reports" }, { epic = 4, needs = "flake records" }, { epic = 7, needs = "decisions and asks" }]
+after = [{ epic = 1, needs = "the event log and unit of work" }, { epic = 2, needs = "inbox events and lane reports" }, { epic = 4, needs = "flake records" }, { epic = 7, needs = "decisions and asks" }]
 
 [[epic]]
 id = 11

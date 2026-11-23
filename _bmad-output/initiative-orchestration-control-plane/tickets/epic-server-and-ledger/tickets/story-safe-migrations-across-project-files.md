@@ -25,3 +25,7 @@ Verify: In CI, migrating three fixture files where one is corrupt leaves the oth
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md
+
+## Notes
+
+- Hands on: the online backup to epic 11's scheduled backups (entry 11.4).

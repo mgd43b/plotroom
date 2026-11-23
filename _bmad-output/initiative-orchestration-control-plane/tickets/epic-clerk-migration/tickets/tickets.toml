@@ -1,0 +1,72 @@
+# Entries of the Clerk migration epic, in build order. Ids are permanent; table order is build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Tracer: plotroom import loads the clerk's triggers"
+description = "The thinnest path: plotroom import reads a triggers.md in the clerk skill's template format and creates each exact trigger through the running server's commands as orchestrator; the trigger command gains an orchestrator-only imported_fired argument, declared in the writer-rule table, so a trigger marked FIRED is imported with fired state set; a prose trigger becomes a next item for the orchestrator to bind (AD-15). Messages with parts filled at fire time ([sha8], [N]) are imported as fixed text with a note on the trigger."
+verify = "Importing a fixture triggers.md with one open, one FIRED and one prose trigger creates two exact triggers with the right states and one bind item, and importing it again changes nothing."
+covers = ["R1"]
+after = ["3.5", "3.6", "3.8", "1.5"]
+hitl = false
+risk = "medium"
+references = [".claude/skills/clerk/templates/triggers.md"]
+notes = ["Decision: 2026-11-22, fire-time fields in clerk messages are imported as fixed text; send stays static (epic 3 unchanged)."]
+
+[[entry]]
+id = 2
+type = "story"
+title = "plotroom import loads the clerk's ledger"
+description = "plotroom import reads a ledger.md in the clerk skill's template format: each open PR's owner and channel become a lane for its configured worker through lane_start, its branch taken from the PR's head branch in the projection (AD-16); an After-merge entry naming a trigger links to the imported trigger, and any other becomes a checklist row through an orchestrator-only checklist_import(lane, rows) declared in the writer-rule table; a lane with no configured worker, and each PR on the skip list, opens an item for the orchestrator (plotroom writes no GitHub labels); the flakes-sent table is not imported (epic 4 recomputes flake candidates). The clerk spike (epic 1, #12) says what live ledgers hold beyond the template."
+verify = "Importing a fixture ledger.md creates its lanes for configured workers with their branches and channels, its After-merge steps as checklist rows or trigger links, one item for an unconfigured worker and one per skipped PR, and a second import changes nothing."
+covers = ["R1"]
+after = [1, "1.8", "2.15", "6.2"]
+hitl = false
+risk = "medium"
+references = [".claude/skills/clerk/templates/ledger.md"]
+unknown = "What live clerk ledgers hold beyond the template; the clerk spike (epic 1 entry 1, #12) answers."
+
+[[entry]]
+id = 3
+type = "story"
+title = "The clerk runs on plotroom's tools"
+description = "A clerk goal and procedure for plotroom (coordination/goals/clerk-plotroom.txt): the clerk wakes with plotroom watch, executes MERGE items from merge_gate, and leaves triggers to plotroom; epic 6's checklists replace the clerk's 'any other open PR merges' trigger. A person copies the live ledger.md and triggers.md from the clerk's state folder, runs plotroom import, keeps a drain session running, and runs the clerk this way for a working day with the sweep scripts stopped."
+verify = "For one working day the clerk merges only through MERGE items, every imported trigger whose condition held fired once and none fired twice, and the day's log shows no sweep.sh run and no missed or double merge."
+covers = ["R2"]
+after = [2, "4.5", "1.9", "3.6", "3.7", "6.3", "6.4"]
+hitl = true
+risk = "high"
+notes = ["Check beyond its criteria: a merge made by hand during the day is logged outside_gate and reaches the orchestrator."]
+
+[[entry]]
+id = 4
+type = "story"
+title = "Retire the hand-run clerk"
+description = "After the working day, coordination/README.md, AGENTS.md, coordination/goals/ (clerk, coordinator and task-coordinator) and the copied coordinator and task-coordinator skills (edited copies, as coordination/README.md allows when a rule really differs) point at plotroom instead of the clerk's scripts; the copied clerk skill is removed from .claude/skills and .agents/skills, keeping a pinned copy of safemerge.sh and lib.sh under tests/fixtures for epic 4's comparison suite."
+verify = "No file outside tests/fixtures tells a session to run sweep.sh, safemerge.sh or mergewait.sh, the coordinator's goal names plotroom's tools, and epic 4's comparison suite still passes against the pinned copy."
+covers = ["R2"]
+after = [3, "4.10"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+verify = "Deferred findings are resolved or re-filed, and CI passes."
+covers = []
+after = [1, 2, 3, 4]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 6
+type = "story"
+title = "End-to-end suite over the epic's Done when"
+description = "One suite runs the epic's import checks against a real daemon with fixture ledger and triggers files; the working-day check is recorded in the epic's Notes."
+verify = "The suite passes in CI, one test per Done-when line except the working day, which is checked in the epic's Notes."
+covers = ["R1", "R2"]
+after = [5]
+hitl = false
+risk = "low"

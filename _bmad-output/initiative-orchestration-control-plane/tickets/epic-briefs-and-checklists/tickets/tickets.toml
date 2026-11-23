@@ -1,0 +1,67 @@
+# Entries of the Briefs and checklists epic, in build order. Ids are permanent; table order is build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Tracer: brief() fills a lane brief from the ticket and current claims"
+description = "The thinnest path: brief(work_item, worker) (orchestrator only) returns a brief from a template in config, filled with the work item's full text (its file or issue body, read through the work-item source), the lane's own claims as its paths (none before lane_start), a don't-touch section from other lanes' current claims, the plan shape, the expected RESULT shape and the standing rules listed in config; plotroom only returns text, and the orchestrator edits and sends it."
+verify = "For a mirrored ticket and a worker, brief() returns the template filled with the ticket's full text, the claims of two other lanes under don't-touch and the configured standing rules, and a worker token's brief() is refused."
+covers = ["R1"]
+after = ["5.1", "1.13"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 2
+type = "story"
+title = "READY checklists become the lane's active state on merge"
+description = "lane_ready(lane, pr, head_sha, checklist[]) stores the post-merge checklist as structured rows (step, owner, ref); when the projection shows the lane's PR merged, the rows become the lane's active state, shown in snapshot(). Hands on: checklist rows to entries 3 and 4 and to epic 9's import."
+verify = "A lane's READY with three steps stores three rows; when its PR merges in the test repository they become its active state and snapshot() shows them; a READY with a free-text checklist is refused."
+covers = ["R2"]
+after = ["1.8", "2.15"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Checklist steps, the archive refusal and the archive item"
+description = "checklist_done(lane, step) by the lane's worker or the orchestrator marks a step done with its ref; lane_archive is refused while the lane has open steps (alongside epic 5's claim release on archive); when the last step closes, or on merge when the READY checklist was empty, one state-backed archive item opens for the orchestrator, deduplicated per lane. This is the one archive item kind: epic 3's propose_archive opens the same item. Hands on: the item kind to epic 3 entry 6."
+verify = "Archiving a lane with an open step is refused naming it; marking every step done opens one archive item, a propose_archive for the same lane opens no second one, and archiving the lane closes it; a lane whose READY had no steps gets the item when its PR merges; another lane's worker cannot mark the step."
+covers = ["R2", "R3"]
+after = [2, "5.1"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 4
+type = "story"
+title = "The checklist_empty trigger leaf"
+description = "Adds checklist_empty(lane) to epic 3's leaf registry: it holds when the lane has an active checklist whose last step has closed (never for a lane that has not reported READY), so the orchestrator can trigger a send or propose_archive on it."
+verify = "A trigger on checklist_empty(lane) fires once when the lane's last step closes, also across a restart, and does not fire at creation for a lane with no active checklist."
+covers = ["R3"]
+after = [3, "3.1", "3.6"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+verify = "Deferred findings are resolved or re-filed, and CI passes."
+covers = []
+after = [1, 2, 3, 4]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 6
+type = "story"
+title = "End-to-end suite over the epic's Done when"
+description = "One suite runs every Done-when check of this epic against a real daemon and the test repository."
+verify = "The suite passes in CI, one test per Done-when line."
+covers = ["R1", "R2", "R3"]
+after = [5]
+hitl = false
+risk = "low"

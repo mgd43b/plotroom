@@ -25,3 +25,7 @@ Verify: Labeling a PR and pushing a file change each appear once with the label'
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
+
+## Notes
+
+- Hands on: the lane's PR and its merge to epic 6's READY checklists (entry 6.2), and PR head branches to epic 9's ledger import (entry 9.2).

@@ -1,0 +1,80 @@
+# Entries of the Helm chart epic, in build order. Ids are permanent; table order is build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Tracer: helm install runs plotroom as one replica"
+description = "The thinnest path: a chart in deploy/helm/ with one replica, the Recreate strategy, a ReadWriteOnce block volume holding the data directory (and the instance token file, AD-3), a Service, a ConfigMap for the TOML config, and a one-off Job that runs plotroom token issue against the volume; helm lint and helm template run in CI, and CI installs the chart on a kind cluster and waits for /readyz."
+verify = "In CI the chart lints, renders, installs on kind with one pod that passes /readyz, a token issued by the Job gets snapshot() over HTTP, and deleting the pod brings a new one up only after the old one ends, with a recorded event still there."
+covers = ["R1"]
+after = ["1.10"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 2
+type = "story"
+title = "Per-project secrets on Kubernetes"
+description = "The chart mounts per-project secrets (GitHub App key, PAT, embedder key) from Kubernetes Secrets as the secret files plotroom reads, and never renders a secret value into the ConfigMap."
+verify = "A kind install with a Secret for an App key polls the test repository with the App, and helm template output contains no secret value."
+covers = ["R1"]
+after = [1, "2.6"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Clients and Codex workers against the chart"
+description = "The chart's documentation and values configure a hosted instance for plotroom bridge (a bridge token from the Job, the allowed Host names); a test runs the bridge from outside the cluster against the kind install; a person points a real Claude Code session at the chart's instance and a real Codex worker at it through the bridge."
+verify = "A bridge run outside the kind cluster delivers a scripted switchboard participant's message to the hosted instance and a send back, once each, and a real Claude Code session and a real Codex worker each call snapshot() against the chart's instance."
+covers = ["R2"]
+after = [1, "2.8"]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Scheduled backups"
+description = "An optional CronJob calls the server's online-backup command (orchestrator token) on a schedule, which writes a consistent backup of every project file to a separate backup volume, keeping a configured number."
+verify = "On kind, the CronJob run produces one consistent backup per project file on the backup volume that opens and migrates, and older backups past the configured count are removed."
+covers = ["R1"]
+after = [1, "1.14"]
+hitl = false
+risk = "low"
+notes = ["Decision: 2026-11-22, backups go through a server command into their own volume, since a second pod cannot share the ReadWriteOnce data volume across nodes and backups should not live on the volume they protect."]
+
+[[entry]]
+id = 5
+type = "story"
+title = "Publish the chart"
+description = "The release workflow publishes the chart as an OCI artifact to ghcr.io next to the image, with the chart's maintainer contact set to the owner's public identity; the owner allows the workflow to push it and makes the first-pushed chart package public."
+verify = "A release publishes the chart to ghcr.io, and helm install from that OCI reference on kind, with no registry credentials, passes /readyz."
+covers = ["R1"]
+after = [1, "1.11"]
+hitl = true
+risk = "low"
+notes = ["Making the chart package public is a publishing step that stays with mgd43b when its time comes."]
+
+[[entry]]
+id = 6
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+verify = "Deferred findings are resolved or re-filed, and CI passes."
+covers = []
+after = [1, 2, 3, 4, 5]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 7
+type = "story"
+title = "End-to-end suite over the epic's Done when"
+description = "One suite installs the chart on kind and runs every Done-when check of this epic with MCP SDK clients configured as a local daemon's clients are; the real-client check is entry 3's."
+verify = "The suite passes in CI, one test per Done-when line except the real clients, which are checked in entry 3."
+covers = ["R1", "R2"]
+after = [6]
+hitl = false
+risk = "low"

@@ -26,3 +26,7 @@ Verify: Under a fake Clock with a short token lifetime, a hosted instance config
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
 - architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-12
+
+## Notes
+
+- Hands on: the App credential to epic 11's Kubernetes secrets (entry 11.2).

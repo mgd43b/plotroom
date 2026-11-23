@@ -30,3 +30,4 @@ Verify: Against a fixture tree, the mirror lists its ready entries, never writes
 ## Notes
 
 - Decision: 2026-11-22, the owner chose the BMad repo tree for the local mirror; GitHub Issues as a work-item source comes with epic 2's GitHub adapter.
+- Hands on: the work-item mirror to epic 6's brief() (entry 6.1).

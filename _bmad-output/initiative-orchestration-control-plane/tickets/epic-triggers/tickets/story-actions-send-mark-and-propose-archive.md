@@ -25,3 +25,7 @@ Verify: A fired trigger's send reaches the scripted switchboard participant once
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-triggers/epic-triggers.md
+
+## Notes
+
+- propose_archive opens epic 6's one archive item kind (entry 6.3), deduplicated per lane, never a second item.

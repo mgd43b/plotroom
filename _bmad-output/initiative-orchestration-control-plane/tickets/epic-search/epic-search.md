@@ -8,8 +8,8 @@ covers: [R28]
 sources: []
 companions:
   - _bmad-output/initiative-orchestration-control-plane/architecture-orchestration-control-plane/architecture-orchestration-control-plane.md
-after: [epic-one-inbox, epic-merge-controller, epic-human-queue]
-refined: false
+after: []
+refined: true
 risk: medium
 ---
 
@@ -22,6 +22,18 @@ The orchestrator finds past events, decisions, asks, lane reports and flakes by 
 ## Outcome
 
 The orchestrator can look up what was already decided or seen, instead of asking again.
+
+## Requirements
+
+- R1 (parent R28): search() finds events, decisions, asks, lane reports and flakes by meaning where an embedder is configured and by full text otherwise, returning ids and excerpts.
+- R2 (parent R28): Records written before search landed are indexed by a resumable backfill.
+- R3 (parent R27, C8): Search never crosses projects, and results stay within the token budget.
+- R4 (parent C15; spine AD-6): The embedder is a pluggable HTTP endpoint or none, computed off the writer, and changing the model reindexes.
+
+## Constraints
+
+- From the initiative: C8 (token budgets), C15 (one search interface, optional embedder).
+- From the spine: AD-5, AD-6 and AD-13 bind this epic's stories.
 
 ## Done when
 
@@ -40,6 +52,9 @@ The orchestrator can look up what was already decided or seen, instead of asking
 
 ## Notes
 
-- Waits on epic-one-inbox because: inbox events and lane reports.
-- Waits on epic-merge-controller because: flake records.
-- Waits on epic-human-queue because: decisions and asks.
+- Waits on epic-server-and-ledger, story by story, for: the event log and unit of work.
+- Waits on epic-one-inbox, story by story, for: inbox events and lane reports.
+- Waits on epic-merge-controller, story by story, for: flake records.
+- Waits on epic-human-queue, story by story, for: decisions and asks.
+- Decision: 2026-11-22, build order 1 (full text over messages, the tracer), 2, 3, 4 (embeddings, the least certain), 5, with a refactor sweep (6) and an end-to-end suite (7); tests use a fake embedder and the real one is chosen per deployment. Prerequisites are story by story, with no whole-epic gate.
+- Decision: 2026-11-22, from the set check: the tracer indexes switchboard messages only; embeddings (entry 4, the least certain) come second and own the seq follower the backfill reuses; issue comments and PR bodies are indexed too; the fake embedder is served over HTTP.

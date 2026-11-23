@@ -1,0 +1,80 @@
+# Entries of the Guardrails epic, in build order. Ids are permanent; table order is build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Tracer: a budget raises items at 50% and 80% of its cap"
+description = "The thinnest path: budget_open(run, lane, cap_usd, provider, key_scope) (orchestrator only, the key scope recorded by name), a UsageMeter port with a fixture meter reporting cumulative spend per (meter, run) with an as-of time, a budget taking the latest reading and never summing, and once-only items at 50% and 80% keyed budget:<bud_id>:<50|80>; budget_status(run?) reports spend against cap."
+verify = "With the fixture meter, readings crossing 50% and 80% each open one item, repeated and overlapping readings open nothing new, and budget_status shows the latest spend against the cap and the run's lane."
+covers = ["R1", "R2"]
+after = ["1.6", "1.7"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "First provider usage adapter (Anthropic)"
+description = "A UsageMeter adapter for Anthropic's usage and cost reporting, read with an admin credential from a mounted secret through entry 2.2's secret-file reader (never stored, C2), mapped to cumulative spend per run by the key scope or tag the run registered; the endpoint and fields are confirmed against Anthropic's current documentation at the plan checkpoint. The owner creates the read-only admin credential and makes a small tagged test run under a provider-enforced spend limit."
+verify = "Against Anthropic's real reporting for the small tagged test run, the adapter reports cumulative spend that matches the console within the reporting delay, and a scan finds the credential in no record or log."
+covers = ["R1", "R2"]
+after = [1, "1.10", "2.2"]
+hitl = true
+risk = "high"
+plan_checkpoint = true
+notes = ["Paid run: the capped test run needs the coordinator's go-ahead when this is built, with a provider-enforced cap, a trial first and a projection from the trial's actual spend.", "Check beyond its criteria: a reporting delay or a gap in the provider's data never lowers a budget's recorded spend.", "Decision: 2026-11-22, Anthropic is the first provider (the lanes are Claude sessions); others are later adapters behind the same port."]
+
+[[entry]]
+id = 2
+type = "story"
+title = "Stop at 100%"
+description = "At 100% of its cap, a budget sends stop to its run's lane once over the lane's channel through epic 3's send, keyed budget:<bud_id>:100, and opens an item for the orchestrator."
+verify = "A reading at the cap sends one stop to a Codex lane through the scripted switchboard participant and one to a Claude lane through the drain stand-in, each with its budget key, also across a restart."
+covers = ["R2"]
+after = [1, "3.6", "3.7"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "The budget_ratio trigger leaf"
+description = "Adds budget_ratio(run) >= x to epic 3's leaf registry, a level condition over a budget's latest reading."
+verify = "A trigger on budget_ratio(run) >= 0.9 fires once when a fixture reading crosses 90%, and not again on a later reading above it."
+covers = ["R2"]
+after = [1, "3.1"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Routing hands-on requests"
+description = "route(action_kind, lane) (orchestrator only) records which lane owns a kind of hands-on action, config seeding a route only when the ledger has none; route_request(action_kind) returns the owning lane, and an unrouted request opens an item for the orchestrator."
+verify = "A routed kind returns its lane, a config seed applies only on an empty routes table and never over a ledger route, an unrouted kind opens one item, and a worker token's route is refused."
+covers = ["R3"]
+after = ["1.6", "1.8"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+verify = "Deferred findings are resolved or re-filed, and CI passes."
+covers = []
+after = [1, 3, 2, 4, 5]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 7
+type = "story"
+title = "End-to-end suite over the epic's Done when"
+description = "One suite runs every Done-when check of this epic against a real daemon with the fixture meter, a scripted switchboard participant and the drain stand-in."
+verify = "The suite passes in CI, one test per Done-when line."
+covers = ["R1", "R2", "R3"]
+after = [6]
+hitl = false
+risk = "low"
