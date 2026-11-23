@@ -362,7 +362,7 @@ async def test_a_file_with_an_unknown_revision_is_not_migrated(tmp_path: Path) -
 
 
 async def test_populated_human_queue_upgrade_preserves_projected_comment(tmp_path: Path) -> None:
-    previous = "0020"
+    previous = "0019"
     legacy = _migrations_at(tmp_path / "legacy", previous)
     repo = "fixture/queue"
     human = "fixture-human"
@@ -370,6 +370,14 @@ async def test_populated_human_queue_upgrade_preserves_projected_comment(tmp_pat
     words = "  Café\r\nShip.  "
     fields = {"id": 900, "number": 1, "author": human, "created_at": stamp, "updated_at": stamp}
     comment = GitHubRecord("900", "issue_comment", fields, words)
+    lane = Lane(
+        "fixture-lane",
+        "fixture-worker",
+        (),
+        "fixture-branch",
+        imported_channel="fixture-channel",
+        imported_trigger_id="fixture-trigger",
+    )
     store = SqliteStore("demo", tmp_path)
     await upgrade_to_head(store._engine, alembic_config(legacy))  # pyright: ignore[reportPrivateUsage]
     assert await store.revision() == previous
@@ -385,6 +393,7 @@ async def test_populated_human_queue_upgrade_preserves_projected_comment(tmp_pat
         )
 
         async def existing_queue_inputs(uow: UnitOfWork) -> None:
+            await uow.save_lane(lane)
             await apply_resource(uow, repo, ISSUES, "", GitHubResource((issue,)), stamp)
             await apply_comments(uow, repo, None, (comment,), stamp, stamp)
 
@@ -407,6 +416,8 @@ async def test_populated_human_queue_upgrade_preserves_projected_comment(tmp_pat
         await upgraded.migrate()
         assert await upgraded.revision() == head_revision()
         assert await upgraded.events_after(0) == before
+        _, _, _, lanes = await upgraded.read_board("orchestrator")
+        assert lanes == [lane]
         ledger.start()
         ask = await ledger.execute(
             "orchestrator",
