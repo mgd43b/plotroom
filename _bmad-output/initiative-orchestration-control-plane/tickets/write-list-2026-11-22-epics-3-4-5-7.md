@@ -2,7 +2,7 @@
 
 Status: HELD, waiting for mgd43b's go-ahead, typed in the ticketer's session. Nothing below has been done.
 
-Summary: 38 new issues, 13 body edits, 38 parent links, 110 blocked-by relations on new issues and 3 on existing epics, no label changes, no comments, nothing closed.
+Summary: 38 new issues, 13 body edits, 38 parent links, 110 blocked-by relations on new issues and 3 on existing epics, 1 label removal, 1 comment and 1 close (#13).
 
 ## Creates (in this order; milestone "Orchestration control plane"; no assignee)
 | # | Entry | Type | Title | Parent | Blocked by | Labels |
@@ -179,14 +179,16 @@ Summary: 38 new issues, 13 body edits, 38 parent links, 110 blocked-by relations
 
 ## Labels
 - None created; every label used exists.
+- #13: remove `backlog` (done is the closed state).
 
-## Comments
-- None.
+## Comments (exact text)
+**On #13:**
+> Done: built in PR #28, merged at ec2d985e; main's ci.yml run on that commit passed (https://github.com/mgd43b/plotroom/actions/runs/45087667919).
 
-## Closes
-- None.
+## Closes (verification recorded)
+- #13 (entry 1.2, the tracer) as completed: PR #28 merged at ec2d985e, and main's ci.yml run 45087667919 on that commit succeeded (checked 2026-11-22); verification by the coordinator.
 
 ## Not on this list, on purpose
-- Epic 1's tracer story file: #28 has merged; its file is untouched here.
+- Epic 1's tracer story file: only its tracker status is mirrored to done after the close.
 - Whole-epic gates in epics 6 and 8 to 11: dropped when each is planned.
 
