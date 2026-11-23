@@ -32,6 +32,10 @@ AT = "2026-11-22T12:00:00Z"
         ("src/***/x.py", "src/***/x.py", "src/", "src/x.py", "other/src/x.py"),
         ("src/[[:digit:]].py", "src/[[:digit:]].py", "src/", "src/2.py", "src/x.py"),
         ("src/[!x]file", "src/[!x]file", "src/", "src/bfile", "src/xfile"),
+        ("src/[]]", "src/[]]", "src/", "src/]", "src/x"),
+        ("src/??", "src/??", "src/", "src/é", "src/z"),
+        ("src/é", "src/é", "src/é/", "src/é", "src/e"),
+        (r"src\/file", "src/file", "src/file/", "src/file", "src/other"),
         (r"src/\*.txt", r"src/\*.txt", "src/*.txt/", "src/*.txt", "src/a.txt"),
         (r"\!config", r"\!config", "", "nested/!config", "nested/config"),
     ],
@@ -51,6 +55,11 @@ def test_invalid_claim_globs(pattern: str) -> None:
     with pytest.raises(LedgerError) as error:
         normalize_glob(pattern)
     assert error.value.code == "invalid"
+
+
+def test_unterminated_bracket_class_is_refused() -> None:
+    with pytest.raises(LedgerError, match="unterminated bracket class"):
+        compile_glob("src/[!]")
 
 
 def files(number: int, head: str, *paths: str) -> GitHubResource:

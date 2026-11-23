@@ -279,6 +279,9 @@ async def test_ticket_tree_move_lists_editing_prs_first(
         repository.pull(20, "bob", "unrelated.md", version=2)
         await repository.refresh()
         assert await items(orch, TICKET_TREE_MOVE) == []
+        repository.pull(20, "bob", f"{TREE}/alternative.md", previous=STORY, version=3)
+        await repository.refresh()
+        assert await items(orch, TICKET_TREE_MOVE) == []
 
 
 async def test_conflicting_claim_reported_when_made(tmp_path: Path, repository: Repository) -> None:
@@ -290,7 +293,11 @@ async def test_conflicting_claim_reported_when_made(tmp_path: Path, repository: 
         await claim(orch, "bob", "src/a/x.py", "src/a/y.py")
         (opened,) = await items(orch, CLAIM_OVERLAP)
         assert opened["context"]["lanes"] == ["alice", "bob"]
-        assert len(opened["context"]["matches"]) == 2
+        assert [entry["glob"] for entry in opened["context"]["claims"]] == [
+            "src/a/**",
+            "src/a/x.py",
+            "src/a/y.py",
+        ]
         before = await call(orch, "snapshot")
         await claim(orch, "bob", "/src/a/x.py", "./src/a/y.py", request_id="retry")
         assert await call(orch, "snapshot") == before
@@ -345,6 +352,27 @@ async def test_overlap_and_claim_reads_agree_with_board(
         for args in ({}, {"lane": "alice", "pr": 3}, {"pr": 0}):
             invalid = tool_json(await orch.call_tool("overlaps", args))
             assert invalid["error"]["code"] == "invalid"
+
+        long_glob = "private/oversized-" + "x" * 10000
+        long_reason = "Context " * 1500
+        await call(
+            orch,
+            "claim",
+            lane="bob",
+            globs=[long_glob],
+            reason=long_reason,
+            request_id="long-reason",
+        )
+        page = await call(orch, "claims", lane="bob")
+        assert page["claims"][0] == {"offset": 0, "details_omitted": True}
+        assert page["claims"][1]["glob"] == "private/path-00"
+        assert page["next_offset"] == len(page["claims"])
+        detail = await call(orch, "claims", lane="bob", offset=0, detail=True)
+        assert detail["claims"] == [{"lane": "bob", "glob": long_glob, "reason": long_reason}]
+        assert (await call(alice, "claims", lane="bob", detail=True))["claims"] == []
+        assert (await call(orch, "claims", lane="bob", offset=1))["claims"][0]["glob"] == (
+            "private/path-00"
+        )
 
 
 async def test_worker_can_claim_only_own_lane(tmp_path: Path, repository: Repository) -> None:

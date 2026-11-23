@@ -3,14 +3,14 @@ title: 'Epic 5 local claims and overlaps'
 type: feature
 ticket: 1
 created: '2026-11-23'
-status: in-progress
+status: in-review
 baseline_revision: 'e09371505fef2d84711108c044f7ed7bfe862236'
 route: full
 route_source: auto
 risk: medium
-review: ''
-review_source: ''
-lenses_ran: []
+review: quick
+review_source: pinned
+lenses_ran: [quick]
 review_loop_iteration: 0
 context: ['{project-root}/AGENTS.md']
 ---
@@ -65,11 +65,22 @@ Use the existing role and lane bindings, writer, projections, next items, BMad t
 
 ## Implementation Notes
 
-The delegated lane brief authorizes the combined build and verification. The final parent of 0013 must match verified main after the trigger migration merges.
+Migration 0013 now follows verified main's trigger migration 0012. The populated predecessor test opens the daemon twice, preserving its original events and the derived overlap item.
+
+Claims and conflicts are distinct reads. Claims use lane visibility. Overlaps use next-item routing and paging, with full detail available by item ID.
 
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Medium, patched. Oversized claim rows retain a continuation offset and can be read in full by offset with the same visibility checks. The daemon test exercises both a long glob and a long reason.
+- Low, documented. Truncated overlap pages have the same behavior as `next()`. Use the item's ID in `next(item=...)` to fetch its complete lanes and PRs.
+- Medium, patched. A second rename is excluded from the editing PR recommendation to avoid reciprocal merge orders. Both paths still participate in claim matching. The ticketer received the separate move-against-move case for scope review.
+- Low, referred to the ticketer. The local filesystem ticket-tree source has no repository-root binding. GitHub ticket-tree moves use the existing repository-relative source. Mapping a local tree to the polled repository requires a separate contract.
+- Medium, patched. Git-style filename matching uses bytes and recognizes escaped separators and closing brackets in character classes. Focused fixtures cover the matched and rejected forms.
+- High, patched. The legacy trigger fixture seeds facts on its pre-trigger schema before current reconciliation is enabled. The transport matrix supplies required claim and release arguments for drain authorization checks.
+- Medium, patched. Daemon startup clears persisted PR-derived items if GitHub has been disabled. The populated upgrade test restarts in both configurations.
+- Medium, patched. Claim-pair evidence stores each participating claim once, keeping the item size proportional to the number of claims.
 
 ## Verification
 

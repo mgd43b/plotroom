@@ -128,7 +128,7 @@ def render_claims(
 ) -> dict[str, Any]:
     return _render_page(
         cursor,
-        ((claim.render(), {"lane": claim.lane, "glob": claim.glob}) for claim in claims),
+        ((claim.render(), {"offset": index}) for index, claim in enumerate(claims, offset)),
         "claims",
         offset,
         budget,

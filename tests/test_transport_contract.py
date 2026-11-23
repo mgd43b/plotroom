@@ -305,6 +305,9 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         }
         arguments: dict[str, dict[str, Any]] = {
             "ack": {"item": "fixture"},
+            "claim": {"lane": "fixture", "globs": ["src/**"], "reason": "fixture"},
+            "release": {"lane": "fixture", "globs": ["src/**"]},
+            "overlaps": {"lane": "fixture"},
             "lane_start": {
                 "lane": "fixture",
                 "worker": "fixture",

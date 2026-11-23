@@ -214,8 +214,9 @@ def build_app(
         ctx: Context[Any, Request],
         lane: str | None = None,
         offset: int = 0,
+        detail: bool = False,
     ) -> dict[str, Any]:
-        """Page through visible lane claims and their reasons."""
+        """Page through visible claims. Use detail with a row's offset for its full reason."""
         try:
             caller = board_access(ctx)
             if not 0 <= offset <= 2**63 - 1:
@@ -223,8 +224,10 @@ def build_app(
             if caller.ledger is None:
                 raise LedgerError("unavailable", "the project ledger is unavailable")
             cursor, entries = await caller.ledger.read_claims(
-                caller.identity.role, lane, offset, _NEXT_PAGE_SIZE + 1
+                caller.identity.role, lane, offset, 1 if detail else _NEXT_PAGE_SIZE + 1
             )
+            if detail:
+                return ok({"cursor": cursor, "claims": [entry.render() for entry in entries]})
             return ok(
                 render_claims(
                     cursor,
@@ -244,7 +247,7 @@ def build_app(
         lane: str | None = None,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """Page through visible overlap items for exactly one pull request or lane."""
+        """Page through visible overlaps for one PR or lane. Use next(item=...) for full detail."""
         try:
             caller = board_access(ctx)
             if (lane is None) == (pr is None):

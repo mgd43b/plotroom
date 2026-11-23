@@ -138,6 +138,15 @@ async def test_populated_claims_upgrade_reconciles_existing_tree_move(
         finally:
             await stop(daemon, task)
     assert observed[0] == observed[1]
+    disabled = Daemon(replace(config, github={}, github_ticket_trees={}), clock=FixedClock())
+    task, port = await run_daemon(disabled)
+    try:
+        async with authenticated_client(f"http://127.0.0.1:{port}/mcp", token) as client:
+            result = tool_json(await client.call_tool("overlaps", {"pr": 2}))
+            assert result["data"]["items"] == []
+            assert result["data"]["cursor"] > observed[-1]["data"]["cursor"]
+    finally:
+        await stop(disabled, task)
     assert script_heads() == ["0013"]
     with sqlite3.connect(store.path) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0013",)
@@ -276,7 +285,9 @@ async def test_trigger_migration_preserves_projected_prs_and_pending_actions(
     repo = "fixture/project"
     store = SqliteStore("demo", tmp_path)
     catalog = replace(build_catalog(github_repository=repo), trigger_leaves=None)
-    ledger = Ledger(store, catalog, FixedClock(), github_repository=repo)
+    # The seed already carries the repository. Leave feature reconciliation disabled
+    # while writing legacy facts on a schema before the trigger and claim tables.
+    ledger = Ledger(store, catalog, FixedClock())
     timestamp = "2026-11-23T12:00:00.000000Z"
     details = GitHubResource((), attributes={"fixture": True}, generation=1, as_of=timestamp)
 

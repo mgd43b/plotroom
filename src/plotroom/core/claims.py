@@ -20,10 +20,8 @@ TICKET_TREE_MOVE = "ticket_tree_move"
 OVERLAP_KINDS = (CLAIM_OVERLAP, PR_CLAIM_OVERLAP, TICKET_TREE_MOVE)
 _GLOB_TOKEN = re.compile(r"\\(.)|([*?\[])")
 _TRAILING_ESCAPE = re.compile(r"(?<!\\)(?:\\\\)*\\$")
-_BRACKET = re.compile(
-    r"\[(?P<negate>[!^])?(?P<contents>\]?(?:\\.|"
-    r"\[:[a-z]+:\]|[^\\\]])+)\]"
-)
+_BRACKET_PART = r"(?:\\.|\[:[a-z]+:\]|[^\\\]])"
+_BRACKET = re.compile(rf"\[(?P<negate>[!^]?+)(?P<contents>\]{_BRACKET_PART}*|{_BRACKET_PART}+)\]")
 _CLASS_TOKEN = re.compile(r"\\(.)|\[:([a-z]+):\]|(.)")
 _POSIX_CLASSES = {
     "alnum": "0-9A-Za-z",
@@ -55,6 +53,7 @@ def normalize_glob(pattern: str) -> str:
     # Git ignores unescaped trailing spaces. Preserve an escaped space and the
     # leading slash on a single component, which makes it root-relative.
     pattern = re.sub(r"(?<!\\)((?:\\\\)*) +$", r"\1", pattern)
+    pattern = re.sub(r"(?<!\\)((?:\\\\)*)\\/", r"\1/", pattern)
     if pattern.startswith("!") or any(ord(char) < 32 for char in pattern):
         raise LedgerError("invalid", "claim glob cannot be negated or contain control characters")
     parts = [part for part in pattern.split("/") if part not in {"", "."}]
@@ -111,7 +110,10 @@ def _translate_component(component: str) -> str:
                 fragments.append([])
         elif char == "?":
             parts.append("[^/]")
-        elif char == "[" and (bracket := _BRACKET.match(component, index)):
+        elif char == "[":
+            bracket = _BRACKET.match(component, index)
+            if bracket is None:
+                raise LedgerError("invalid", "claim glob has an unterminated bracket class")
             parts.append(_translate_bracket(bracket))
             index = bracket.end() - 1
         else:
@@ -127,11 +129,11 @@ def _translate_component(component: str) -> str:
 
 @dataclass(frozen=True)
 class PathGlob:
-    components: tuple[re.Pattern[str] | None, ...]
+    components: tuple[re.Pattern[bytes] | None, ...]
     directory_only: bool
 
     def matches(self, path: str) -> bool:
-        parts = path.split("/")
+        parts = path.encode("utf-8", errors="surrogatepass").split(b"/")
         end = len(self.components)
         positions = {0}
         for depth, part in enumerate(parts, start=1):
@@ -161,19 +163,23 @@ def compile_glob(pattern: str) -> PathGlob:
     components = path.split("/")
     if not pattern.startswith("/") and len(components) == 1:
         components.insert(0, "**")
-    matchers: list[re.Pattern[str] | None] = []
+    matchers: list[re.Pattern[bytes] | None] = []
     try:
         for component in components:
             if len(component) >= 2 and set(component) == {"*"}:
                 if not matchers or matchers[-1] is not None:
                     matchers.append(None)
             else:
-                matchers.append(re.compile(_translate_component(component)))
+                # Git wildmatch counts UTF-8 bytes, including inside character classes.
+                raw_component = component.encode("utf-8").decode("latin-1")
+                matchers.append(re.compile(_translate_component(raw_component).encode("latin-1")))
+    except UnicodeEncodeError:
+        raise LedgerError("invalid", "claim glob must be valid UTF-8") from None
     except re.PatternError:
         raise LedgerError("invalid", "claim glob has an invalid bracket range") from None
     if matchers[-1] is None:
         # A trailing /** must match at least one component after its parent.
-        matchers.append(re.compile(r"[^/]+"))
+        matchers.append(re.compile(rb"[^/]+"))
     return PathGlob(tuple(matchers), pattern.endswith("/"))
 
 
@@ -233,16 +239,20 @@ async def reconcile_claim_pairs(uow: UnitOfWork, claims: list[Claim]) -> None:
         by_lane[entry.lane].append((entry, literal_prefix(entry.glob)))
     desired: dict[str, dict[str, Any]] = {}
     for left, right in combinations(sorted(by_lane), 2):
-        matches = [
-            [first.render(), second.render()]
-            for first, first_prefix in by_lane[left]
-            for second, second_prefix in by_lane[right]
-            if first_prefix.startswith(second_prefix) or second_prefix.startswith(first_prefix)
-        ]
-        if matches:
+        participants: set[Claim] = set()
+        for first, first_prefix in by_lane[left]:
+            for second, second_prefix in by_lane[right]:
+                if first_prefix.startswith(second_prefix) or second_prefix.startswith(first_prefix):
+                    participants.update((first, second))
+        if participants:
             desired[json.dumps([left, right])] = {
                 "lanes": [left, right],
                 "prs": [],
-                "matches": matches,
+                "claims": [
+                    entry.render()
+                    for lane in (left, right)
+                    for entry, _ in by_lane[lane]
+                    if entry in participants
+                ],
             }
     await sync_items(uow, CLAIM_OVERLAP, desired)

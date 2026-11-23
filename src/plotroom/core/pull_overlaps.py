@@ -27,6 +27,7 @@ class _PullFiles:
     lane: str | None
     paths: set[str]
     moves: set[str]
+    edits: set[str]
 
 
 async def _confirmed_files(
@@ -41,6 +42,7 @@ async def _confirmed_files(
         lane = await uow.branch_lane(pull.branch) if pull.head_repository == repository else None
         paths: set[str] = set()
         moves: set[str] = set()
+        edits: set[str] = set()
         for row in resource.records:
             if row.fields["head_sha"] != pull.head_sha:
                 continue
@@ -48,6 +50,7 @@ async def _confirmed_files(
             paths.add(path)
             prior: str | None = row.fields.get("previous_path")
             if row.fields["status"] != "renamed" or prior is None:
+                edits.add(path)
                 continue
             paths.add(prior)
             if tree is not None and (
@@ -55,7 +58,9 @@ async def _confirmed_files(
                 or PurePosixPath(path).is_relative_to(tree)
             ):
                 moves.update((prior, path))
-        confirmed.append(_PullFiles(pull.number, None if lane is None else lane.id, paths, moves))
+        confirmed.append(
+            _PullFiles(pull.number, None if lane is None else lane.id, paths, moves, edits)
+        )
     return confirmed
 
 
@@ -86,7 +91,7 @@ async def _reconcile_moves(uow: UnitOfWork, pulls: list[_PullFiles]) -> None:
     by_number = {pull.number: pull for pull in pulls}
     by_path: dict[str, set[int]] = defaultdict(set)
     for pull in pulls:
-        for path in pull.paths:
+        for path in pull.edits:
             by_path[path].add(pull.number)
     desired: dict[str, dict[str, object]] = {}
     for pull in pulls:

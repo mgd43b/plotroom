@@ -12,7 +12,7 @@ from typing import Any
 
 from plotroom.core.actions import Action
 from plotroom.core.catalog import Catalog
-from plotroom.core.claims import Claim
+from plotroom.core.claims import PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, Claim, sync_items
 from plotroom.core.commands import COMMAND_APPENDER, command_kind
 from plotroom.core.events import (
     AppendResult,
@@ -96,11 +96,13 @@ class Ledger:
 
     async def initialize_overlaps(self) -> None:
         """Materialize conflicts from facts already stored before the daemon opened."""
-        if self.github_repository is None:
-            return
 
         async def restore(uow: UnitOfWork) -> None:
-            uow.pull_overlaps_changed()
+            if self.github_repository is None:
+                for kind in (PR_CLAIM_OVERLAP, TICKET_TREE_MOVE):
+                    await sync_items(uow, kind, {})
+            else:
+                uow.pull_overlaps_changed()
 
         await self.run("system", restore)
 
