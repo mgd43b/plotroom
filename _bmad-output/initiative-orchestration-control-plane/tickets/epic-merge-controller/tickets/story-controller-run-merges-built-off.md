@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "73"
 remote: "https://github.com/mgd43b/plotroom/issues/73"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Controller-run merges, built off

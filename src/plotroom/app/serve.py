@@ -33,7 +33,7 @@ from plotroom.adapters.github.ticket_tree import GitHubTicketTree
 from plotroom.adapters.mcp import build_app
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.adapters.switchboard import Switchboard
-from plotroom.adapters.work_items_bmad import BmadTicketTree, read_ticket_tree
+from plotroom.adapters.work_items_bmad import BmadTicketTree, read_ticket_body, read_ticket_tree
 from plotroom.adapters.work_items_github_issues import GitHubIssuesWorkItems
 from plotroom.app.clock import SystemClock
 from plotroom.app.config import Config, ConfigError
@@ -197,6 +197,7 @@ class _Project:
     store: SqliteStore
     ledger: Ledger | None = None
     runtime: ProjectRuntime | None = None
+    work_items: WorkItemSource | None = None
 
 
 class Daemon:
@@ -307,6 +308,11 @@ class Daemon:
                 config.projects,
                 config.allowed_hosts,
                 ledgers=self.ledgers,
+                work_item_sources={
+                    project_id: project.work_items
+                    for project_id, project in self._projects.items()
+                    if project.work_items is not None
+                },
                 authenticate=TokenRegistry(config.data_dir).authenticate,
                 unavailable=problem,
                 snapshot_budget=config.snapshot_budget,
@@ -401,6 +407,7 @@ class Daemon:
                 github_tree_path=remote_tree[0] if remote_tree is not None else None,
                 session_workers=desktop.sessions if desktop is not None else None,
                 drain_enabled=project_id in self._config.drain_sessions,
+                brief_settings=self._config.briefs.get(project_id),
                 live_merge_controller=live_merge,
                 merge_clerk=partial(tokens.has_role, project_id, "clerk") if live_merge else None,
                 fixture_merge_enabled=fixture_write is not None,
@@ -458,6 +465,7 @@ class Daemon:
                         credential,
                         tree,
                         partial(read_ticket_tree, installation),
+                        read_body=partial(read_ticket_body, installation),
                         cooling_down=details.cooling_down,
                         report_rate_limit=details.record_rate_limit,
                     )
@@ -469,6 +477,7 @@ class Daemon:
                         github.repository,
                         issue_source.milestone,
                     )
+            project.work_items = work_items
             project.runtime = ProjectRuntime(
                 project.ledger,
                 self._clock,

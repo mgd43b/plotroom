@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from plotroom.core.actions import ACTION_PAGE_SIZE, Action, QueuedAction
+from plotroom.core.briefs import BRIEF, BriefSettings
 from plotroom.core.catalog import Catalog
 from plotroom.core.claims import PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, Claim, sync_items
 from plotroom.core.commands import COMMAND_APPENDER, command_kind
@@ -35,7 +36,7 @@ from plotroom.core.watchers import Watchers
 from plotroom.core.writer import ProjectWriter
 from plotroom.ports.clock import Clock
 from plotroom.ports.store import Board, Store, Transaction
-from plotroom.ports.work_items import WorkItem
+from plotroom.ports.work_items import WorkItem, WorkItemSource
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ class Ledger:
         github_tree_path: str | None = None,
         session_workers: Mapping[str, str] | None = None,
         drain_enabled: bool = False,
+        brief_settings: BriefSettings | None = None,
         live_merge_controller: bool = False,
         merge_clerk: Callable[[], Awaitable[bool]] | None = None,
         fixture_merge_enabled: bool = False,
@@ -93,6 +95,7 @@ class Ledger:
         self.github_error = "waiting for the first GitHub poll" if github_repository else None
         self.session_workers = dict(session_workers or {})
         self._drain_enabled = drain_enabled
+        self._brief_settings = brief_settings or BriefSettings()
         self._stopping = asyncio.Event()
 
     @property
@@ -295,6 +298,7 @@ class Ledger:
                             "args": copy.deepcopy(snapshot),
                             "result": result,
                         },
+                        lane_id=snapshot["lane"] if registered.lane_scoped else None,
                     )
                 )
             await self._refresh_merge_controller(uow)
@@ -401,9 +405,11 @@ class Ledger:
         return board, github
 
     async def snapshot_summary(
-        self, role: str
+        self, role: str, *, checklist_lane: str | None = None
     ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
-        return await self._store.read_snapshot(role, self.github_repository)
+        return await self._store.read_snapshot(
+            role, self.github_repository, checklist_lane=checklist_lane
+        )
 
     async def snapshot_with_triggers(
         self, role: str
@@ -421,6 +427,26 @@ class Ledger:
         self, role: str, lane: str | None, offset: int, limit: int
     ) -> tuple[int, list[Claim]]:
         return await self._store.read_claims(role, lane, offset, limit)
+
+    async def brief(
+        self, role: str, work_item: str, worker: str, source: WorkItemSource | None
+    ) -> str:
+        if _check_role(role) not in self._catalog.read_roles.get(BRIEF, ()):
+            raise LedgerError("forbidden", "only the orchestrator may read a lane brief")
+        if worker not in self._catalog.workers:
+            raise LedgerError("not_found", "configured worker not found")
+        if not work_item or not work_item.isprintable() or not work_item.strip():
+            raise LedgerError("invalid", "work_item must be a nonempty printable reference")
+        if source is None:
+            raise LedgerError("unavailable", "a work-item source is not configured")
+        try:
+            source_text = await source.body(work_item)
+        except OSError, ValueError:
+            raise LedgerError("unavailable", "the work-item source could not be read") from None
+        if source_text is None:
+            raise LedgerError("not_found", "work-item text not found in the configured source")
+        lane, claims = await self._store.read_brief_claims(worker)
+        return self._brief_settings.render(work_item, worker, source_text, lane, claims)
 
     async def read_overlaps(
         self, role: str, lane: str | None, pr: int | None, offset: int, limit: int

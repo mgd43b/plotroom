@@ -378,6 +378,19 @@ def _validate_lane(args: dict[str, Any]) -> None:
     validate_identity(args["lane"], "lane")
 
 
+async def _checklist_empty(evaluation: Evaluation, _path: str, args: dict[str, Any]) -> bool:
+    lane = await evaluation.uow.find_lane(args["lane"])
+    if lane is None or lane.state == "archived":
+        return False
+    checklist = await evaluation.uow.find_checklist(lane.id)
+    return (
+        checklist is not None
+        and checklist.state == "active"
+        and bool(checklist.steps)
+        and not checklist.open_steps()
+    )
+
+
 async def _lane_idle(
     evaluation: Evaluation, _path: str, args: dict[str, Any], *, idle_minutes: int
 ) -> bool:
@@ -424,6 +437,9 @@ def build_leaf_registry(
     )
     registry.register(
         LeafSpec("deploy_finished", (_ENV, _SHA), "event", _validate_deploy, _deploy_finished)
+    )
+    registry.register(
+        LeafSpec("checklist_empty", (_LANE,), "level", _validate_lane, _checklist_empty)
     )
     registry.register(
         LeafSpec(

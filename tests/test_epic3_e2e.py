@@ -119,7 +119,8 @@ async def tools(
             payload = json.loads(reply["result"]["content"][0]["text"])
             if error is not None:
                 assert payload["error"]["code"] == error, payload
-                return {}
+                problem: dict[str, Any] = payload["error"]
+                return problem
             assert payload["ok"], payload
             data: dict[str, Any] = payload["data"]
             return data

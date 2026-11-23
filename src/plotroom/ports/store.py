@@ -17,6 +17,7 @@ from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
     from plotroom.core.budgets import Budget
+    from plotroom.core.checklists import Checklist
     from plotroom.core.merge_gate import GateSnapshot
     from plotroom.core.outbox import OutboxLease, OutboxMessage, OutboxReadiness
     from plotroom.core.triggers import Trigger
@@ -109,9 +110,21 @@ class Transaction(Protocol):
 
     async def branch_lane(self, branch: str) -> Lane | None: ...
 
+    async def branch_lanes(self, branch: str) -> list[Lane]: ...
+
     async def active_lanes(self) -> list[Lane]: ...
 
     async def save_lane(self, lane: Lane) -> None: ...
+
+    async def find_checklist(self, lane: str) -> Checklist | None: ...
+
+    async def save_checklist(self, checklist: Checklist) -> None: ...
+
+    async def set_checklist_step_completion(
+        self, lane: str, version: int, step: str, completion_ref: str
+    ) -> bool:
+        """Update an open step of the lane's active checklist at the given version."""
+        ...
 
     async def lane_claims(self, lane: str | None = None) -> list[Claim]: ...
 
@@ -191,12 +204,16 @@ class Store(Protocol):
     async def read_board(self, role: str) -> Board: ...
 
     async def read_snapshot(
-        self, role: str, repository: str | None
+        self, role: str, repository: str | None, *, checklist_lane: str | None = None
     ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]: ...
 
     async def read_claims(
         self, role: str, lane: str | None, offset: int, limit: int
     ) -> tuple[int, list[Claim]]: ...
+
+    async def read_brief_claims(self, worker: str) -> tuple[str | None, list[Claim]]:
+        """Read the worker's current lane and all active claims in one snapshot."""
+        ...
 
     async def read_overlaps(
         self, role: str, lane: str | None, pr: int | None, offset: int, limit: int

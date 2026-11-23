@@ -9,7 +9,7 @@ import sqlite3
 from collections import Counter
 from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
 from itertools import islice
@@ -20,6 +20,7 @@ from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.actions import BRANCH_UPDATE, CONTROLLER_MERGE, Action, QueuedAction
 from plotroom.core.budgets import Budget
 from plotroom.core.catalog import Catalog
+from plotroom.core.checklists import Checklist
 from plotroom.core.claims import OVERLAP_KINDS, Claim
 from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
@@ -111,6 +112,7 @@ class _MemoryTransaction:
         self.lanes: dict[str, Lane] = {}
         self.budgets: dict[str, Budget] = {}
         self.routes: dict[str, str] = {}
+        self.checklists: dict[str, Checklist] = {}
         self.claims: dict[tuple[str, str], Claim] = {}
         self.work_items: tuple[WorkItem, ...] = ()
         self.claude_turns: dict[tuple[str, str], set[str]] = {}
@@ -215,13 +217,19 @@ class _MemoryTransaction:
         )
 
     async def branch_lane(self, branch: str) -> Lane | None:
-        self._live()
-        lanes = [
-            lane
-            for lane in self.lanes.values()
-            if lane.branch == branch and lane.state != "archived"
-        ]
+        lanes = await self.branch_lanes(branch)
         return lanes[0] if len(lanes) == 1 else None
+
+    async def branch_lanes(self, branch: str) -> list[Lane]:
+        self._live()
+        return sorted(
+            (
+                lane
+                for lane in self.lanes.values()
+                if lane.branch == branch and lane.state != "archived"
+            ),
+            key=lambda lane: lane.id,
+        )
 
     async def active_lanes(self) -> list[Lane]:
         self._live()
@@ -321,6 +329,29 @@ class _MemoryTransaction:
     async def save_lane(self, lane: Lane) -> None:
         self._live()
         self.lanes[lane.id] = lane
+
+    async def find_checklist(self, lane: str) -> Checklist | None:
+        self._live()
+        return self.checklists.get(lane)
+
+    async def save_checklist(self, checklist: Checklist) -> None:
+        self._live()
+        self.checklists[checklist.lane] = checklist
+
+    async def set_checklist_step_completion(
+        self, lane: str, version: int, step: str, completion_ref: str
+    ) -> bool:
+        self._live()
+        checklist = self.checklists.get(lane)
+        if checklist is None or checklist.state != "active" or checklist.version != version:
+            return False
+        steps = list(checklist.steps)
+        for index, current in enumerate(steps):
+            if current.step == step and current.completion_ref is None:
+                steps[index] = replace(current, completion_ref=completion_ref)
+                self.checklists[lane] = replace(checklist, steps=tuple(steps))
+                return True
+        return False
 
     async def insert_action(self, action: Action) -> None:
         self._live()
@@ -494,6 +525,7 @@ class MemoryStore:
         self._lanes: dict[str, Lane] = {}
         self._budgets: dict[str, Budget] = {}
         self._routes: dict[str, str] = {}
+        self._checklists: dict[str, Checklist] = {}
         self._claims: dict[tuple[str, str], Claim] = {}
         self._work_items: tuple[WorkItem, ...] = ()
         self._claude_turns: dict[tuple[str, str], set[str]] = {}
@@ -533,6 +565,7 @@ class MemoryStore:
         tx.lanes = self._lanes.copy()
         tx.budgets = self._budgets.copy()
         tx.routes = self._routes.copy()
+        tx.checklists = self._checklists.copy()
         tx.claims = self._claims.copy()
         tx.work_items = self._work_items
         tx.claude_turns = {key: ids.copy() for key, ids in self._claude_turns.items()}
@@ -557,6 +590,7 @@ class MemoryStore:
             self._lanes = tx.lanes
             self._budgets = tx.budgets
             self._routes = tx.routes
+            self._checklists = tx.checklists
             self._claims = tx.claims
             self._work_items = tx.work_items
             self._claude_turns = tx.claude_turns
@@ -614,13 +648,19 @@ class MemoryStore:
         return self._work_items
 
     async def read_snapshot(
-        self, role: str, repository: str | None
+        self, role: str, repository: str | None, *, checklist_lane: str | None = None
     ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
         board, github = (
             (await self.read_board(role), None)
             if repository is None
             else await self.read_github_board(role, repository)
         )
+        if checklist_lane is not None:
+            _, _, _, lanes = board
+            for index, lane in enumerate(lanes):
+                if lane.id == checklist_lane:
+                    lanes[index] = lane.with_checklist(self._checklists.get(checklist_lane))
+                    break
         trigger_counts = dict(Counter(t.state for t in self._triggers.values()))
         claim_count = len(_visible_claims(self._claims, self._lanes, role))
         return board, github, trigger_counts, claim_count, self._freeze_reason
@@ -631,12 +671,24 @@ class MemoryStore:
         )
         cursor = await self.fetch_cursor(repository, PULL_REQUESTS)
         seq, items, counts, lanes = await self.read_board(role)
-        projected = [
-            with_projected_pr(lane, pr.number, pr.head_sha)
-            if (pr := _branch_pull(self._pulls, repository, lane.branch)) is not None
-            else with_projected_pr(lane, None, None)
-            for lane in lanes
-        ]
+        projected: list[Lane] = []
+        for lane in lanes:
+            if lane.state == "ready" and (checklist := self._checklists.get(lane.id)) is not None:
+                pr = self._pulls.get((repository, checklist.pr))
+                if (
+                    checklist.state == "pending"
+                    and pr is not None
+                    and pr.state == "open"
+                    and checklist.matches(pr)
+                ):
+                    projected.append(with_projected_pr(lane, pr.number, pr.head_sha))
+                    continue
+            pr = _branch_pull(self._pulls, repository, lane.branch)
+            projected.append(
+                with_projected_pr(lane, pr.number, pr.head_sha)
+                if pr is not None
+                else with_projected_pr(lane, None, None)
+            )
         return (seq, items, counts, projected), GitHubSummary(
             opened, cursor.as_of if cursor else None
         )
@@ -646,6 +698,17 @@ class MemoryStore:
     ) -> tuple[int, list[Claim]]:
         claims = _visible_claims(self._claims, self._lanes, role, lane)
         return self._seq, claims[offset : offset + limit]
+
+    async def read_brief_claims(self, worker: str) -> tuple[str | None, list[Claim]]:
+        lane = next(
+            (
+                lane.id
+                for lane in self._lanes.values()
+                if lane.worker == worker and lane.state != "archived"
+            ),
+            None,
+        )
+        return lane, _visible_claims(self._claims, self._lanes, "orchestrator")
 
     async def read_overlaps(
         self, role: str, lane: str | None, pr: int | None, offset: int, limit: int

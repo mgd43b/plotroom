@@ -4,6 +4,7 @@ import asyncio
 import base64
 import re
 import tempfile
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,14 +16,15 @@ import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable, LocalGitHubCredential
 from plotroom.adapters.github.read import GitHubReadClient, Row, obj
-from plotroom.ports.work_items import WorkItem
+from plotroom.ports.work_items import MAX_WORK_ITEM_BODY_BYTES, WorkItem
 
 _STORE_CONFIG = PurePosixPath("_bmad/custom/ticketing-store-config.toml")
 _MAX_ENTRIES = 512
-_MAX_FILE_BYTES = 512 * 1024
+_MAX_FILE_BYTES = MAX_WORK_ITEM_BODY_BYTES
 _MAX_TREE_BYTES = 16 * 1024 * 1024
 _MAX_DIRECTORY_ENTRIES = 4096
 _BLOB_BATCH = 8
+_BODY_CACHE_ENTRIES = 16
 _FETCH_TIMEOUT = 60
 _SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 
@@ -207,6 +209,7 @@ class GitHubTicketTree:
         tree: str,
         read_tree: Callable[[Path, Path], Awaitable[tuple[WorkItem, ...]]],
         *,
+        read_body: Callable[[Path, Path, str], Awaitable[str | None]],
         transport: httpx.AsyncBaseTransport | None = None,
         cooling_down: Callable[[], Awaitable[bool]] | None = None,
         report_rate_limit: Callable[[GitHubRateLimited], Awaitable[None]] | None = None,
@@ -215,13 +218,37 @@ class GitHubTicketTree:
         self._credential = credential
         self._tree = validate_tree_path(tree)
         self._read_tree = read_tree
+        self._read_body = read_body
         self._transport = transport
         self._cooling_down = cooling_down
         self._report_rate_limit = report_rate_limit
         self._cached: tuple[str, tuple[WorkItem, ...]] | None = None
+        self._body_cache: OrderedDict[tuple[str, str], str] = OrderedDict()
         self._retry_until: datetime | None = None
 
     async def ready_items(self) -> tuple[WorkItem, ...]:
+        return await self._fetch(self._read_commit)
+
+    async def body(self, ref: str) -> str | None:
+        async def read(git: _GitObjects) -> str | None:
+            commit, root_sha = await git.default_commit()
+            key = (commit, ref)
+            if key in self._body_cache:
+                self._body_cache.move_to_end(key)
+                return self._body_cache[key]
+            body = await self._read_tree_at(
+                git, root_sha, lambda tree, root: self._read_body(tree, root, ref)
+            )
+            if body is not None:
+                self._body_cache[key] = body
+                self._body_cache.move_to_end(key)
+                if len(self._body_cache) > _BODY_CACHE_ENTRIES:
+                    self._body_cache.popitem(last=False)
+            return body
+
+        return await self._fetch(read)
+
+    async def _fetch[T](self, read: Callable[[_GitObjects], Awaitable[T]]) -> T:
         if self._cooling_down is not None and await self._cooling_down():
             raise GitHubTicketTreeError("GitHub rate limit reached")
         if self._retry_until is not None and datetime.now(UTC) < self._retry_until:
@@ -234,7 +261,7 @@ class GitHubTicketTree:
                 ) as client,
                 asyncio.timeout(_FETCH_TIMEOUT),
             ):
-                return await self._read_commit(_GitObjects(self._api, client, token))
+                return await read(_GitObjects(self._api, client, token))
         except GitHubRateLimited as exc:
             if self._report_rate_limit is not None:
                 await self._report_rate_limit(exc)
@@ -248,6 +275,13 @@ class GitHubTicketTree:
         commit, root_sha = await git.default_commit()
         if self._cached is not None and self._cached[0] == commit:
             return self._cached[1]
+        items = await self._read_tree_at(git, root_sha, self._read_tree)
+        self._cached = (commit, items)
+        return items
+
+    async def _read_tree_at[T](
+        self, git: _GitObjects, root_sha: str, read: Callable[[Path, Path], Awaitable[T]]
+    ) -> T:
         scope = self._tree.parent if self._tree.name == "tickets" else self._tree
         if scope.name.startswith("epic-") and scope.parent.name == "tickets":
             scope = scope.parent.parent
@@ -278,9 +312,7 @@ class GitHubTicketTree:
             for child in directories:
                 _destination(checkout, child).mkdir(parents=True, exist_ok=True)
             await self._materialize(git, checkout, files)
-            items = await self._read_tree(tree, _destination(checkout, project))
-        self._cached = (commit, items)
-        return items
+            return await read(tree, _destination(checkout, project))
 
     @staticmethod
     async def _materialize(

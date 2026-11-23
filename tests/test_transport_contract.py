@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from itertools import count
 from pathlib import Path
@@ -14,10 +14,11 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from conftest import write_config
+from conftest import BRIEF_TICKET_BODY, BRIEF_TICKET_REF, make_brief_ticket, write_config
 from drain_standin import DrainStandIn
 from fakes import FixedClock
 from plotroom.adapters.github import GitHubPoller
+from plotroom.adapters.work_items_bmad import BmadTicketTree
 from plotroom.app.config import load_config
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import IssuedToken, TokenRegistry
@@ -34,6 +35,7 @@ CHECK_TIME = "2026-11-23T11:59:59.000000Z"
 TOOL_NAMES = {
     "next",
     "snapshot",
+    "brief",
     "merge_gate",
     "freeze",
     "unfreeze",
@@ -43,6 +45,7 @@ TOOL_NAMES = {
     "lane_update",
     "lane_ready",
     "lane_archive",
+    "checklist_done",
     "deploy_report",
     "run_report",
     "budget_open",
@@ -70,6 +73,7 @@ WRITER_TOOLS = {
     "lane_update",
     "lane_ready",
     "lane_archive",
+    "checklist_done",
     "deploy_report",
     "run_report",
     "budget_open",
@@ -89,7 +93,7 @@ REPORT_ARGUMENTS = {
     },
     "run_report": {"lane": "lane", "run_id": "fixture-run", "state": "succeeded"},
 }
-BUDGET_ARGUMENTS = {
+BUDGET_ARGUMENTS: dict[str, Any] = {
     "run": "fixture-paid-run",
     "lane": "lane",
     "cap_usd": 1.25,
@@ -112,6 +116,7 @@ class Endpoint:
     drain: IssuedToken
     worker: IssuedToken
     departed: asyncio.Queue[str]
+    body_reads: list[str] = field(default_factory=lambda: [])
 
 
 @pytest.fixture
@@ -119,10 +124,20 @@ async def endpoint(
     tmp_path: Path, token_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncGenerator[Endpoint]:
     config = write_config(tmp_path)
+    tree, installation = make_brief_ticket(tmp_path)
     config.write_text(
-        config.read_text() + 'drain_session = "fixture-drain"\n[projects.demo.workers.fixture]\n'
+        config.read_text() + f'ticket_tree = "{tree}"\nbmad_installation = "{installation}"\n'
+        'drain_session = "fixture-drain"\n[projects.demo.workers.fixture]\n'
         'claude_session = "fixture-session"\n[projects.demo.github]\n'
-        'repository = "fixture/project"\nmin_checks = 1\n',
+        'repository = "fixture/project"\nmin_checks = 1\n'
+        "[projects.demo.workers.first]\n[projects.demo.workers.second]\n"
+        "[projects.demo.brief]\n"
+        'plan = "Inspect, change, verify."\nresult = "Status and evidence."\n'
+        'standing_rules = ["Use fixture data.", "Keep {worker} literal."]\n'
+        'template = """\n'
+        "Brief {worker} for {work_item}\n\n{source_text}\n"
+        "Paths\n{paths}\n\nDon't touch\n{dont_touch}\n\n"
+        'Plan\n{plan}\n\nRESULT\n{result}\n\nRules\n{standing_rules}\n"""\n',
         encoding="utf-8",
     )
     options = load_config(config, {})
@@ -132,7 +147,15 @@ async def endpoint(
     worker_token = registry.issue("demo", "worker:fixture", local=True)
     daemon = Daemon(options, clock=FixedClock(datetime.fromisoformat(FIXTURE_TIME)))
     departed: asyncio.Queue[str] = asyncio.Queue()
+    body_reads: list[str] = []
     waiting = Watchers.waiting
+    read_body = BmadTicketTree.body
+
+    async def observed_body(self: BmadTicketTree, ref: str) -> str | None:
+        body_reads.append(ref)
+        return await read_body(self, ref)
+
+    monkeypatch.setattr(BmadTicketTree, "body", observed_body)
 
     @contextmanager
     def observed(self: Watchers, role: str) -> Generator[None]:
@@ -179,7 +202,13 @@ async def endpoint(
         )
         ledger.github_error = None
         yield Endpoint(
-            f"http://127.0.0.1:{port}/mcp", config, token, drain_token, worker_token, departed
+            f"http://127.0.0.1:{port}/mcp",
+            config,
+            token,
+            drain_token,
+            worker_token,
+            departed,
+            body_reads,
         )
     finally:
         daemon.stop()
@@ -284,6 +313,10 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         for tool in listed["result"]["tools"]:
             if tool["name"] in WRITER_TOOLS:
                 assert "request_id" in tool["inputSchema"]["required"]
+            if tool["name"] == "brief":
+                assert set(tool["inputSchema"]["required"]) == {"work_item", "worker"}
+                assert tool["inputSchema"]["properties"]["work_item"]["type"] == "string"
+                assert tool["inputSchema"]["properties"]["worker"]["type"] == "string"
             if tool["name"] in REPORT_ARGUMENTS:
                 assert set(tool["inputSchema"]["required"]) == {
                     "request_id",
@@ -302,7 +335,7 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         called: set[str] = set()
         request_ids = count(21)
 
-        async def call(name: str, **args: Any) -> dict[str, Any]:
+        async def call(name: str, *, error: str | None = None, **args: Any) -> dict[str, Any]:
             called.add(name)
             number = next(request_ids)
             if name in WRITER_TOOLS:
@@ -311,10 +344,17 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             assert "result" in reply, reply
             assert not reply["result"].get("isError", False), reply
             payload = json.loads(reply["result"]["content"][0]["text"])
+            if error is not None:
+                assert payload["error"]["code"] == error, payload
+                return {}
             assert payload["ok"], payload
             return payload["data"]
 
         assert (await call("snapshot"))["lanes"] == {}
+        assert (
+            BRIEF_TICKET_BODY
+            in (await call("brief", work_item=BRIEF_TICKET_REF, worker="fixture"))["brief"]
+        )
         gate = await call("merge_gate", pr=1)
         assert gate["verdict"] == "REFUSE"
         assert (gate["head_sha"], gate["as_of"]) == ("a" * 40, CHECK_TIME)
@@ -405,6 +445,7 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         assert route_item["dedup_key"] == "route_missing:inspect"
         await call("route", action_kind="inspect", lane="lane")
         assert (await call("lane_ready", lane="lane", pr=1, head_sha="a" * 40))["state"] == "ready"
+        await call("checklist_done", lane="lane", step="fixture", error="conflict")
         assert (await call("claim", lane="lane", globs=["src/**"], reason="fixture"))["changed"]
         assert (await call("claims", lane="lane"))["claims"][0]["reason"] == "fixture"
         assert (await call("overlaps", lane="lane"))["items"] == []
@@ -469,6 +510,7 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             **ROUTE_ARGUMENTS,
             "budget_open": BUDGET_ARGUMENTS.copy(),
             "ack": {"item": "fixture"},
+            "brief": {"work_item": BRIEF_TICKET_REF, "worker": "fixture"},
             "merge_gate": {"pr": 1},
             "freeze": {"reason": "fixture"},
             "claim": {"lane": "fixture", "globs": ["src/**"], "reason": "fixture"},
@@ -483,6 +525,7 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             "lane_update": {"lane": "fixture", "waiting_on": None},
             "lane_ready": {"lane": "fixture", "pr": 1, "head_sha": "a" * 40},
             "lane_archive": {"lane": "fixture"},
+            "checklist_done": {"lane": "fixture", "step": "fixture"},
             "ingest": {"kind": "claude.session_message", "session_id": "fixture", "body": "test"},
             "trigger": {
                 "predicate": {"pr_merged": {"number": 1}},
@@ -540,6 +583,69 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             reply = await send(message(era, number, "tools/call", name=name, arguments=args))
             payload = json.loads(reply["result"]["content"][0]["text"])
             assert payload["error"]["code"] == "forbidden"
+
+
+@pytest.mark.parametrize("transport", ["http", "stdio"])
+async def test_brief_reports_current_claims_exactly(endpoint: Endpoint, transport: str) -> None:
+    numbering = count(1)
+
+    async def call(send: Request, tool: str, **args: Any) -> dict[str, Any]:
+        number = next(numbering)
+        if tool in WRITER_TOOLS:
+            args["request_id"] = f"brief-fixture-{number}"
+        reply = await send(message("modern", number, "tools/call", name=tool, arguments=args))
+        assert not reply["result"].get("isError", False), reply
+        payload: dict[str, Any] = json.loads(reply["result"]["content"][0]["text"])
+        return payload
+
+    def expected(paths: str, dont_touch: str) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "data": {
+                "brief": (
+                    f"Brief fixture for 1\n\n{BRIEF_TICKET_BODY}\n"
+                    f"Paths\n{paths}\n\nDon't touch\n{dont_touch}\n\n"
+                    "Plan\nInspect, change, verify.\n\nRESULT\nStatus and evidence.\n\n"
+                    "Rules\n- Use fixture data.\n- Keep {worker} literal.\n"
+                )
+            },
+        }
+
+    async with asyncio.timeout(15), connection(endpoint, transport, "modern") as send:
+
+        async def start(lane: str, worker: str, path: str, reason: str) -> None:
+            assert (
+                await call(send, "lane_start", lane=lane, worker=worker, branch=lane, work_items=[])
+            )["ok"]
+            assert (await call(send, "claim", lane=lane, globs=[path], reason=reason))["ok"]
+
+        await start("second-lane", "second", "docs/**", "copy")
+        await start("first-lane", "first", "src/**", "implementation")
+        other_claims = "- src/** (first-lane: implementation)\n- docs/** (second-lane: copy)"
+        args = {"work_item": BRIEF_TICKET_REF, "worker": "fixture"}
+        assert await call(send, "brief", **args) == expected("", other_claims)
+
+        await start("brief-lane", "fixture", "tests/**", "verification")
+        assert await call(send, "brief", **args) == expected(
+            "- tests/** (verification)", other_claims
+        )
+        assert (await call(send, "release", lane="first-lane", globs=["src/**"]))["ok"]
+        assert await call(send, "brief", **args) == expected(
+            "- tests/** (verification)", "- docs/** (second-lane: copy)"
+        )
+        assert (await call(send, "brief", work_item=BRIEF_TICKET_REF, worker="absent"))["error"][
+            "code"
+        ] == "not_found"
+        assert (await call(send, "brief", work_item="missing", worker="fixture"))["error"][
+            "code"
+        ] == "not_found"
+
+    async with (
+        asyncio.timeout(15),
+        connection(replace(endpoint, token=endpoint.worker), transport, "modern") as send,
+    ):
+        assert (await call(send, "brief", **args))["error"]["code"] == "forbidden"
+    assert endpoint.body_reads == [BRIEF_TICKET_REF, BRIEF_TICKET_REF, BRIEF_TICKET_REF, "missing"]
 
 
 @pytest.mark.parametrize("era", ERAS)

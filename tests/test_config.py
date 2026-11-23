@@ -123,6 +123,11 @@ def test_no_file_at_the_default_location_leaves_environment_and_defaults(
         ("allowed_hosts = []\n[projects.a]\n", "must not be empty"),
         ("allowed_hosts = [1]\n[projects.a]\n", "list of strings"),
         ("projects = 3\n", "table of"),
+        ('[projects.a]\nbrief = "no"\n', r"projects.a.brief must be a table"),
+        ('[projects.a.brief]\ntemplate = "{worker.name}"\n', "invalid brief template field"),
+        ('[projects.a.brief]\ntemplate = "{source_text}"\n', "missing brief template fields"),
+        ('[projects.a.brief]\ntemplate = "{"\n', "projects.a.brief.template"),
+        ("[projects.a.brief]\nstanding_rules = [1]\n", "standing_rules must be a non-empty string"),
         ("this is = not toml\n", "cannot read config"),
     ],
 )
