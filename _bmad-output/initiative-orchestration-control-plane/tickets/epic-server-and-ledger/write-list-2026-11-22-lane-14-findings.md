@@ -1,6 +1,6 @@
 # Write-list: tree pass 2026-11-22, lane #14 findings on epic 1 (branch tree/epic-1-findings)
 
-Status: HELD, waiting for the go-ahead. Nothing below has been done.
+Status: PUBLISHED 2026-11-22 on the coordinator's "publish", given under mgd43b's delegation in this session ("don't ask me things - coordinate with @[Plotroom coordination] - listen to what they say and action it"). Created #90 (1.17) and #91 (1.18) under #1, each blocked by #13; #26 blocked by both; bodies of #16, #24, #26 and #1 edited; #16 gained hitl and #24 lost it. Verified on GitHub.
 
 Summary: 2 new issues, 4 body edits, 2 parent links, 4 blocked-by relations, 2 label changes, no comments, nothing closed.
 
