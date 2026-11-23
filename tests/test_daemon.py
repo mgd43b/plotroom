@@ -271,15 +271,16 @@ async def test_cancelling_during_uvicorns_own_shutdown_waits_for_it_and_keeps_th
     await stop(again, task2)
 
 
-async def test_project_teardown_uses_the_original_sigint_handler(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+async def test_embedded_project_teardown_uses_the_original_signal_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signum: signal.Signals
 ) -> None:
-    original_handler = signal.getsignal(signal.SIGINT)
+    original_handler = signal.getsignal(signum)
     close_handlers: list[object] = []
     close = SqliteStore.close
 
     async def record_handler(store: SqliteStore) -> None:
-        close_handlers.append(signal.getsignal(signal.SIGINT))
+        close_handlers.append(signal.getsignal(signum))
         await close(store)
 
     monkeypatch.setattr(SqliteStore, "close", record_handler)

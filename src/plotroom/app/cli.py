@@ -135,7 +135,7 @@ def _serve(config_path: Path | None, log_file: Path | None) -> int:
             log.error("cannot open the log file", extra={"path": str(log_file), "reason": str(exc)})
             return EXIT_FAILURE
     try:
-        asyncio.run(Daemon(config).run())
+        asyncio.run(Daemon(config).run_as_service())
     except LockError as exc:
         # The winner owns the log file: a loser must not roll or delete it through its own handler.
         setup_logging(sys.stderr)

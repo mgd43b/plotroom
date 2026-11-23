@@ -8,7 +8,6 @@ import logging
 import signal
 import sqlite3
 import threading
-from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
@@ -42,28 +41,6 @@ class _Server(uvicorn.Server):
         self._data_dir = data_dir
 
     _shutdown_task: asyncio.Task[None] | None = None
-
-    @contextlib.contextmanager
-    def defer_sigterm(self) -> Generator[None]:
-        """Hold SIGTERM until the daemon is done, including when uvicorn replays it."""
-        if threading.current_thread() is not threading.main_thread():
-            yield
-            return
-
-        received = False
-
-        def defer(_signal: int, _frame: FrameType | None) -> None:
-            nonlocal received
-            received = True
-            self.should_exit = True
-
-        previous = signal.signal(signal.SIGTERM, defer)
-        try:
-            yield
-        finally:
-            signal.signal(signal.SIGTERM, previous)
-            if received:
-                signal.raise_signal(signal.SIGTERM)
 
     def shutdown_task(self, sockets: Any = None) -> asyncio.Task[None]:
         """The one task that shuts uvicorn down, started on first use by whoever needs it."""
@@ -133,6 +110,7 @@ class Daemon:
         )
         self._started: asyncio.Future[int] | None = None
         self._server: _Server | None = None
+        self._received_sigterm = False
 
     async def wait_started(self) -> int:
         """The port the server is listening on, once it is."""
@@ -143,6 +121,26 @@ class Daemon:
     def stop(self) -> None:
         if self._server is not None:
             self._server.should_exit = True
+
+    async def run_as_service(self) -> None:
+        """Serve from the CLI, replaying SIGTERM after releasing the data directory."""
+        if threading.current_thread() is not threading.main_thread():
+            await self.run()
+            return
+        # Uvicorn saves this handler, then calls it when replaying SIGTERM after HTTP shutdown.
+        # SIGINT still follows Uvicorn's and asyncio's usual handling.
+        previous = signal.signal(signal.SIGTERM, self._handle_sigterm)
+        try:
+            await self.run()
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+            if self._received_sigterm:
+                self._received_sigterm = False
+                signal.raise_signal(signal.SIGTERM)
+
+    def _handle_sigterm(self, _signal: int, _frame: FrameType | None) -> None:
+        self._received_sigterm = True
+        self.stop()
 
     @property
     def ledgers(self) -> dict[str, Ledger]:
@@ -158,7 +156,7 @@ class Daemon:
         config = self._config
         if self._started is None:
             self._started = asyncio.get_running_loop().create_future()
-        with contextlib.ExitStack() as signals, DataDirLock(config.data_dir):
+        with DataDirLock(config.data_dir):
             # Whatever an earlier daemon left behind is not this one's: gone before it binds.
             remove_port(config.data_dir)
             try:
@@ -182,9 +180,8 @@ class Daemon:
                     access_log=False,
                 )
                 self._server = _Server(uvicorn_config, self._started, config.data_dir)
-                # Defer the SIGTERM uvicorn replays until the projects have closed and the lock
-                # is released. Uvicorn still restores and replays SIGINT on its usual schedule.
-                signals.enter_context(self._server.defer_sigterm())
+                if self._received_sigterm:  # opening finished after a stop request
+                    return
                 serving = asyncio.ensure_future(self._announce())
                 try:
                     await self._server.serve()
