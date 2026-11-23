@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StrictBool
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from plotroom.core.clerk_import import PullImportRow, SkipImportRow, TriggerImportRow
 from plotroom.core.envelope import err, ok
 from plotroom.core.events import LedgerError
 from plotroom.core.intake import record_claude
@@ -108,6 +111,15 @@ def _project_request(ctx: Context[Any, Request]) -> ProjectRequest:
         raise RuntimeError("MCP tool called without an HTTP request")
     caller: ProjectRequest = request.state.plotroom
     return caller
+
+
+def _private_local_request(ctx: Context[Any, Request]) -> bool:
+    request = ctx.request_context.request
+    if request is None:
+        return False
+    # Uvicorn supplies the Unix socket path and no port for the private listener.
+    address = request.scope.get("server")
+    return address is not None and address[1] is None and address[0].startswith("/")
 
 
 async def execute_command(
@@ -486,6 +498,41 @@ def build_app(
         )
 
     @server.tool()
+    async def clerk_import(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        triggers: list[TriggerImportRow],
+        pulls: list[PullImportRow],
+        skips: list[SkipImportRow],
+        ledger_repository: str | None = None,
+    ) -> dict[str, Any]:
+        """Import typed clerk template rows over the private local listener."""
+        if not _private_local_request(ctx):
+            return err("forbidden", "clerk import requires the private local listener")
+        args: dict[str, Any] = {"triggers": triggers, "pulls": pulls, "skips": skips}
+        if ledger_repository is not None:
+            args["ledger_repository"] = ledger_repository
+        canonical = json.dumps(args, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        request_id = "clerk-import:" + hashlib.sha256(canonical.encode()).hexdigest()
+        return await execute_command(ctx, "clerk_import", request_id, args)
+
+    @server.tool()
+    async def checklist_import(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        lane: str,
+        rows: list[ReadyChecklistEntry],
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Import checklist rows for the current projected PR of a lane."""
+        if not _private_local_request(ctx):
+            return err("forbidden", "checklist import requires the private local listener")
+        return await execute_command(
+            ctx,
+            "checklist_import",
+            request_id,
+            {"lane": lane, "rows": [row.model_dump() for row in rows]},
+        )
+
+    @server.tool()
     async def checklist_done(  # pyright: ignore[reportUnusedFunction]
         ctx: Context[Any, Request],
         lane: str,
@@ -546,18 +593,24 @@ def build_app(
         request_id: str,
         lane: str | None = None,
         mode: Literal["once", "every"] = "once",
+        imported_fired: StrictBool = False,
     ) -> dict[str, Any]:
         """Register a once or every trigger. A predicate can be {"pr_merged":{"number":42}} or use
         branch_glob instead of number. all_of and any_of take arrays of predicates.
         Use {"checklist_empty":{"lane":"name"}} to react when the last active step closes.
         An action object names one of notify_orchestrator (text), send (worker, text),
-        mark (lane, state), or propose_archive (lane).
+        mark (lane, state), or propose_archive (lane). On the private local listener,
+        imported_fired records a previously fired once trigger without delivering it.
         """
         args: dict[str, Any] = {"predicate": predicate, "action": action}
         if lane is not None:
             args["lane"] = lane
         if mode != "once":
             args["mode"] = mode
+        if imported_fired:
+            if not _private_local_request(ctx):
+                return err("forbidden", "imported_fired requires the private local listener")
+            args["imported_fired"] = True
         return await execute_command(ctx, "trigger", request_id, args)
 
     @server.tool()
