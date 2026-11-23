@@ -3,7 +3,7 @@ title: 'Tests can lose their daemon''s port between picking and binding it'
 type: bugfix
 ticket: 18
 created: '2026-11-22'
-status: in-review
+status: built
 baseline_revision: 'd251a325b32079265efce6e07fe4dee53e706197'
 route: full
 route_source: auto
@@ -63,7 +63,7 @@ context:
 - [x] `src/plotroom/app/serve.py` -- publish and remove the bound port -- the daemon is the only one who knows it.
 - [x] `src/plotroom/app/daemon_start.py`, `src/plotroom/adapters/mcp/proxy.py`, `src/plotroom/app/cli.py` -- read the port back and adopt it -- on-demand tests need no pre-picked port.
 - [x] `tests/` -- convert every daemon start to port 0; add: published port equals the `serving` port and answers; the file is gone after stop and after a clean exit; a stale file naming a live foreign MCP listener is never used; SIGKILL then a new client reaches the new daemon on its new port; two data directories each reach their own daemon.
-- [ ] Ticket file -- set `status`, add `Built: <PR>`, record a decision (port 0 now means "discover") in the epic notes.
+- [x] Ticket file -- set `status`, add `Built: <PR>`, record a decision (port 0 now means "discover") in the epic notes.
 
 **Acceptance Criteria:**
 - Given a daemon started with port 0, when it is serving, then the port file's port equals the `serving` line's port and an MCP `ping` answers there.
@@ -76,7 +76,7 @@ context:
 - `tests/conftest.py` `write_config` gained `port` and `name` parameters (defaults keep every caller as before); the two-configs-one-directory test needs a second, fixed-port config file.
 - `daemon_start.current_url` is public (async, runs the blocking reads off the loop) so tests can call it directly. The failure messages for port 0 read: "it has published no address that answers" and no `at <url>` in the timeout message; fixed-port messages are unchanged.
 - Risk, narrowed (`lock.py` is out of scope): `lock_owner` probes by taking the lock for an instant. `current_url` skips the probe when the file's pid is dead (the SIGKILL case), so only a stale file naming a live pid that holds no lock reaches it; a child starting in that window can lose the lock, exit with the lock code and be started again. It self-heals but logs one spurious "data directory is locked" line.
-- Open: ticket file `status` and `Built: <PR>` wait for the PR, as with the other plans.
+- Done after the PR (#128): ticket `status: built` and the `Built:` note.
 
 ## Plan Change Log
 
