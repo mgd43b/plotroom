@@ -30,13 +30,19 @@ INSERT_EVENT = text(
     "INSERT INTO events (seq, id, source, kind, upstream_id, lane_id, fields, body, observed_at) "
     "VALUES (:seq, :id, :source, :kind, :uid, :lane_id, :fields, :body, :observed_at)"
 )
-FIND_CLAUDE_TURN = text(
-    "SELECT events.* FROM claude_turn_aliases AS alias JOIN events ON events.id = alias.event_id "
-    "WHERE alias.session = :session AND alias.alias = :alias"
-)
+FIND_CLAUDE_TURN = text("""
+    SELECT events.* FROM claude_turn_aliases AS matched JOIN events ON events.id = matched.event_id
+    WHERE matched.session = :session AND matched.alias = :alias
+      AND (:index_alias IS NULL OR NOT EXISTS (
+        SELECT 1 FROM claude_turn_aliases AS indexed
+        WHERE indexed.event_id = matched.event_id AND indexed.session = matched.session
+          AND indexed.alias GLOB 'index:*' AND indexed.alias != :index_alias
+      ))
+    ORDER BY events.seq DESC LIMIT 1
+""")
 BIND_CLAUDE_TURN = text(
     "INSERT INTO claude_turn_aliases (session, alias, event_id) VALUES (:session, :alias, :event) "
-    "ON CONFLICT (session, alias) DO NOTHING"
+    "ON CONFLICT DO NOTHING"
 )
 FIND_NOOP_RECEIPT = text(
     "SELECT receipt FROM noop_command_receipts WHERE command = :command AND request_key = :key"
@@ -107,9 +113,10 @@ class SqliteTransaction:
         )
 
     async def find_claude_turn(self, session: str, aliases: tuple[str, ...]) -> Event | None:
+        index = next((alias for alias in aliases if alias.startswith("index:")), None)
         for alias in aliases:
             result = await self._live().execute(
-                FIND_CLAUDE_TURN, {"session": session, "alias": alias}
+                FIND_CLAUDE_TURN, {"session": session, "alias": alias, "index_alias": index}
             )
             if (row := result.first()) is not None:
                 return event_from_row(row)

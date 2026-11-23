@@ -167,7 +167,9 @@ async def test_a_mutating_tool_uses_the_authenticated_role_and_project_ledger(
 
     monkeypatch.setattr("plotroom.adapters.mcp.server.MCPServer", fixture_server)
 
-    def fixture_catalog(_workers: frozenset[str]) -> Catalog:
+    def fixture_catalog(
+        _workers: frozenset[str], *, github_repository: str | None = None
+    ) -> Catalog:
         return catalog
 
     monkeypatch.setattr("plotroom.app.serve.build_catalog", fixture_catalog)

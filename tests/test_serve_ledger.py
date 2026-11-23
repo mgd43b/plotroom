@@ -22,7 +22,9 @@ from test_daemon import make_config, run_daemon, stop
 
 @pytest.fixture(autouse=True)
 def fixture_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    def build_fixture_catalog(_workers: frozenset[str]) -> Catalog:
+    def build_fixture_catalog(
+        _workers: frozenset[str], *, github_repository: str | None = None
+    ) -> Catalog:
         return Fixture().catalog
 
     monkeypatch.setattr(serve, "build_catalog", build_fixture_catalog)

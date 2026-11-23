@@ -16,9 +16,9 @@ from typing import Any
 
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.actions import Action
-from plotroom.core.catalog import Catalog, build_catalog
-from plotroom.core.commands import Command, CommandError
-from plotroom.core.events import AppendResult, EventKind, FieldSpec, NewEvent
+from plotroom.core.catalog import Catalog
+from plotroom.core.commands import Command, CommandError, CommandRegistry
+from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
 from plotroom.core.github import PULL_REQUESTS, FetchCursor, GitHubSummary, PullRequest
 from plotroom.core.lanes import Lane
@@ -59,7 +59,7 @@ class _MemoryTransaction:
         self.actions: dict[str, Action] = {}
         self.lanes: dict[str, Lane] = {}
         self.work_items: tuple[WorkItem, ...] = ()
-        self.claude_turns: dict[tuple[str, str], str] = {}
+        self.claude_turns: dict[tuple[str, str], set[str]] = {}
         self.pulls: dict[tuple[str, int], PullRequest] = {}
         self.fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
         self.seq = seq
@@ -84,15 +84,25 @@ class _MemoryTransaction:
 
     async def find_claude_turn(self, session: str, aliases: tuple[str, ...]) -> StoredEvent | None:
         self._live()
+        index = next((alias for alias in aliases if alias.startswith("index:")), None)
+        incompatible = {
+            event
+            for (owner, key), events in self.claude_turns.items()
+            if index is not None and owner == session and key.startswith("index:") and key != index
+            for event in events
+        }
         for alias in aliases:
-            if (event := self.claude_turns.get((session, alias))) is not None:
-                return next(copy.deepcopy(row) for row in self.events if row.id == event)
+            matches = self.claude_turns.get((session, alias), set()) - incompatible
+            if matches:
+                return next(
+                    copy.deepcopy(row) for row in reversed(self.events) if row.id in matches
+                )
         return None
 
     async def bind_claude_turn(self, session: str, aliases: tuple[str, ...], event: str) -> None:
         self._live()
         for alias in aliases:
-            self.claude_turns.setdefault((session, alias), event)
+            self.claude_turns.setdefault((session, alias), set()).add(event)
 
     async def replace_work_items(self, items: tuple[WorkItem, ...]) -> None:
         self._live()
@@ -224,7 +234,7 @@ class MemoryStore:
         self._actions: dict[str, Action] = {}
         self._lanes: dict[str, Lane] = {}
         self._work_items: tuple[WorkItem, ...] = ()
-        self._claude_turns: dict[tuple[str, str], str] = {}
+        self._claude_turns: dict[tuple[str, str], set[str]] = {}
         self._pulls: dict[tuple[str, int], PullRequest] = {}
         self._fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
         self._open = False
@@ -252,7 +262,7 @@ class MemoryStore:
         tx.actions = copy.deepcopy(self._actions)
         tx.lanes = self._lanes.copy()
         tx.work_items = self._work_items
-        tx.claude_turns = self._claude_turns.copy()
+        tx.claude_turns = {key: ids.copy() for key, ids in self._claude_turns.items()}
         tx.pulls = self._pulls.copy()
         tx.fetch_cursors = self._fetch_cursors.copy()
         try:
@@ -344,8 +354,8 @@ class Fixture:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
-        self.catalog: Catalog = build_catalog()
-        events = self.catalog.events
+        events = EventRegistry()
+        self.catalog = Catalog(events, CommandRegistry(events))
         events.register(
             EventKind(
                 "github.pr_merged",

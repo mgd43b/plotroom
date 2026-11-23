@@ -135,3 +135,30 @@ def test_desktop_config_uses_explicit_roots_and_session_binding(tmp_path: Path) 
     assert settings.claude_home == tmp_path / "claude"
     assert settings.app_support == tmp_path / "desktop"
     assert settings.sessions == {SESSION: "fixture"}
+
+
+async def test_identical_report_text_does_not_merge_distinct_indexed_turns(tmp_path: Path) -> None:
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    ledger = Ledger(store, build_catalog(), FixedClock())
+    ledger.start()
+
+    async def ingest(index: int | None, text: str = REPORT) -> tuple[str, bool]:
+        report = SessionEvent(TURN_REPORT, SESSION, text, turn_index=index)
+        result = await ledger.run("system", lambda uow: record_claude(uow, report))
+        return result.event.id, result.created
+
+    try:
+        first, created = await ingest(None)
+        assert created
+        assert await ingest(1) == (first, False)
+        second, created = await ingest(2)
+        assert created
+        assert second != first
+        assert await ingest(None) == (second, False)
+        assert await ingest(1, "alternate report") == (first, False)
+        assert await ingest(None, "alternate report") == (first, False)
+        assert len(await ledger.events_after(0)) == 2
+    finally:
+        await ledger.stop()
+        await store.close()
