@@ -2,19 +2,25 @@ import shutil
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from alembic.script import ScriptDirectory
 
+from conftest import authenticated_client, tool_json
 from fakes import FixedClock
 from plotroom.adapters.store_sqlite import SqliteStore, head_revision, script_heads
 from plotroom.adapters.store_sqlite.migrate import MIGRATIONS_DIR, alembic_config, upgrade_to_head
+from plotroom.app.config import GitHubConfig
+from plotroom.app.serve import Daemon
 from plotroom.core.catalog import build_catalog
+from plotroom.core.claims import TICKET_TREE_MOVE
 from plotroom.core.events import NewEvent
 from plotroom.core.github import ObservedPull, apply_pull_poll
-from plotroom.core.github_projection import GitHubResource
+from plotroom.core.github_projection import FILES, GitHubRecord, GitHubResource, apply_resource
 from plotroom.core.ledger import Ledger
 from plotroom.core.unit_of_work import UnitOfWork
+from test_daemon import bearer, make_config, run_daemon, stop
 
 
 def test_history_has_exactly_one_head() -> None:
@@ -52,6 +58,98 @@ async def test_migrating_twice_changes_nothing(tmp_path: Path) -> None:
         assert await store.revision() == head_revision()
     finally:
         await store.close()
+
+
+async def test_populated_claims_upgrade_reconciles_existing_tree_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opening a populated predecessor preserves its rows and derives conflicts immediately."""
+    legacy = tmp_path / "predecessor"
+    shutil.copytree(
+        MIGRATIONS_DIR, legacy, ignore=shutil.ignore_patterns("__pycache__", "0013_lane_claims.py")
+    )
+    previous = head_revision(alembic_config(legacy))
+    config = make_config(tmp_path)
+    config.data_dir.mkdir()
+    repo = "fixture/repo"
+    stamp = "2026-11-22T12:00:00Z"
+    store = SqliteStore("demo", config.data_dir)
+    await upgrade_to_head(store._engine, alembic_config(legacy))  # pyright: ignore[reportPrivateUsage]
+    assert await store.revision() == previous
+    ledger = Ledger(store, build_catalog(), FixedClock())
+    pulls = (
+        ObservedPull(1, "editor", "a" * 40, repo, "open", stamp, "Existing edit"),
+        ObservedPull(2, "mover", "b" * 40, repo, "open", stamp, "Existing move"),
+    )
+    story = "tickets/story.md"
+
+    async def existing_facts(uow: UnitOfWork) -> None:
+        await apply_pull_poll(uow, repo, None, pulls, stamp)
+        for pull in pulls:
+            renamed = pull.number == 2
+            path = "tickets/renamed.md" if renamed else story
+            fields = {
+                "head_sha": pull.head_sha,
+                "number": pull.number,
+                "path": path,
+                "status": "renamed" if renamed else "modified",
+            }
+            if renamed:
+                fields["previous_path"] = story
+            record = GitHubRecord(path, "pull_file", fields)
+            await apply_resource(
+                uow,
+                repo,
+                FILES,
+                str(pull.number),
+                GitHubResource((record,), attributes={"head_sha": pull.head_sha}),
+                stamp,
+            )
+
+    ledger.start()
+    try:
+        await ledger.run("system", existing_facts)
+        before = await ledger.events_after(0)
+        assert len(before) == 4
+    finally:
+        await ledger.stop()
+        await store.close()
+
+    monkeypatch.delenv("PLOTROOM_DEMO_GITHUB_TOKEN", raising=False)
+    config = replace(
+        config,
+        github={"demo": GitHubConfig(repo, None, "http://127.0.0.1:1", 60)},
+        github_ticket_trees={"demo": ("tickets", tmp_path)},
+    )
+    token = bearer(config, "demo")
+    observed: list[dict[str, Any]] = []
+    for _ in range(2):
+        daemon = Daemon(config, clock=FixedClock())
+        task, port = await run_daemon(daemon)
+        try:
+            assert await daemon.ledgers["demo"].events_after(0) == before
+            assert (await daemon.ledgers["demo"].pull_request(repo, 1)) is not None
+            async with authenticated_client(f"http://127.0.0.1:{port}/mcp", token) as client:
+                result = tool_json(await client.call_tool("overlaps", {"pr": 2}))
+                (move,) = result["data"]["items"]
+                assert move["kind"] == TICKET_TREE_MOVE
+                assert move["context"]["suggested_order"] == [1, 2]
+                observed.append(result)
+        finally:
+            await stop(daemon, task)
+    assert observed[0] == observed[1]
+    disabled = Daemon(replace(config, github={}, github_ticket_trees={}), clock=FixedClock())
+    task, port = await run_daemon(disabled)
+    try:
+        async with authenticated_client(f"http://127.0.0.1:{port}/mcp", token) as client:
+            result = tool_json(await client.call_tool("overlaps", {"pr": 2}))
+            assert result["data"]["items"] == []
+            assert result["data"]["cursor"] > observed[-1]["data"]["cursor"]
+    finally:
+        await stop(disabled, task)
+    assert script_heads() == ["0013"]
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0013",)
 
 
 async def test_a_file_with_an_unknown_revision_is_not_migrated(tmp_path: Path) -> None:
@@ -187,7 +285,9 @@ async def test_trigger_migration_preserves_projected_prs_and_pending_actions(
     repo = "fixture/project"
     store = SqliteStore("demo", tmp_path)
     catalog = replace(build_catalog(github_repository=repo), trigger_leaves=None)
-    ledger = Ledger(store, catalog, FixedClock(), github_repository=repo)
+    # The seed already carries the repository. Leave feature reconciliation disabled
+    # while writing legacy facts on a schema before the trigger and claim tables.
+    ledger = Ledger(store, catalog, FixedClock())
     timestamp = "2026-11-23T12:00:00.000000Z"
     details = GitHubResource((), attributes={"fixture": True}, generation=1, as_of=timestamp)
 

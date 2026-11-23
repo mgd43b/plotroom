@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import asdict
 from typing import Any
 
+from plotroom.core.claims import OVERLAP_KINDS, Claim
 from plotroom.core.envelope import ok
 from plotroom.core.events import LedgerError
 from plotroom.core.github import GitHubSummary
@@ -48,6 +50,7 @@ def render_snapshot(
     lane_offset: int = 0,
     github: GitHubSummary | None = None,
     github_error: str | None = None,
+    claim_count: int = 0,
     trigger_counts: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     listed: list[dict[str, Any]] = []
@@ -56,6 +59,8 @@ def render_snapshot(
         "cursor": cursor,
         "lanes": lanes,
         "open_items": dict(Counter(item.kind for item in items)),
+        "claims": claim_count,
+        "overlaps": sum(item.kind in OVERLAP_KINDS for item in items),
         "items": listed,
         "left_out": len(items),
     }
@@ -103,15 +108,59 @@ def render_next(
     *,
     has_more: bool = False,
 ) -> dict[str, Any]:
+    return _render_page(
+        cursor,
+        ((asdict(item), {"id": item.id, "kind": item.kind}) for item in items),
+        "items",
+        offset,
+        budget,
+        has_more=has_more,
+    )
+
+
+def render_claims(
+    cursor: int,
+    claims: list[Claim],
+    offset: int,
+    budget: int,
+    *,
+    has_more: bool,
+) -> dict[str, Any]:
+    return _render_page(
+        cursor,
+        ((claim.render(), {"offset": index}) for index, claim in enumerate(claims, offset)),
+        "claims",
+        offset,
+        budget,
+        has_more=has_more,
+        omit_after_rows=False,
+    )
+
+
+def _render_page(
+    cursor: int,
+    rows: Iterable[tuple[dict[str, Any], dict[str, Any]]],
+    field: str,
+    offset: int,
+    budget: int,
+    *,
+    has_more: bool,
+    omit_after_rows: bool = True,
+) -> dict[str, Any]:
     page: list[dict[str, Any]] = []
-    data: dict[str, Any] = {"cursor": cursor, "items": page}
-    for index, item in enumerate(items, start=offset):
+    data: dict[str, Any] = {"cursor": cursor, field: page}
+    for index, (row, minimal) in enumerate(rows, start=offset):
         data["next_offset"] = index + 1
-        if not _add(data, page, asdict(item), budget) and not _add(
-            data, page, {"id": item.id, "kind": item.kind, "details_omitted": True}, budget
+        if _add(data, page, row, budget):
+            continue
+        if (not page or omit_after_rows) and _add(
+            data, page, {**minimal, "details_omitted": True}, budget
         ):
-            data["next_offset"] = index
-            break
+            continue
+        if not page:
+            raise LedgerError("unavailable", "row identity exceeds the configured token budget")
+        data["next_offset"] = index
+        break
     else:
         if not has_more:
             data.pop("next_offset", None)

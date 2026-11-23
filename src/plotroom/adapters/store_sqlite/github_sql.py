@@ -187,6 +187,15 @@ PULL_TARGETS = text("""
     ORDER BY COALESCE(cursor.as_of, ''), pr.updated_at DESC, pr.number
     LIMIT 8
 """)
+OPEN_PULLS = text(
+    "SELECT * FROM github_pull_requests WHERE repository = :repository "
+    "AND complete AND state = 'open' ORDER BY number"
+)
+
+
+async def open_pulls(connection: AsyncConnection, repository: str) -> tuple[PullRequest, ...]:
+    rows = await connection.execute(OPEN_PULLS, {"repository": repository})
+    return tuple(_pull_from_row(row) for row in rows)
 
 
 async def github_resource(

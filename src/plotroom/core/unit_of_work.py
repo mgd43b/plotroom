@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from plotroom.core.actions import Action
+from plotroom.core.claims import Claim, reconcile_claim_pairs
 from plotroom.core.events import (
     AppendResult,
     Event,
@@ -27,6 +28,7 @@ from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
 from plotroom.core.github_projection import GitHubResource
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item, ItemKind
+from plotroom.core.pull_overlaps import reconcile_pull_overlaps
 from plotroom.core.roles import role_family
 from plotroom.ports.clock import Clock
 from plotroom.ports.store import Transaction
@@ -66,6 +68,8 @@ class UnitOfWork:
         self._items: Mapping[str, ItemKind] = items if items is not None else {}
         self._append_role = append_role if append_role is not None else role
         self._id_factory = id_factory
+        self._claims_changed = False
+        self._pulls_changed = False
 
     @property
     def role(self) -> str:
@@ -110,6 +114,32 @@ class UnitOfWork:
 
     async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None:
         return await self._tx.open_branch_pull(repository, branch)
+
+    async def open_pulls(self, repository: str) -> tuple[PullRequest, ...]:
+        return await self._tx.open_pulls(repository)
+
+    async def lane_claims(self, lane: str | None = None) -> list[Claim]:
+        return await self._tx.lane_claims(lane)
+
+    async def save_claims(self, claims: list[Claim]) -> None:
+        await self._tx.save_claims(claims)
+        self._claims_changed = True
+
+    async def delete_claims(self, lane: str, globs: list[str] | None = None) -> None:
+        await self._tx.delete_claims(lane, globs)
+        self._claims_changed = True
+
+    def pull_overlaps_changed(self) -> None:
+        self._pulls_changed = True
+
+    async def refresh_overlaps(self, repository: str | None, tree_path: str | None) -> None:
+        if not self._claims_changed and not (self._pulls_changed and repository is not None):
+            return
+        claims = await self.lane_claims()
+        if self._claims_changed:
+            await reconcile_claim_pairs(self, claims)
+        if repository is not None:
+            await reconcile_pull_overlaps(self, repository, tree_path, claims)
 
     async def save_pull_request(self, pull: PullRequest) -> None:
         await self._tx.save_pull_request(pull)

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from plotroom.adapters.store_sqlite import (
     actions_sql,
+    claims_sql,
     github_sql,
     items_sql,
     lanes_sql,
@@ -19,6 +20,7 @@ from plotroom.adapters.store_sqlite import (
     work_items_sql,
 )
 from plotroom.core.actions import Action
+from plotroom.core.claims import Claim
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
 from plotroom.core.github_projection import GitHubResource
@@ -180,11 +182,23 @@ class SqliteTransaction:
     async def branch_lane(self, branch: str) -> Lane | None:
         return await lanes_sql.branch_lane(self._live(), branch)
 
+    async def lane_claims(self, lane: str | None = None) -> list[Claim]:
+        return await claims_sql.read_claims(self._live(), "orchestrator", lane)
+
+    async def save_claims(self, claims: list[Claim]) -> None:
+        await claims_sql.save_claims(self._live(), claims)
+
+    async def delete_claims(self, lane: str, globs: list[str] | None) -> None:
+        await claims_sql.delete_claims(self._live(), lane, globs)
+
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return await github_sql.pull_request(self._live(), repository, number)
 
     async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None:
         return await github_sql.open_branch_pull(self._live(), repository, branch)
+
+    async def open_pulls(self, repository: str) -> tuple[PullRequest, ...]:
+        return await github_sql.open_pulls(self._live(), repository)
 
     async def save_pull_request(self, pull: PullRequest) -> None:
         await github_sql.save_pull_request(self._live(), pull)

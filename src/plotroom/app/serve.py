@@ -365,6 +365,7 @@ class Daemon:
             github = self._config.github.get(project_id)
             desktop = self._config.session_readers.get(project_id)
             repository = github.repository if github is not None else None
+            remote_tree = self._config.github_ticket_trees.get(project_id)
             routes = self._config.delivery_routes.get(project_id)
             project.ledger = Ledger(
                 project.store,
@@ -373,10 +374,12 @@ class Daemon:
                 watcher_roles=self._config.watchers.get(project_id, ()),
                 wait_cap=self._config.wait_cap,
                 github_repository=repository,
+                github_tree_path=remote_tree[0] if remote_tree is not None else None,
                 session_workers=desktop.sessions if desktop is not None else None,
                 drain_enabled=project_id in self._config.drain_sessions,
             )
             project.ledger.start()
+            await project.ledger.initialize_overlaps()
             relay = self._config.switchboards.get(project_id)
             switchboard = (
                 Switchboard(project.ledger, relay.board, relay.command, relay.senders)
@@ -415,7 +418,7 @@ class Daemon:
                     include_issue_tree=issue_source is not None,
                 )
                 inputs.append(partial(poller.run, details.poll))
-                if remote_tree := self._config.github_ticket_trees.get(project_id):
+                if remote_tree is not None:
                     tree, installation = remote_tree
                     work_items = GitHubTicketTree(
                         api,

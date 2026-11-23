@@ -74,6 +74,7 @@ async def start_lane(
         raise LedgerError("conflict", "one or more work items are already assigned")
     lane = Lane(lane_id, worker, tuple(work_items), branch)
     await uow.save_lane(lane)
+    uow.pull_overlaps_changed()
     await refresh_idle_workers(uow, workers)
     return lane.render()
 
@@ -130,6 +131,7 @@ async def archive_lane(
 ) -> dict[str, Any]:
     lane = await _current(uow, args["lane"])
     result = await _save(uow, replace(lane, state="archived", waiting_on=None))
+    await uow.delete_claims(lane.id)
     await uow.clear_item(ARCHIVE_PROPOSAL, lane.id)
     await refresh_idle_workers(uow, workers)
     return result
