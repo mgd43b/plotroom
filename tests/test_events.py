@@ -323,3 +323,19 @@ async def test_an_integer_too_large_for_a_float_is_still_a_number(parts: Parts) 
     ledger, _, _ = parts
     huge = NewEvent("claude", "claude.turn_end", "huge", {"turns": 1, "ratio": 10**400})
     assert (await ledger.append("orchestrator", huge)).created is True  # not an OverflowError
+
+
+async def test_fields_changed_by_the_caller_while_the_store_is_awaited_are_not_stored(
+    parts: Parts,
+) -> None:
+    ledger, store, _ = parts
+    fields: dict[str, Any] = {"pr": 7}
+
+    def another_task_runs() -> None:
+        fields["pr"] = "not an int"  # would not have passed validation
+        fields["surprise"] = 1
+
+    store.on_allocate = another_task_runs
+    appended = await ledger.append("system", NewEvent("github", "github.pr_merged", "pr-7", fields))
+    assert appended.event.fields == {"pr": 7}
+    assert (await ledger.events_after(0))[0].fields == {"pr": 7}

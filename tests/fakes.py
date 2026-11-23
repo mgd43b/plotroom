@@ -6,7 +6,7 @@ import asyncio
 import copy
 import json
 import sqlite3
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -41,10 +41,13 @@ class FixedClock:
 class _MemoryTransaction:
     """Works on staged copies; ``MemoryStore.transaction`` publishes them on commit."""
 
-    def __init__(self, events: list[StoredEvent], seq: int) -> None:
+    def __init__(
+        self, events: list[StoredEvent], seq: int, on_allocate: Callable[[], None] | None = None
+    ) -> None:
         self.events = events
         self.seq = seq
         self.expired = False
+        self._on_allocate = on_allocate
 
     def _live(self) -> None:
         if self.expired:
@@ -71,6 +74,8 @@ class _MemoryTransaction:
     async def allocate_seq(self) -> int:
         self._live()
         await asyncio.sleep(0)
+        if self._on_allocate is not None:
+            self._on_allocate()  # a hook standing in for another task running during the await
         self.seq += 1
         return self.seq
 
@@ -84,6 +89,7 @@ class MemoryStore:
         self._seq = 0
         self._open = False
         self.commits = 0
+        self.on_allocate: Callable[[], None] | None = None
         self.rollbacks = 0
         self.closed = False
 
@@ -99,7 +105,7 @@ class MemoryStore:
         if self._open:
             raise RuntimeError("a writer transaction is already open on this store")
         self._open = True
-        tx = _MemoryTransaction(copy.deepcopy(self._events), self._seq)
+        tx = _MemoryTransaction(copy.deepcopy(self._events), self._seq, self.on_allocate)
         try:
             yield tx
         except BaseException:
