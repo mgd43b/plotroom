@@ -10,7 +10,7 @@ hitl: false
 risk: medium
 tracker_id: "129"
 remote: "https://github.com/mgd43b/plotroom/issues/129"
-tracker_status: backlog
+tracker_status: done
 status: built
 ---
 
@@ -31,3 +31,4 @@ Verify: A test that sends SIGTERM to a running daemon with an open project shows
 ## Notes
 
 - Built: https://github.com/mgd43b/plotroom/pull/135
+- Verified: 2026-11-22. The coordinator verified daemon teardown. The SIGTERM subprocess regression verifies clean project close. Both Python jobs passed on merge d45517c6 in https://github.com/mgd43b/plotroom/actions/runs/45113032427.

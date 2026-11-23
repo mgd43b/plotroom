@@ -10,7 +10,7 @@ hitl: false
 risk: low
 tracker_id: "130"
 remote: "https://github.com/mgd43b/plotroom/issues/130"
-tracker_status: backlog
+tracker_status: done
 status: built
 ---
 
@@ -31,3 +31,4 @@ Verify: With a stale lock file naming a live pid, lock_owner reports the owner w
 ## Notes
 
 - Built: https://github.com/mgd43b/plotroom/pull/137
+- Verified: 2026-11-22. The lane passed 21 focused lock and daemon-start tests that run independently of signal replay. Both Python jobs passed on merge 9a4db649 in https://github.com/mgd43b/plotroom/actions/runs/45117133037.

@@ -207,13 +207,47 @@ hitl = false
 risk = "low"
 
 [[entry]]
+id = 21
+type = "bug"
+title = "Bind local stdio credentials to the intended daemon"
+description = "Local `plotroom connect --stdio` must use one canonical daemon instance for credential selection, startup, listener discovery, and request dispatch. The proxy must establish that it is connected to that daemon before sending a credential or MCP payload. PR #134 supplies the implemented token and transport contract for this follow-up. The remaining real-client observations on #16 are tracked there."
+verify = "With controlled fixtures, confirm that a configuration or path change cannot split credential selection and listener discovery across instances. Confirm that an unverified connection carries zero credentials and MCP payloads. Accept a local 401 as readiness only after verifying the responding daemon's identity. Confirm that supported loopback aliases use the verified published endpoint and preserve an allowed Host header."
+covers = ["R12"]
+after = []
+hitl = false
+risk = "high"
+notes = ["High risk because a credential or request may reach the wrong daemon. Also verify that the proxy reestablishes daemon identity after a daemon restart before resuming authenticated requests."]
+
+[[entry]]
+id = 22
+type = "bug"
+title = "Honor configured CA trust for explicit HTTPS bearer connections"
+description = "An explicit HTTPS connection that uses a bearer honors configured CA trust and uses default certificate validation when no CA is configured. Environment proxy discovery stays disabled. PR #134 supplies the implemented transport contract for this follow-up."
+verify = "A fixture HTTPS server signed by a test CA accepts a bearer connection when that CA is configured. Untrusted certificates and hostname mismatches fail with a clear error. A proxy configured in the environment receives no connections from the credentialed client."
+covers = ["R12"]
+after = []
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 23
+type = "bug"
+title = "Report and retry local cleanup after token revocation"
+description = "The instance record is authoritative once token revocation commits. The CLI needs to report the successful revocation and any local cleanup failure separately and permit a retry of local cleanup. Invalid token files must fail closed through the CLI and HTTP error handlers."
+verify = "When local cleanup fails, the server continues to refuse the revoked token, and the CLI reports that revocation succeeded and cleanup failed. A retry after the underlying problem is removed cleans up the local entry. Invalid, unsafe, or excessively nested token files produce controlled configuration errors in the CLI and closed authorization in HTTP without exposing token data."
+covers = ["R12"]
+after = []
+hitl = false
+risk = "medium"
+
+[[entry]]
 id = 12
 type = "story"
 title = "Refactor sweep"
-description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred, including the stdio proxy blocking on readline when a client breaks stdout but keeps stdin open and silent (deferred in PR #51), and the unbounded writer queue in src/plotroom/core/writer.py (declined in PR #50; a cap needs a backpressure policy that belongs with the transport limits), and logged_reason reading only the active log file, so with a tiny size limit a failure line can roll into .1 before the parent reads it (low; cannot happen at the real limits; found in PR #132)."
-verify = "Deferred findings are resolved or re-filed, and CI passes."
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred, including the stdio proxy blocking on readline when a client breaks stdout but keeps stdin open and silent (deferred in PR #51), and the unbounded writer queue in src/plotroom/core/writer.py (declined in PR #50; a cap needs a backpressure policy that belongs with the transport limits), and logged_reason reading only the active log file, so with a tiny size limit a failure line can roll into .1 before the parent reads it (low; cannot happen at the real limits; found in PR #132). Add focused regression coverage for these contracts from the reviews of PRs #134 and #135."
+verify = "The port file is unpublished before paused HTTP shutdown finishes. Authentication refuses a digest mismatch for an existing token record. Concurrent local-token updates for separate instances preserve both records. A receipt replay is refused after its writer rule is withdrawn. The HTTP snapshot tool refuses a drain role. Deferred findings are resolved or re-filed, and CI passes."
 covers = []
-after = [2, 3, 4, 5, 6, 7, 8, 13, 9, 10, 14, 15, 11, 17, 18, 19, 20]
+after = [2, 3, 4, 5, 6, 7, 8, 13, 9, 10, 14, 15, 11, 17, 18, 19, 20, 21, 22, 23]
 hitl = false
 risk = "low"
 
