@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "96"
 remote: "https://github.com/mgd43b/plotroom/issues/96"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # READY checklists become the lane's active state on merge

@@ -9,7 +9,7 @@ hitl: false
 risk: low
 tracker_id: "98"
 remote: "https://github.com/mgd43b/plotroom/issues/98"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # The checklist_empty trigger leaf

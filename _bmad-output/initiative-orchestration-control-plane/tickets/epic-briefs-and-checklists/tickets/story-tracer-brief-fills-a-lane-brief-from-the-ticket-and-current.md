@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "95"
 remote: "https://github.com/mgd43b/plotroom/issues/95"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Tracer: brief() fills a lane brief from the ticket and current claims
