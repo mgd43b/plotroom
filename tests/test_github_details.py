@@ -1,0 +1,409 @@
+"""Deterministic acceptance exercises for the local GitHub projection."""
+
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+
+from fakes import FixedClock
+from plotroom.adapters.github import GitHubPoller, LocalGitHubCredential, PullRequestFetcher
+from plotroom.adapters.github.details import GitHubDetailPoller
+from plotroom.adapters.github.read import GitHubReadClient
+from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.adapters.work_items_github_issues import GitHubIssuesWorkItems
+from plotroom.app.config import ConfigError, load_config
+from plotroom.app.runtime import ProjectRuntime
+from plotroom.core.catalog import build_catalog
+from plotroom.core.events import LedgerError
+from plotroom.core.github import DETAILS
+from plotroom.core.github_projection import (
+    CHECKS,
+    COMMENTS,
+    FILES,
+    ISSUE_TREE,
+    LABELS,
+    MAIN,
+    THREADS,
+    latest_checks,
+    main_verdict,
+    unresolved_threads,
+)
+from plotroom.core.ledger import Ledger
+
+REPO = "fixture/repo"
+API = "https://api.github.com"
+FIRST = "1" * 40
+SECOND = "2" * 40
+MAIN_SHA = "3" * 40
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+NOW = "2026-11-22T12:00:00Z"
+LATER = "2026-11-22T12:00:02Z"
+BODY = "  café \r\n\timmutable wording \u2603\n"
+
+
+def status(n: int, name: str, conclusion: str | None) -> dict[str, Any]:
+    return {
+        "id": n,
+        "name": name,
+        "status": "completed" if conclusion else "in_progress",
+        "conclusion": conclusion,
+    }
+
+
+class Fixture:
+    def __init__(self) -> None:
+        self.step = 0
+        self.break_threads = False
+        self.limit = False
+        self.extra_comment = False
+        self.requests: list[str] = []
+
+    @property
+    def sha(self) -> str:
+        return SECOND if self.step >= 2 else FIRST
+
+    def threads(self, request: httpx.Request) -> httpx.Response:
+        import json
+
+        assert request.method == "POST"
+        query = json.loads(request.content)
+        assert query["query"].lstrip().startswith("query PullReviewThreads")
+        after = query["variables"]["after"]
+        if after and self.break_threads:
+            return httpx.Response(503)
+        nodes = [
+            {
+                "id": "second" if after else "first",
+                "isResolved": self.step > 0 and not after,
+                "path": "old.py",
+                "line": None,
+            }
+        ]
+        connection = {"nodes": nodes, "pageInfo": {"endCursor": "next", "hasNextPage": not after}}
+        return httpx.Response(
+            200, json={"data": {"repository": {"pullRequest": {"reviewThreads": connection}}}}
+        )
+
+    @staticmethod
+    def issue(number: int, *labels: str) -> dict[str, Any]:
+        return {
+            "number": number,
+            "state": "open",
+            "state_reason": None,
+            "title": f"Ticket {number}",
+            "body": "",
+            "milestone": {"number": 1},
+            "assignees": [],
+            "labels": [{"name": label} for label in labels],
+            "updated_at": NOW,
+        }
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.github.com"
+        assert request.headers["authorization"] == "Bearer fixture"
+        path = request.url.path
+        self.requests.append(path)
+        if path == "/graphql":
+            return self.threads(request)
+        assert request.method == "GET"
+        path = path.removeprefix(f"/repos/{REPO}")
+        if self.limit and path == "":
+            return httpx.Response(429, headers={"Retry-After": "5"})
+        pr = {
+            "number": 4,
+            "state": "open",
+            "updated_at": LATER if self.step >= 2 else NOW,
+            "head": {"ref": "worker", "sha": self.sha, "repo": {"full_name": REPO}},
+            "merged_at": None,
+            "body": "",
+            "changed_files": 1,
+        }
+        check = status(15, "lint", "success" if self.step > 0 else None)
+        rerun = status(16, "lint", "failure")
+        run = {
+            **status(50, "ci", "success" if self.step == 0 else None),
+            "head_sha": MAIN_SHA,
+            "run_attempt": 1 if self.step == 0 else 2,
+            "created_at": NOW,
+        }
+        issue = {
+            "number": 9,
+            "state": "closed" if self.step >= 2 else "open",
+            "state_reason": "completed" if self.step >= 2 else None,
+            "title": "Inspect comments",
+            "body": "Issue body",
+            "milestone": {"number": 1},
+            "assignees": [{"login": "editor"}] if self.step > 0 else [],
+            "labels": [{"name": "story"}, {"name": "backlog"}],
+            "updated_at": LATER if self.step > 0 else NOW,
+        }
+        result: dict[str, Any] = {
+            "": {"default_branch": "trunk"},
+            "/branches/trunk": {"commit": {"sha": MAIN_SHA}},
+            "/actions/runs": {"workflow_runs": [run]},
+            "/actions/runs/50/attempts/1/jobs": {"jobs": [status(70, "image", "success")]},
+            "/actions/runs/50/attempts/2/jobs": {"jobs": [status(71, "image", None)]},
+            "/pulls": [pr],
+            "/pulls/4": pr,
+            "/pulls/4/files": [
+                {"filename": "new.py", "status": "renamed", "previous_filename": "old.py"}
+                if self.step >= 2
+                else {"filename": "old.py", "status": "modified"}
+            ],
+            "/issues/4/events": [
+                {
+                    "id": 40,
+                    "event": "labeled",
+                    "actor": {"login": "editor"},
+                    "label": {"name": "audited"},
+                }
+            ]
+            if self.step > 0
+            else [],
+            "/issues/4/labels": [{"name": "audited"}] if self.step > 0 else [],
+            "/issues": [issue, {"number": 4, "pull_request": {}}],
+            "/issues/comments": [
+                {
+                    "id": 99,
+                    "issue_url": f"{API}/repos/{REPO}/issues/9",
+                    "created_at": LATER,
+                    "updated_at": LATER,
+                    "user": {"login": "editor"},
+                    "body": BODY,
+                },
+            ]
+            if self.step >= 1
+            else [],
+            "/milestones": [{"number": 1, "state": "open", "title": "plan"}],
+            "/issues/9/sub_issues": [],
+            "/issues/9/dependencies/blocked_by": [],
+            f"/commits/{FIRST}/check-runs": {
+                "check_runs": [check, rerun] if self.step > 0 else [check]
+            },
+            f"/commits/{SECOND}/check-runs": {"check_runs": [status(17, "lint", "success")]},
+            f"/commits/{MAIN_SHA}/check-runs": {"check_runs": [status(72, "image", "success")]},
+        }
+        assert path in result, path
+        if path == "/actions/runs":
+            assert request.url.params["branch"] == "trunk"
+        if path == "/issues/comments" and self.extra_comment:
+            since = request.url.params["since"]
+            assert since < LATER
+            result[path].append({**result[path][0], "id": 100})
+        return httpx.Response(200, json=result[path])
+
+
+async def test_github_transitions_and_pagination_are_durable(tmp_path: Path) -> None:
+    provider = Fixture()
+    clock = FixedClock()
+    credential = LocalGitHubCredential("TOKEN", {"TOKEN": "fixture"}, None)
+    client_api = GitHubReadClient(API, REPO)
+    workers = frozenset({"worker"})
+    catalog = build_catalog(workers, github_repository=REPO)
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider.handle)) as client:
+        ledger = Ledger(store, catalog, clock, github_repository=REPO)
+        ledger.start()
+        puller = GitHubPoller(ledger, clock, REPO, credential, PullRequestFetcher(API, REPO), 1)
+        details = GitHubDetailPoller(ledger, clock, client_api, credential, ("image",))
+        try:
+            await ledger.execute(
+                "orchestrator",
+                "lane_start",
+                "start",
+                {"lane": "lane", "worker": "worker", "branch": "worker", "work_items": []},
+            )
+            await puller.poll(client)
+            await details.poll(client)
+            partial_fixture = await ledger.github_resource(REPO, THREADS, "4")
+            assert partial_fixture is not None
+            assert partial_fixture.complete
+            assert len(unresolved_threads(partial_fixture)) == 2
+            provider.step = 1
+            provider.break_threads = True
+            await details.poll(client)
+            partial = await ledger.github_resource(REPO, THREADS, "4")
+            assert partial is not None
+            assert not partial.complete
+            assert len(unresolved_threads(partial)) == 2
+            provider.break_threads = False
+            provider.extra_comment = True
+            await details.poll(client)
+            main = await ledger.github_resource(REPO, MAIN)
+            assert main is not None
+            assert main.complete
+            assert main.records[0].fields["attempt"] == 2
+            verdict = main_verdict(main)
+            assert verdict is not None
+            assert verdict.fields["attempt"] == 1
+            assert verdict.details["image_jobs"] == [status(70, "image", "success")]
+            checks = await ledger.github_resource(REPO, CHECKS, FIRST)
+            assert checks is not None
+            assert latest_checks(checks)[0].fields["id"] == 16
+            threads = await ledger.github_resource(REPO, THREADS, "4")
+            assert threads is not None
+            assert [r.key for r in unresolved_threads(threads)] == ["second"]
+            labels = await ledger.github_resource(REPO, LABELS, "4")
+            assert labels is not None
+            assert labels.attributes["labels"] == {"audited": "editor"}
+
+            provider.step = 2
+            await puller.poll(client)
+            await details.poll(client)
+            with pytest.raises(LedgerError, match="match the open GitHub projection"):
+                await ledger.execute(
+                    "worker:worker",
+                    "lane_ready",
+                    "stale",
+                    {"lane": "lane", "pr": 4, "head_sha": FIRST},
+                )
+            files = await ledger.github_resource(REPO, FILES, "4")
+            assert files is not None
+            assert files.records[0].fields["previous_path"] == "old.py"
+            issues = await ledger.github_resource(REPO, ISSUE_TREE)
+            assert issues is not None
+            assert issues.complete
+            assert (await details.issue_tree())[1]["state"] == "closed"
+            comments = await ledger.github_resource(REPO, COMMENTS, "99")
+            assert comments is not None
+            assert comments.records[0].key == "99"
+            assert comments.records[0].body.encode() == BODY.encode()
+            events = await store.events_after(0)
+            kinds = [event.kind for event in events]
+            assert kinds.count("github.review_thread") == 3
+            check_ids = [event.fields["id"] for event in events if event.kind == "github.check_run"]
+            assert check_ids.count(15) == 2
+            assert check_ids.count(16) == 1
+            assert kinds.count("github.pull_label") == 1
+            assert kinds.count("github.pull_file") == 2
+            comment_ids = [
+                event.fields["id"] for event in events if event.kind == "github.issue_comment"
+            ]
+            assert comment_ids == [99, 100]
+            for kind in ("issue_opened", "issue_assignees", "issue_closed"):
+                assert kinds.count(f"github.{kind}") == 1
+            assert all(
+                event.lane_id == "lane"
+                for event in events
+                if event.fields.get("number") == 4 and event.source == "github"
+            )
+            provider.limit = True
+            await details.poll(client)
+            assert await ledger.fetch_retry(REPO, DETAILS) is not None
+            final_seq = await store.head_seq()
+        finally:
+            await ledger.stop()
+            await store.close()
+
+        reopened = SqliteStore("demo", tmp_path)
+        await reopened.migrate()
+        ledger = Ledger(reopened, catalog, clock, github_repository=REPO)
+        ledger.start()
+        details = GitHubDetailPoller(ledger, clock, client_api, credential, ("image",))
+        try:
+            provider.limit = False
+            calls = len(provider.requests)
+            await details.poll(client)
+            assert len(provider.requests) == calls
+            clock.advance(5)
+            await details.poll(client)
+            assert len(provider.requests) > calls
+            assert await reopened.head_seq() == final_seq
+            assert await ledger.fetch_retry(REPO, DETAILS) is None
+        finally:
+            await ledger.stop()
+            await reopened.close()
+
+
+def test_remote_work_item_config_requires_one_source(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    base = '[projects.demo]\nbmad_installation = "trusted"\n'
+    github = '\n[projects.demo.github]\nrepository = "Fixture/Repo"\nimage_jobs = ["image"]\n'
+    path.write_text(base + 'github_ticket_tree = "tickets/initiative"\n' + github)
+    config = load_config(path, {})
+    assert config.github_ticket_trees["demo"] == ("tickets/initiative", tmp_path / "trusted")
+    assert config.github["demo"].image_jobs == ("image",)
+    path.write_text(base + 'github_ticket_tree = "tickets"\nticket_tree = "local"\n' + github)
+    with pytest.raises(ConfigError, match="one work-item source"):
+        load_config(path, {})
+    path.write_text(base + 'github_ticket_tree = "../tickets"\n' + github)
+    with pytest.raises(ConfigError, match="repository-relative"):
+        load_config(path, {})
+    path.write_text(base + '[projects.demo.github_issues]\nstore_config = "store.toml"\n' + github)
+    config = load_config(path, {})
+    assert config.github_issue_sources["demo"].store_config == tmp_path / "store.toml"
+
+
+async def test_github_issues_flow_through_the_runtime_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("plotroom.adapters.github.issue_details.MAX_RELATION_REFRESHES", 2)
+
+    class IssueTreeFixture(Fixture):
+        def handle(self, request: httpx.Request) -> httpx.Response:
+            root = f"/repos/{REPO}"
+            path = request.url.path
+            if path == f"{root}/issues":
+                return httpx.Response(
+                    200,
+                    json=[
+                        self.issue(7, "epic", "in-progress"),
+                        self.issue(8, "story", "review"),
+                        self.issue(9, "story", "backlog"),
+                        self.issue(10, "story", "backlog"),
+                    ],
+                )
+            if path.startswith(f"{root}/issues/"):
+                n, suffix = path.removeprefix(f"{root}/issues/").split("/", 1)
+                if suffix == "sub_issues":
+                    relations = [9, 10, 8] if n == "7" else []
+                elif suffix == "dependencies/blocked_by":
+                    relations = {"9": [8], "10": [9]}.get(n, [])
+                else:
+                    return super().handle(request)
+                return httpx.Response(
+                    200,
+                    json=[
+                        {"number": number, "repository_url": f"{API}{root}"} for number in relations
+                    ],
+                )
+            return super().handle(request)
+
+    fixture = IssueTreeFixture()
+    clock = FixedClock()
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    ledger = Ledger(store, build_catalog(github_repository=REPO), clock, github_repository=REPO)
+    ledger.start()
+    config = tmp_path / "tickets.toml"
+    config.write_text(f'[tickets]\nstore = "github"\nrepo = "{REPO}"\n')
+    starter = PROJECT_ROOT / ".agents/skills/bmad-agent-po/config/github-ticketing.toml"
+    details = GitHubDetailPoller(
+        ledger,
+        clock,
+        GitHubReadClient(API, REPO),
+        LocalGitHubCredential("TOKEN", {"TOKEN": "fixture"}, None),
+    )
+    runtime = ProjectRuntime(
+        ledger,
+        clock,
+        tick_seconds=1,
+        action_attempts=1,
+        work_items=GitHubIssuesWorkItems(details.issue_tree, starter, config, REPO),
+    )
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handle)) as client:
+            await details.poll(client)
+            clock.advance(1)
+            assert await runtime.tick_if_due()
+            assert await ledger.ready_work_items() == ()
+            await details.poll(client)
+        clock.advance(1)
+        assert await runtime.tick_if_due()
+        assert [item.ref for item in await ledger.ready_work_items()] == ["9"]
+    finally:
+        await ledger.stop()
+        await store.close()

@@ -21,6 +21,7 @@ from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
 from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, GitHubSummary, PullRequest
+from plotroom.core.github_projection import GitHubResource
 from plotroom.core.lanes import Lane, with_projected_pr
 from plotroom.core.ledger import Ledger
 from plotroom.core.next_items import Item, visible
@@ -75,6 +76,7 @@ class _MemoryTransaction:
         self.work_items: tuple[WorkItem, ...] = ()
         self.claude_turns: dict[tuple[str, str], set[str]] = {}
         self.pulls: dict[tuple[str, int], PullRequest] = {}
+        self.github_resources: dict[tuple[str, str, str], GitHubResource] = {}
         self.fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
         self.fetch_retries: dict[tuple[str, str], FetchRetry] = {}
         self.seq = seq
@@ -167,6 +169,18 @@ class _MemoryTransaction:
     async def save_pull_request(self, pull: PullRequest) -> None:
         self._live()
         self.pulls[pull.repository, pull.number] = pull
+
+    async def github_resource(
+        self, repository: str, resource: str, scope: str = ""
+    ) -> GitHubResource | None:
+        self._live()
+        return copy.deepcopy(self.github_resources.get((repository, resource, scope)))
+
+    async def save_github_resource(
+        self, repository: str, resource: str, scope: str, result: GitHubResource
+    ) -> None:
+        self._live()
+        self.github_resources[repository, resource, scope] = copy.deepcopy(result)
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         self._live()
@@ -264,6 +278,7 @@ class MemoryStore:
         self._work_items: tuple[WorkItem, ...] = ()
         self._claude_turns: dict[tuple[str, str], set[str]] = {}
         self._pulls: dict[tuple[str, int], PullRequest] = {}
+        self._github_resources: dict[tuple[str, str, str], GitHubResource] = {}
         self._fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
         self._fetch_retries: dict[tuple[str, str], FetchRetry] = {}
         self._open = False
@@ -293,6 +308,7 @@ class MemoryStore:
         tx.work_items = self._work_items
         tx.claude_turns = {key: ids.copy() for key, ids in self._claude_turns.items()}
         tx.pulls = self._pulls.copy()
+        tx.github_resources = copy.deepcopy(self._github_resources)
         tx.fetch_cursors = self._fetch_cursors.copy()
         tx.fetch_retries = self._fetch_retries.copy()
         try:
@@ -309,6 +325,7 @@ class MemoryStore:
             self._work_items = tx.work_items
             self._claude_turns = tx.claude_turns
             self._pulls = tx.pulls
+            self._github_resources = tx.github_resources
             self._fetch_cursors = tx.fetch_cursors
             self._fetch_retries = tx.fetch_retries
             self.commits += 1
@@ -358,6 +375,18 @@ class MemoryStore:
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return self._pulls.get((repository, number))
+
+    async def github_resource(
+        self, repository: str, resource: str, scope: str = ""
+    ) -> GitHubResource | None:
+        return copy.deepcopy(self._github_resources.get((repository, resource, scope)))
+
+    async def github_pull_targets(self, repository: str) -> tuple[PullRequest, ...]:
+        rows = [
+            row for row in self._pulls.values() if row.repository == repository and row.complete
+        ]
+        rows.sort(key=lambda row: (row.state == "open", row.updated_at, row.number), reverse=True)
+        return tuple(rows[:100])
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         return self._fetch_cursors.get((repository, resource))

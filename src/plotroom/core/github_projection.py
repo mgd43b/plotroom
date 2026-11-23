@@ -1,0 +1,190 @@
+"""Durable GitHub observations applied by the project's single writer."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from plotroom.core.events import FieldSpec, NewEvent
+from plotroom.core.lanes import infer_lane
+
+if TYPE_CHECKING:
+    from plotroom.core.unit_of_work import UnitOfWork
+
+
+CHECKS = "checks"
+MAIN = "main_runs"
+THREADS = "review_threads"
+FILES = "pull_files"
+LABELS = "pull_labels"
+ISSUES = "issues"
+COMMENTS = "issue_comments"
+ISSUE_TREE = "issue_tree"
+
+REPOSITORY = FieldSpec("repository", "str")
+NUMBER = FieldSpec("number", "int")
+HEAD = FieldSpec("head_sha", "str")
+STATUS = FieldSpec("status", "str")
+CONCLUSION = FieldSpec("conclusion", "str", required=False)
+NAME = FieldSpec("name", "str")
+GITHUB_FIELDS = {
+    "check_run": (
+        FieldSpec("id", "int"),
+        HEAD,
+        NAME,
+        STATUS,
+        CONCLUSION,
+        FieldSpec("number", "int", required=False),
+    ),
+    "workflow_run": (
+        FieldSpec("id", "int"),
+        FieldSpec("attempt", "int"),
+        HEAD,
+        NAME,
+        STATUS,
+        CONCLUSION,
+        FieldSpec("jobs", "array"),
+    ),
+    "review_thread": (
+        FieldSpec("id", "str"),
+        NUMBER,
+        FieldSpec("resolved", "bool"),
+        FieldSpec("path", "str"),
+        FieldSpec("line", "int", required=False),
+    ),
+    "pull_file": (
+        NUMBER,
+        HEAD,
+        FieldSpec("path", "str"),
+        STATUS,
+        FieldSpec("previous_path", "str", required=False),
+    ),
+    "pull_label": (
+        NUMBER,
+        NAME,
+        FieldSpec("actor", "str", required=False),
+        FieldSpec("action", "str"),
+        FieldSpec("id", "int"),
+    ),
+    "issue_opened": (NUMBER, FieldSpec("state", "str")),
+    "issue_closed": (NUMBER, FieldSpec("state", "str")),
+    "issue_reopened": (NUMBER, FieldSpec("state", "str")),
+    "issue_assignees": (NUMBER, FieldSpec("assignees", "array")),
+    "issue_comment": (
+        NUMBER,
+        FieldSpec("id", "int"),
+        FieldSpec("author", "str", required=False),
+        FieldSpec("created_at", "str"),
+        FieldSpec("updated_at", "str"),
+    ),
+    "issue_metadata": (
+        NUMBER,
+        FieldSpec("labels", "array"),
+        FieldSpec("milestone", "int", required=False),
+        FieldSpec("sub_issues", "array"),
+        FieldSpec("blocked_by", "array"),
+    ),
+    "milestone": (NUMBER, FieldSpec("state", "str"), FieldSpec("title", "str")),
+}
+
+
+@dataclass(frozen=True)
+class GitHubRecord:
+    key: str
+    kind: str
+    fields: dict[str, Any]
+    body: str = ""
+    # Raw projection fields can evolve without a distinct event (e.g. a workflow's jobs).
+    details: dict[str, Any] = field(default_factory=lambda: {})
+    fact: str = ""
+
+
+@dataclass(frozen=True)
+class GitHubResource:
+    records: tuple[GitHubRecord, ...]
+    complete: bool = True
+    attributes: dict[str, Any] = field(default_factory=lambda: {})
+    generation: int = 0
+    as_of: str = ""
+
+
+async def apply_resource(
+    uow: UnitOfWork,
+    repository: str,
+    resource: str,
+    scope: str,
+    result: GitHubResource,
+    as_of: str,
+    *,
+    pulls: tuple[int, ...] = (),
+) -> None:
+    current = await uow.github_resource(repository, resource, scope)
+    previous = {row.key: row for row in current.records} if current else {}
+    generation = current.generation + 1 if current else 1
+    fresh = {row.key: row for row in result.records}
+    bindings: dict[int, str | None] = {}
+    candidates = set(pulls)
+    if resource == CHECKS:
+        candidates.update(
+            number for row in fresh.values() for number in row.details["pull_numbers"]
+        )
+    for number in sorted(candidates):
+        pr = await uow.pull_request(repository, number)
+        if pr is None or (resource == CHECKS and scope != pr.head_sha):
+            continue
+        if resource == FILES and result.complete and result.attributes["head_sha"] != pr.head_sha:
+            # The PR poll committed a new head while the file request was in flight.
+            return
+        bindings[number] = (
+            await infer_lane(uow, branch=pr.branch) if pr.head_repository == repository else None
+        )
+    for row in fresh.values():
+        prior = previous.get(row.key)
+        if prior is not None and (
+            row.fact == prior.fact
+            if row.fact
+            else (row.fields, row.body) == (prior.fields, prior.body)
+        ):
+            continue
+        kind = row.kind
+        if kind == "issue_opened" and prior is not None:
+            kind = "issue_reopened"
+        fields = {"repository": repository, **row.fields}
+        selected = row.details.get("pull_numbers") or pulls
+        candidates = [(number, bindings[number]) for number in selected if number in bindings]
+        with_lane = [(number, lane) for number, lane in candidates if lane is not None]
+        lane_id = None
+        relevant = with_lane or candidates
+        if len(relevant) == 1:
+            fields["number"], lane_id = relevant[0]
+        uid = f"{repository}:{resource}:{scope}:{row.key}@{row.fact or generation}"
+        if kind in {"review_thread", "issue_opened", "issue_closed", "issue_reopened"}:
+            uid = f"{uid}:{generation}"
+        await uow.append(NewEvent("github", f"github.{kind}", uid, fields, row.body, lane_id))
+    records = fresh if result.complete else {**previous, **fresh}
+    attributes = (
+        result.attributes
+        if result.complete
+        else {**(current.attributes if current else {}), **result.attributes}
+    )
+    await uow.save_github_resource(
+        repository,
+        resource,
+        scope,
+        GitHubResource(tuple(records.values()), result.complete, attributes, generation, as_of),
+    )
+
+
+def latest_checks(resource: GitHubResource) -> tuple[GitHubRecord, ...]:
+    latest: dict[str, GitHubRecord] = {}
+    for check in sorted(resource.records, key=lambda item: int(item.fields["id"])):
+        latest[check.fields["name"]] = check
+    return tuple(latest.values())
+
+
+def main_verdict(resource: GitHubResource) -> GitHubRecord | None:
+    return next((row for row in resource.records if row.fields["status"] == "completed"), None)
+
+
+def unresolved_threads(resource: GitHubResource) -> tuple[GitHubRecord, ...]:
+    return tuple(row for row in resource.records if not row.fields["resolved"])
