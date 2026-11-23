@@ -124,3 +124,14 @@ covers = ["R1", "R2", "R3", "R4", "R5", "R6", "R7"]
 after = [9]
 hitl = false
 risk = "low"
+
+[[entry]]
+id = 12
+type = "bug"
+title = "Over-depth trigger predicates can produce recursion errors"
+description = "An existing trigger test failed on Python 3.14 because recursion errors escaped through finalization while checking over-depth input. Trigger callers should receive the existing invalid-depth result deterministically."
+verify = "Over-depth predicates return the existing invalid-depth result deterministically, without incidental recursion or finalizer errors. Preserve valid predicates, argument immutability, replay and no-write rejection. Run both Python CI jobs on the initial attempt with normal warning handling."
+covers = ["R1", "R2", "R3"]
+after = []
+hitl = false
+risk = "medium"
