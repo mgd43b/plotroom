@@ -66,6 +66,7 @@ from plotroom.ports.search import (
     EmbeddedRecord,
     EmbeddingError,
     EmbeddingModel,
+    EmbeddingReadiness,
     EmbeddingRevision,
     SearchPage,
     SearchRecord,
@@ -150,9 +151,9 @@ class SqliteEmbeddingIndex:
         async with self._engine.connect() as connection:
             return await embedding_sql.read_page(connection, self.model, after, limit)
 
-    async def ready_count(self, kinds: tuple[str, ...]) -> int | None:
+    async def preflight(self, kinds: tuple[str, ...]) -> EmbeddingReadiness:
         async with self._engine.connect() as connection:
-            return await embedding_sql.ready_count(connection, self.model, kinds)
+            return await embedding_sql.preflight(connection, self.model, kinds)
 
     async def commit(
         self, tx: Transaction, expected: int, through: int, records: tuple[EmbeddedRecord, ...]

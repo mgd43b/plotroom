@@ -11,13 +11,14 @@ from plotroom.ports.search import SearchHit, SearchPage, SearchRecord
 EXCERPT_LIMIT = 240
 
 FIND_RECORD = text("""
-    SELECT seq, body FROM search_records WHERE kind = :kind AND record_id = :id
+    SELECT seq, body, provisional FROM search_records WHERE kind = :kind AND record_id = :id
 """)
 INSERT_RECORD = text("""
-    INSERT INTO search_records (kind, record_id, body, embeddable)
-    VALUES (:kind, :id, :body, :embeddable)
+    INSERT INTO search_records (kind, record_id, body, embeddable, provisional)
+    VALUES (:kind, :id, :body, :embeddable, :provisional)
     RETURNING seq
 """)
+CONFIRM_RECORD = text("UPDATE search_records SET provisional = FALSE WHERE seq = :seq")
 DELETE_RECORD = text("DELETE FROM search_records WHERE seq = :seq")
 DELETE_MESSAGE = text("DELETE FROM message_fts WHERE rowid = :seq")
 INSERT_MESSAGE = text("INSERT INTO message_fts (rowid, body) VALUES (:seq, :body)")
@@ -67,12 +68,20 @@ async def index_record(
     params = {"kind": record.kind, "id": record.id, "body": record.body}
     current = (await connection.execute(FIND_RECORD, params)).first()
     if current is not None:
-        if only_if_absent or current.body == record.body:
+        confirms = current.provisional and not record.provisional
+        if current.body == record.body:
+            if confirms:
+                await connection.execute(CONFIRM_RECORD, {"seq": current.seq})
+            return
+        if only_if_absent and not confirms:
             return
         await connection.execute(DELETE_MESSAGE, {"seq": current.seq})
         await connection.execute(DELETE_RECORD, {"seq": current.seq})
     seq = (
-        await connection.execute(INSERT_RECORD, {**params, "embeddable": bool(record.body.strip())})
+        await connection.execute(
+            INSERT_RECORD,
+            {**params, "embeddable": bool(record.body.strip()), "provisional": record.provisional},
+        )
     ).scalar_one()
     # SQLite's text functions can stop at a NUL. Index it as a word separator.
     await connection.execute(INSERT_MESSAGE, {"seq": seq, "body": record.body.replace("\x00", " ")})

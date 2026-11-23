@@ -58,8 +58,10 @@ def comment_record(repository: str, comment: GitHubRecord) -> SearchRecord:
     return SearchRecord(ISSUE_COMMENT_KIND, record_id, comment.body)
 
 
-def pull_body_record(repository: str, number: int, body: str) -> SearchRecord:
-    return SearchRecord(PR_BODY_KIND, f"{repository}#{number}", body)
+def pull_body_record(
+    repository: str, number: int, body: str, *, provisional: bool = False
+) -> SearchRecord:
+    return SearchRecord(PR_BODY_KIND, f"{repository}#{number}", body, provisional=provisional)
 
 
 def pull_text_record(
@@ -83,5 +85,10 @@ def pull_text_record(
         <= updated_at
         <= pull.updated_at
     ):
-        return pull_body_record(pull.repository, pull.number, body)
+        return pull_body_record(
+            pull.repository,
+            pull.number,
+            body,
+            provisional=not pull.complete or updated_at != pull.updated_at,
+        )
     return None

@@ -42,6 +42,7 @@ from plotroom.ports.search import (
     EmbeddingError,
     EmbeddingIndex,
     EmbeddingModel,
+    EmbeddingReadiness,
     SearchHit,
     SearchPage,
 )
@@ -605,6 +606,9 @@ async def test_daemon_starts_embedding_only_for_configured_project(
                         break
                     await committed.wait()
 
+            assert await index.preflight((MESSAGE_KIND,)) is EmbeddingReadiness.READY
+            assert await index.preflight((DECISION_KIND,)) is EmbeddingReadiness.PENDING
+            assert await index.preflight((ISSUE_COMMENT_KIND,)) is EmbeddingReadiness.EMPTY
             worker = asyncio.create_task(
                 enabled.search("find the phrase", None, 5, role="worker:fixture")
             )

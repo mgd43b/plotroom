@@ -66,3 +66,4 @@ Given a match up to the configured excerpt cap with long surrounding text, when 
 - `uv run --locked ruff check src tests`, `uv run --locked pyright`, and the Ruff format check for the changed Python files passed.
 - SQLite's query plan shows the limited rank set materialized before the second FTS lookup by row ID and phrase.
 - Combined verification after review remediations passed 986 tests on each of managed Python 3.14 and 3.15. Ruff, Pyright and the core dependency check passed.
+- [Built in PR #168](https://github.com/mgd43b/plotroom/pull/168)

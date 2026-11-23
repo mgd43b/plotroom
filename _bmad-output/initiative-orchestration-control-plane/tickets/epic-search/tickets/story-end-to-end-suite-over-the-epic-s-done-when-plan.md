@@ -58,3 +58,4 @@ Given the real daemon and synthetic fixture data, when each epic acceptance scen
 - The combined search, source indexing, backfill, embedding, epic acceptance, migration, and transport suites passed all 80 tests.
 - `uv run --locked ruff check src tests`, `uv run --locked pyright`, and the Ruff format check for `tests/test_search_e2e.py` passed.
 - Combined verification after review remediations passed 986 tests on each of managed Python 3.14 and 3.15. Ruff, Pyright and the core dependency check passed.
+- [Built in PR #168](https://github.com/mgd43b/plotroom/pull/168)

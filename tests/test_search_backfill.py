@@ -92,6 +92,9 @@ async def _seed_snapshots(uow: UnitOfWork) -> None:
     await project_pull(
         uow, replace(fallback, updated_at=LATER, state="closed", body="needle closed body")
     )
+    await project_pull(
+        uow, replace(fallback, updated_at=LATEST, state="closed", body="unretained list body")
+    )
     await uow.save_github_resource(
         REPO,
         PULL_TEXT,
@@ -106,6 +109,20 @@ async def _seed_snapshots(uow: UnitOfWork) -> None:
             },
         ),
     )
+    same_body = replace(pull, number=10, body="needle unchanged body")
+    await project_pull(uow, same_body)
+    await project_pull(uow, replace(same_body, updated_at=LATEST))
+
+
+def _pull_provenance(path: Path) -> dict[str, tuple[int, bool]]:
+    with closing(sqlite3.connect(path)) as db:
+        return {
+            record_id: (seq, bool(provisional))
+            for record_id, seq, provisional in db.execute(
+                "SELECT record_id, seq, provisional FROM search_records WHERE kind = ?",
+                (PR_BODY_KIND,),
+            )
+        }
 
 
 async def test_populated_upgrade_stops_and_restarts_from_exact_checkpoint(
@@ -194,6 +211,7 @@ async def test_populated_upgrade_stops_and_restarts_from_exact_checkpoint(
             COMMENT_ID: ISSUE_COMMENT_KIND,
             PULL_ID: PR_BODY_KIND,
             f"{REPO}#9": PR_BODY_KIND,
+            f"{REPO}#10": PR_BODY_KIND,
         }
     )
 
@@ -259,6 +277,51 @@ async def test_populated_upgrade_stops_and_restarts_from_exact_checkpoint(
         await backfill_search(ledger, store, limit=1)
         assert positions == []
         assert indexed_rows(store.path) == before
+        provenance = _pull_provenance(store.path)
+        assert provenance[PULL_ID][1]
+        assert provenance[f"{REPO}#9"][1]
+        assert provenance[f"{REPO}#10"][1]
+
+        async def confirm_details(uow: UnitOfWork) -> None:
+            for number, body in (
+                (7, "verified snapshot body"),
+                (9, "verified current body"),
+                (10, "needle unchanged body"),
+            ):
+                pull = await uow.pull_request(REPO, number)
+                assert pull is not None
+                await apply_resource(
+                    uow,
+                    REPO,
+                    PULL_TEXT,
+                    str(number),
+                    GitHubResource(
+                        (),
+                        attributes={
+                            "head_sha": pull.head_sha,
+                            "pull_version": pull.version,
+                            "pull_updated_at": pull.updated_at,
+                            "body": body,
+                        },
+                    ),
+                    LATEST,
+                )
+
+        await ledger.run("system", confirm_details)
+        assert await ledger.search("retained body edit", (PR_BODY_KIND,), 20) == SearchPage((), 0)
+        assert await ledger.search("verified snapshot", (PR_BODY_KIND,), 20) == SearchPage(
+            (SearchHit(PULL_ID, PR_BODY_KIND, "verified snapshot body"),), 1
+        )
+        assert await ledger.search("closed body", (PR_BODY_KIND,), 20) == SearchPage((), 0)
+        assert await ledger.search("verified current", (PR_BODY_KIND,), 20) == SearchPage(
+            (SearchHit(f"{REPO}#9", PR_BODY_KIND, "verified current body"),), 1
+        )
+        confirmed = _pull_provenance(store.path)
+        assert confirmed[PULL_ID][0] > provenance[PULL_ID][0]
+        assert not confirmed[PULL_ID][1]
+        assert confirmed[f"{REPO}#9"][0] > provenance[f"{REPO}#9"][0]
+        assert not confirmed[f"{REPO}#9"][1]
+        assert confirmed[f"{REPO}#10"] == (provenance[f"{REPO}#10"][0], False)
 
 
 async def test_failed_page_rolls_back_insert_and_cursor_then_retries(tmp_path: Path) -> None:

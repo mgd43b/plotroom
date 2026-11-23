@@ -15,6 +15,7 @@ from plotroom.ports.search import (
     EmbeddedRecord,
     EmbeddingModel,
     EmbeddingPending,
+    EmbeddingReadiness,
     EmbeddingRevision,
     SearchHit,
     SearchPage,
@@ -60,9 +61,31 @@ SAVE_VECTOR = text("""
     VALUES (:model, :dimension, :seq, :vector)
 """)
 UNFINISHED_SOURCES = text("""
-    SELECT count(*) FROM json_each(:sources) AS sources
-    LEFT JOIN project_meta AS meta ON meta.key = 'search.backfill.' || sources.value
-    WHERE meta.value IS NOT 'null'
+    SELECT EXISTS (
+        SELECT 1 FROM json_each(:sources) AS sources
+        LEFT JOIN project_meta AS meta ON meta.key = 'search.backfill.' || sources.value
+        WHERE meta.value IS NOT 'null'
+    )
+""")
+PENDING_REVISIONS = text("""
+    SELECT EXISTS (
+        SELECT 1 FROM search_records AS r
+        WHERE r.embeddable AND r.kind IN (SELECT value FROM json_each(:kinds))
+          AND r.seq > COALESCE((
+              SELECT index_seq FROM embedding_cursors
+              WHERE model = :model AND dimension = :dimension
+          ), 0)
+          AND NOT EXISTS (
+              SELECT 1 FROM search_vectors AS v
+              WHERE v.model = :model AND v.dimension = :dimension AND v.record_seq = r.seq
+          )
+    )
+""")
+EMBEDDABLE_RECORDS = text("""
+    SELECT EXISTS (
+        SELECT 1 FROM search_records
+        WHERE embeddable AND kind IN (SELECT value FROM json_each(:kinds))
+    )
 """)
 COUNT_RECORDS = text("""
     SELECT count(*) AS total, count(v.record_seq) AS indexed
@@ -145,20 +168,27 @@ async def commit_batch(
     return True
 
 
-async def ready_count(
-    connection: AsyncConnection, model: EmbeddingModel, kinds: tuple[str, ...]
-) -> int | None:
+async def backfill_pending(connection: AsyncConnection, kinds: tuple[str, ...]) -> bool:
     sources = [source for source, members in SOURCE_KINDS.items() if members.intersection(kinds)]
     pending = await connection.execute(UNFINISHED_SOURCES, {"sources": json.dumps(sources)})
-    if pending.scalar_one():
-        return None
-    total, indexed = (
-        await connection.execute(
-            COUNT_RECORDS,
-            {"model": model.name, "dimension": model.dimension, "kinds": json.dumps(kinds)},
-        )
-    ).one()
-    return indexed if total == indexed else None
+    return bool(pending.scalar_one())
+
+
+async def preflight(
+    connection: AsyncConnection, model: EmbeddingModel, kinds: tuple[str, ...]
+) -> EmbeddingReadiness:
+    if not kinds:
+        return EmbeddingReadiness.EMPTY
+    if await backfill_pending(connection, kinds):
+        return EmbeddingReadiness.PENDING
+    params = {"model": model.name, "dimension": model.dimension, "kinds": json.dumps(kinds)}
+    # The writer advances the cursor and saves vectors atomically. Migrated vectors can
+    # already cover newer revisions, so only missing vectors above the cursor are pending.
+    if (await connection.execute(PENDING_REVISIONS, params)).scalar_one():
+        return EmbeddingReadiness.PENDING
+    if (await connection.execute(EMBEDDABLE_RECORDS, {"kinds": params["kinds"]})).scalar_one():
+        return EmbeddingReadiness.READY
+    return EmbeddingReadiness.EMPTY
 
 
 async def query_vectors(
@@ -173,13 +203,12 @@ async def query_vectors(
         "dimension": model.dimension,
         "kinds": None if kinds is None else json.dumps(kinds),
     }
-    if kinds is None:
-        # Direct index reads can inspect an incomplete prefix.
-        total = (await connection.execute(COUNT_RECORDS, key)).one().indexed
-    else:
-        total = await ready_count(connection, model, kinds)
-        if total is None:
-            raise EmbeddingPending
+    if kinds is not None and await backfill_pending(connection, kinds):
+        raise EmbeddingPending
+    total, indexed = (await connection.execute(COUNT_RECORDS, key)).one()
+    # Direct index reads can inspect an incomplete prefix.
+    if kinds is not None and total != indexed:
+        raise EmbeddingPending
     # A BLOB slice retains embedded NULs and bounds the read to four bytes per character.
     rows = await connection.execute(
         FIND_VECTORS, {**key, "query": query, "limit": limit, "excerpt_bytes": 4 * EXCERPT_LIMIT}
@@ -188,4 +217,4 @@ async def query_vectors(
         SearchHit(row.id, row.kind, row.excerpt.decode("utf-8", "ignore")[:EXCERPT_LIMIT])
         for row in rows
     )
-    return SearchPage(hits, total)
+    return SearchPage(hits, indexed)

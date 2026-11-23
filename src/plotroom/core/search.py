@@ -23,6 +23,7 @@ from plotroom.ports.search import (
     EmbeddingError,
     EmbeddingIndex,
     EmbeddingPending,
+    EmbeddingReadiness,
     Search,
     SearchBackfill,
     SearchPage,
@@ -178,10 +179,10 @@ class SemanticSearch:
         self, lexical: Search, project: str, text: str, kinds: tuple[str, ...], limit: int
     ) -> SearchPage:
         try:
-            count = await self.index.ready_count(kinds)
-            if count is None:
+            readiness = await self.index.preflight(kinds)
+            if readiness is EmbeddingReadiness.PENDING:
                 raise EmbeddingPending
-            if count == 0:
+            if readiness is EmbeddingReadiness.EMPTY:
                 return SearchPage((), 0, mode="semantic")
             vectors = await self.embedder.embed((text,))
             if len(vectors) != 1:

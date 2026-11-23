@@ -24,6 +24,7 @@ class SearchRecord:
     kind: str
     id: str
     body: str
+    provisional: bool = False
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,7 @@ class Search(Protocol):
     async def index_record(
         self, tx: Transaction, record: SearchRecord, *, only_if_absent: bool = False
     ) -> None:
-        """Store the current source text, preserving a present record during backfill."""
+        """Store source text, preserving a confirmed record in insert-if-absent mode."""
         ...
 
     async def query(
@@ -137,6 +138,12 @@ class Embedder(Protocol):
         ...
 
 
+class EmbeddingReadiness(StrEnum):
+    EMPTY = "empty"
+    READY = "ready"
+    PENDING = "pending"
+
+
 class EmbeddingIndex(Protocol):
     @property
     def project_id(self) -> str: ...
@@ -148,8 +155,8 @@ class EmbeddingIndex(Protocol):
 
     async def revisions_after(self, after: int, limit: int) -> list[EmbeddingRevision]: ...
 
-    async def ready_count(self, kinds: tuple[str, ...]) -> int | None:
-        """Return the eligible count, or None while requested sources are incomplete."""
+    async def preflight(self, kinds: tuple[str, ...]) -> EmbeddingReadiness:
+        """Check whether it is worth requesting a query vector for these sources."""
         ...
 
     async def commit(

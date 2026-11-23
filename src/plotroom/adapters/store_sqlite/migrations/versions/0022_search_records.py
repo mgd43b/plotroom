@@ -17,6 +17,7 @@ def upgrade() -> None:
         sa.Column("record_id", sa.Text(), nullable=False),
         sa.Column("body", sa.Text(), nullable=False),
         sa.Column("embeddable", sa.Boolean(), nullable=False),
+        sa.Column("provisional", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.UniqueConstraint("kind", "record_id"),
         sqlite_autoincrement=True,
     )
@@ -48,6 +49,10 @@ def upgrade() -> None:
         ),
     )
     op.create_index("search_vectors_record_seq", "search_vectors", ["record_seq"])
+    op.execute("""
+        CREATE INDEX search_records_embeddable_kind_seq ON search_records (kind, seq)
+        WHERE embeddable
+    """)
     op.execute("""
         INSERT INTO search_vectors (model, dimension, record_seq, vector)
         SELECT v.model, v.dimension, r.seq, v.vector

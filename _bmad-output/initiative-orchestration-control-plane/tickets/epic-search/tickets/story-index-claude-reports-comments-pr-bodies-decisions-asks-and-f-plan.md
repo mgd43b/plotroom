@@ -68,3 +68,4 @@ Given saved records with distinct source kinds and projects, when a matching aut
 - `uv run --locked ruff check src tests` and `uv run --locked pyright`
 - At this slice, the targeted suite passed 70 tests, including populated upgrade, authenticated decision and ask visibility, and preexisting message vector compatibility. Ruff, format checks, and Pyright passed.
 - Combined verification after review remediations passed 986 tests on each of managed Python 3.14 and 3.15. Ruff, Pyright and the core dependency check passed.
+- [Built in PR #168](https://github.com/mgd43b/plotroom/pull/168)

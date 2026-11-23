@@ -60,9 +60,11 @@ Given a project upgraded from a populated prior schema, when lexical backfill st
 ## Review Triage Log
 
 - A failed PR detail refresh can retain usable body provenance. Historical scanning accepts still-provenance-matched retained attributes and keeps its lifecycle fallback.
+- Automatic opening review found that a historical PR body could block a later detail refresh. Older or unproven lifecycle bodies and retained detail bodies stay provisional. A verified current detail replaces provisional text or confirms identical text without changing its vector revision. Accepted live list bodies keep precedence.
 
 ## Verification
 
 - `uv run --locked python -m pytest -q tests/test_search_backfill.py tests/test_search_sources.py tests/test_search.py tests/test_search_embeddings.py tests/test_migrations.py` passed all 61 tests.
 - `uv run --locked ruff check src tests` and `uv run --locked pyright` passed.
 - Combined verification after review remediations passed 986 tests on each of managed Python 3.14 and 3.15. Ruff, Pyright and the core dependency check passed.
+- [Built in PR #168](https://github.com/mgd43b/plotroom/pull/168)
