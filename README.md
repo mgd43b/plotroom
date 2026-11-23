@@ -1,10 +1,105 @@
-# plotroom
-plotroom
+# Plotroom
+
+**Keep coding agents coordinated across chats and worktrees.**
+
+When one agent starts work, another takes over, and you review the PR in a
+third chat, the branch survives. The handoff usually lives in chat history.
+Plotroom gives your MCP clients a shared project ledger for who owns the work,
+which files they plan to touch, what needs your attention, and what still needs
+verification after merge.
+
+Say two agents are working on an API change and a test update. In separate
+chats, both can decide to edit the same fixture, and the note to verify CI on
+main can disappear after the PR merges. With Plotroom, the orchestrator can
+see the overlapping claims in `next()` and decide who should own the fixture.
+A replacement chat can read `snapshot()` to recover the lane state. The worker
+can save "Verify CI on main" in the lane's checklist for a specific PR and head
+SHA. When that head merges, the step keeps the lane open until the result is
+recorded.
+
+## How a lane works
+
+A **lane** tracks an assigned worker, a branch, and optional work-item
+references. One developer can play the orchestrator role while a coding agent
+plays the worker. Add a clerk when you want a separate role to check merge
+readiness.
+
+1. The **orchestrator** starts the lane with `lane_start`. If a work-item
+   source is configured, `brief` drafts the handoff from the ticket and the
+   current path claims.
+2. The **worker** records planned paths with `claim` and flags a blocker with
+   `lane_update`. The orchestrator uses `next()` for attention items such as
+   overlapping claims or a lane waiting on them. `snapshot()` shows the
+   current board from a fresh chat.
+3. To use a checklist, set up [GitHub reads](#local-github-reads) and wait for
+   Plotroom to see the lane's open PR at its current head SHA. The worker or
+   orchestrator then calls `lane_ready` with that PR, head SHA, and the
+   follow-up steps. Plotroom activates the checklist when it observes that
+   exact PR and head merge. The lane's worker or the orchestrator records
+   completion with `checklist_done`, and the orchestrator can archive the
+   lane once the checklist is complete.
+
+## Try it locally
+
+On macOS or Linux, start from a checkout with Git and uv 0.13.8 or newer.
+This tour uses Python 3.14 and starts temporary local daemons. The tests play
+the orchestrator and worker roles, use temporary role tokens, and supply
+fixture GitHub evidence. You can run it without providing credentials,
+starting a coding agent, or connecting to a live repository.
+
+```sh
+git clone https://github.com/mgd43b/plotroom.git
+cd plotroom
+uv sync --locked --python 3.14
+uv run --locked --python 3.14 python -m pytest -v \
+  tests/test_lanes.py::test_local_lane_smoke \
+  tests/test_claims_e2e.py::test_conflicting_claim_reported_when_made \
+  tests/test_epic6_e2e.py
+```
+
+A successful run reports **7 passed**. The lane smoke test shows a worker
+marking a lane as waiting and the orchestrator recovering its state after a
+daemon restart. The claims test shows an overlap opening and clearing as
+workers change scope. The brief and checklist tests show a handoff with other
+lanes' claims and a fixture merge that keeps the lane open until verification
+is recorded. The smoke, brief, and checklist tests exercise both HTTP and the
+stdio proxy. [Lane smoke test](tests/test_lanes.py) ·
+[Claims test](tests/test_claims_e2e.py) ·
+[Brief and checklist tests](tests/test_epic6_e2e.py)
+
+## Run your own local instance
+
+Plotroom runs from source as a local daemon with a SQLite ledger per project.
+Save this one-worker example as `plotroom.toml` next to the checkout. The
+relative `data_dir` keeps the ledger alongside the config, outside the
+checkout.
+
+```toml
+data_dir = "plotroom-data"
+
+[projects.example.workers.agent]
+```
+
+From the checkout, run `uv run plotroom serve --config ../plotroom.toml` to
+serve MCP over HTTP. Issue a project-scoped token for each role.
+
+```sh
+uv run plotroom token issue --config ../plotroom.toml --project example --role orchestrator
+uv run plotroom token issue --config ../plotroom.toml --project example --role worker:agent
+```
+
+Configure each MCP client to run
+`uv run plotroom connect --stdio --config ../plotroom.toml --token-id <id>` from
+the checkout. Replace `<id>` with the `token_id` returned for that client's role.
 
 On macOS and Linux, `plotroom connect --stdio` with a config-derived URL uses a private Unix socket
 to verify the local daemon before sending credentials or MCP requests. Restart any `plotroom serve`
 process that was already running before upgrading so it can publish this socket. Explicit URLs
 continue to use HTTP or HTTPS as configured.
+
+Hosted container and Kubernetes setup are tracked in the project plan.
+See the [local server and ledger design](_bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md)
+and the [architecture notes](_bmad-output/initiative-orchestration-control-plane/architecture-orchestration-control-plane/architecture-orchestration-control-plane.md).
 
 ## Local GitHub reads
 
@@ -99,8 +194,8 @@ authorized_label_logins = ["maintainer"]
 pending. `ci_workflow` selects a workflow filename or numeric ID. The optional
 fix label waives a red main verdict when a configured GitHub user applied it.
 An authorized user can apply `allow-overlap` after Plotroom has observed the
-current PR head. The waiver applies to that head occurrence. Automatic branch
-updates run through an injected fixture write port.
+current PR head. The waiver applies to that head occurrence. Controller branch
+updates are available through an injected test fixture.
 
 An authorized human can apply `keywords-ok` to waive closing keywords in the
 PR body or commit messages. Draft PRs and PRs with the configured skip label
@@ -111,8 +206,9 @@ The live controller logs verdict changes and creates a `merge_ready` item
 for the clerk, or for the orchestrator when the project has no clerk token.
 The item includes SHA pins for a fresh `merge_gate` call and the full command
 using the configured merge method. GitHub enforces the PR head pin on the
-printed command. The fixture controller checks both refs at dispatch. Controller-run merges default to off.
-The opt-in requires an injected loopback test fixture.
+printed command. Controller-run merges default to off and require an injected
+loopback test fixture, where both refs are checked at dispatch. With a live
+repository, use the verdict and pinned command for a human or clerk to act on.
 
 The orchestrator can set the deploy window with `freeze(reason, request_id)` and
 clear it with `unfreeze(request_id)`. The window is stored in the project ledger
@@ -122,3 +218,9 @@ For flake detection across main commits, a successful check can attach a
 notice annotation with the test ID as its title, the source file as its path,
 and the exact message `plotroom:test-outcome=passed`. This gives Plotroom
 evidence that the previously failing test ran and passed.
+
+## More on the workflow
+
+- [Lane briefs and post-merge checklist design](_bmad-output/initiative-orchestration-control-plane/tickets/epic-briefs-and-checklists/epic-briefs-and-checklists.md)
+- [Merge gate rules and evidence](_bmad-output/initiative-orchestration-control-plane/tickets/epic-merge-controller/epic-merge-controller.md)
+- [How this repository coordinates its own development](coordination/README.md)
