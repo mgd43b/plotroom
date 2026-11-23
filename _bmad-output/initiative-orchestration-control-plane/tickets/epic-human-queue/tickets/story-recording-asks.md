@@ -9,7 +9,7 @@ hitl: false
 risk: low
 tracker_id: "84"
 remote: "https://github.com/mgd43b/plotroom/issues/84"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Recording asks

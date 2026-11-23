@@ -9,7 +9,7 @@ hitl: false
 risk: high
 tracker_id: "115"
 remote: "https://github.com/mgd43b/plotroom/issues/115"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Embeddings off the writer

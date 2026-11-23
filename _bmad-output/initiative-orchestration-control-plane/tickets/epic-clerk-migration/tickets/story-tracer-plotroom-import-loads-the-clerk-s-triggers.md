@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "108"
 remote: "https://github.com/mgd43b/plotroom/issues/108"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Tracer: plotroom import loads the clerk's triggers

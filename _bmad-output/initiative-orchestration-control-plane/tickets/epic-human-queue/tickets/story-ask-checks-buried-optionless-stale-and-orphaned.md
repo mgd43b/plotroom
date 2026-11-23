@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "85"
 remote: "https://github.com/mgd43b/plotroom/issues/85"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Ask checks: buried, optionless, stale and orphaned
