@@ -9,7 +9,7 @@ hitl: false
 risk: high
 tracker_id: "53"
 remote: "https://github.com/mgd43b/plotroom/issues/53"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Exactly once across restarts, and branch-glob binding
@@ -29,3 +29,4 @@ Verify: Killing the server after a trigger's fire commits and before the action 
 ## Notes
 
 - Check beyond its criteria: replaying the recorded inputs after a restart opens no second next item and writes no second actions row.
+- Built: https://github.com/mgd43b/plotroom/pull/148

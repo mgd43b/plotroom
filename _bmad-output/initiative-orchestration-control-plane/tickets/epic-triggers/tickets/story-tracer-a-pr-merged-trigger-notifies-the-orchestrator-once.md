@@ -9,7 +9,7 @@ hitl: false
 risk: high
 tracker_id: "52"
 remote: "https://github.com/mgd43b/plotroom/issues/52"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Tracer: a pr_merged trigger notifies the orchestrator once
@@ -30,3 +30,4 @@ Verify: A trigger on pr_merged for a test PR opens exactly one next item when th
 ## Notes
 
 - Check beyond its criteria: a trigger evaluated during a burst of events fires once, not once per event.
+- Built: https://github.com/mgd43b/plotroom/pull/148
