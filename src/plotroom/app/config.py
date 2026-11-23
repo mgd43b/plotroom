@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+from plotroom.adapters.claude_desktop import SESSION_ID
 from plotroom.core.roles import role_family
 from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, MIN_BOARD_BUDGET
 
@@ -52,6 +53,14 @@ class SwitchboardConfig:
 
 
 @dataclass(frozen=True)
+class SessionReaderConfig:
+    claude_home: Path
+    app_support: Path
+    sessions: Mapping[str, str]
+    poll_seconds: int
+
+
+@dataclass(frozen=True)
 class Config:
     """The validated settings a plotroom process runs with."""
 
@@ -73,6 +82,7 @@ class Config:
     wait_cap: int = 240
     watchers: Mapping[str, tuple[str, ...]] = field(default_factory=lambda: {})
     switchboards: Mapping[str, SwitchboardConfig] = field(default_factory=lambda: {})
+    session_readers: Mapping[str, SessionReaderConfig] = field(default_factory=lambda: {})
 
     @property
     def url(self) -> str:
@@ -160,6 +170,7 @@ def load_config(
         ticket_trees=_ticket_trees(projects, raw.get("projects"), base),
         watchers=_watchers(projects, raw.get("projects"), drain_sessions),
         switchboards=_switchboards(projects, raw.get("projects")),
+        session_readers=_session_readers(projects, raw.get("projects"), base),
         wait_cap=_integer("wait_cap", raw.get("wait_cap", 240), minimum=1),
         snapshot_budget=_integer(
             "snapshot_budget",
@@ -316,6 +327,42 @@ def _switchboards(projects: tuple[str, ...], table: Any) -> dict[str, Switchboar
                     raise ConfigError(f"{label} worker addresses must be unique")
                 senders[address] = worker
         configured[project_id] = SwitchboardConfig(board, command, senders)
+    return configured
+
+
+def _session_readers(
+    projects: tuple[str, ...], table: Any, base: Path
+) -> dict[str, SessionReaderConfig]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, SessionReaderConfig] = {}
+    for project_id in projects:
+        project = entries.get(project_id, {})
+        if "session_reader" not in project:
+            continue
+        label = f"projects.{project_id}.session_reader"
+        raw_settings = project["session_reader"]
+        if not isinstance(raw_settings, dict):
+            raise ConfigError(f"{label} must be a table")
+        settings = cast("dict[str, Any]", raw_settings)
+        home = (
+            base / Path(_string(f"{label}.claude_home", settings.get("claude_home"))).expanduser()
+        )
+        support = (
+            base / Path(_string(f"{label}.app_support", settings.get("app_support"))).expanduser()
+        )
+        interval = _integer(f"{label}.poll_seconds", settings.get("poll_seconds", 1), minimum=1)
+        sessions: dict[str, str] = {}
+        for worker, worker_settings in project.get("workers", {}).items():
+            if "claude_session" in worker_settings:
+                session = _string(
+                    f"{label} session for {worker}", worker_settings["claude_session"]
+                )
+                if not SESSION_ID.fullmatch(session) or session in sessions:
+                    raise ConfigError(f"{label} session IDs must be valid and unique")
+                sessions[session] = worker
+        configured[project_id] = SessionReaderConfig(
+            home.resolve(), support.resolve(), sessions, interval
+        )
     return configured
 
 

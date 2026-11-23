@@ -43,7 +43,7 @@ async def append_inbound(uow: UnitOfWork, event: NewEvent) -> AppendResult:
 
 
 async def record_claude(
-    uow: UnitOfWork, report: SessionEvent, *, lane: str | None = None, worker: str | None = None
+    uow: UnitOfWork, report: SessionEvent, *, lane: str | None = None
 ) -> AppendResult:
     role, _, caller = uow.role.partition(":")
     if role not in CLAUDE_APPENDERS or report.kind not in (TURN_REPORT, SESSION_MESSAGE):
@@ -54,8 +54,6 @@ async def record_claude(
         lane = await infer_lane(uow, worker=caller)
         if lane is None:
             raise LedgerError("forbidden", "a worker must have a current lane")
-    elif worker is not None:
-        lane = await infer_lane(uow, worker=worker)
     elif lane is not None and await uow.find_lane(lane) is None:
         raise LedgerError("not_found", "lane not found")
 

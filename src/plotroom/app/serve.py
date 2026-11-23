@@ -17,6 +17,7 @@ from typing import Any
 import uvicorn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
+from plotroom.adapters.claude_desktop import ClaudeDesktopReader
 from plotroom.adapters.mcp import build_app
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.adapters.switchboard import Switchboard
@@ -37,6 +38,7 @@ from plotroom.app.portfile import (
     write_port,
 )
 from plotroom.app.runtime import ProjectRuntime
+from plotroom.app.session_intake import SessionIntake
 from plotroom.app.sqlite_floor import floor_problem
 from plotroom.app.tokens import TokenRegistry
 from plotroom.core.actions import SWITCHBOARD_SEND
@@ -358,6 +360,15 @@ class Daemon:
                 if relay is not None
                 else None
             )
+            inputs = [switchboard.run] if switchboard is not None else []
+            if desktop := self._config.session_readers.get(project_id):
+                intake = SessionIntake(
+                    project.ledger,
+                    ClaudeDesktopReader(desktop.claude_home, desktop.app_support),
+                    desktop.sessions,
+                    desktop.poll_seconds,
+                )
+                inputs.append(intake.run)
             project.runtime = ProjectRuntime(
                 project.ledger,
                 self._clock,
@@ -366,7 +377,7 @@ class Daemon:
                 handlers={SWITCHBOARD_SEND: switchboard.send} if switchboard is not None else {},
                 workers=workers,
                 work_items=BmadTicketTree(*source) if source is not None else None,
-                inputs=(switchboard.run,) if switchboard is not None else (),
+                inputs=tuple(inputs),
             )
             project.runtime.start()
 
