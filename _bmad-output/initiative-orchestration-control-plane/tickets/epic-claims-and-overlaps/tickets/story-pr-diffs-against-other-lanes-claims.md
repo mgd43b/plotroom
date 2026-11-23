@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "77"
 remote: "https://github.com/mgd43b/plotroom/issues/77"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # PR diffs against other lanes' claims
