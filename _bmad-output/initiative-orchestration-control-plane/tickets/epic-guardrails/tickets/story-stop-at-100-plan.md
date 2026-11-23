@@ -73,3 +73,4 @@ Refs #103.
 
 - `uv run python -m pytest tests/test_budgets.py tests/test_trigger_actions.py tests/test_trigger_recovery.py` passed all 18 tests.
 - Combined native review ran four independent lenses. Local verification passed on Python 3.14 and 3.15 with 828 tests each, plus focused migration, delivery, and transport regression checks. Ruff, Pyright, and the core dependency check passed.
+- Built: https://github.com/mgd43b/plotroom/pull/160

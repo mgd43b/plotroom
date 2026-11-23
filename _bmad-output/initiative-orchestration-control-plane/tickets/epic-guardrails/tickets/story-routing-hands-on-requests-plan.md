@@ -68,3 +68,4 @@ Refs #105.
 
 - `uv run python -m pytest tests/test_routing.py tests/test_transport_contract.py tests/test_config.py` passed 68 tests on Python 3.14.10. Ruff, format, and Pyright checks passed for the touched Python files.
 - Combined native review ran four independent lenses. Local verification passed on Python 3.14 and 3.15 with 828 tests each, plus focused migration, delivery, and transport regression checks. Ruff, Pyright, and the core dependency check passed.
+- Built: https://github.com/mgd43b/plotroom/pull/160

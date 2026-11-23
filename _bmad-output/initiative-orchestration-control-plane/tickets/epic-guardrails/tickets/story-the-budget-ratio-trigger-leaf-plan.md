@@ -64,3 +64,4 @@ Refs #104.
 
 - `uv run python -m pytest tests/test_budget_ratio.py tests/test_trigger_predicates.py tests/test_triggers.py`
 - Combined native review ran four independent lenses. Local verification passed on Python 3.14 and 3.15 with 828 tests each, plus focused migration, delivery, and transport regression checks. Ruff, Pyright, and the core dependency check passed.
+- Built: https://github.com/mgd43b/plotroom/pull/160
