@@ -1,10 +1,9 @@
 """Start ``plotroom serve`` on demand for ``plotroom connect --stdio`` (AD-3).
 
-A server that answers at the config's URL, not the lock, says whether a daemon runs. A config whose
-port is 0 has no URL of its own: the daemon publishes the port it bound in the data directory's
-port file, which is trusted only while the lock is held by the pid it names. A second
-``serve`` is harmless (it exits with the lock code), so two clients starting at once need no
-probe: whoever loses the lock waits for the winner to answer.
+Readiness comes from an MCP ping result or HTTP 401. The daemon publishes its listener address in
+the data directory's port file, which is trusted while the lock is held by the pid it names.
+Port 0 and credentialed connections use that publication. A second ``serve`` exits with the lock
+code, and the client that started it waits for the lock's owner to answer.
 """
 
 from __future__ import annotations
@@ -20,6 +19,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -27,7 +27,7 @@ from plotroom.adapters.mcp.proxy import UpstreamStartError
 from plotroom.app.cli import DEFAULT_START_TIMEOUT, EXIT_LOCKED
 from plotroom.app.config import Config
 from plotroom.app.lock import LOCK_FILE_NAME, DataDirLock, LockError
-from plotroom.app.portfile import read_port
+from plotroom.app.portfile import read_listener
 
 log = logging.getLogger("plotroom.daemon_start")
 
@@ -111,8 +111,10 @@ def answers_ping(body: str) -> bool:
     return False
 
 
-async def speaks_mcp(url: str, *, within: float = _PROBE_TIMEOUT) -> bool:
-    """Whether something at ``url`` answers a JSON-RPC ``ping``: an MCP server, not any program.
+async def speaks_mcp(
+    url: str, *, within: float = _PROBE_TIMEOUT, host_alias: str | None = None
+) -> bool:
+    """Whether the endpoint answers a JSON-RPC ping or requires authentication.
 
     A bare TCP connect would take any program on the port for the daemon. ``within`` bounds the
     whole probe, not each read.
@@ -121,13 +123,17 @@ async def speaks_mcp(url: str, *, within: float = _PROBE_TIMEOUT) -> bool:
         return False
     ping = {"jsonrpc": "2.0", "id": PROBE_ID, "method": "ping"}
     headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+    if host_alias is not None:
+        headers["host"] = f"{host_alias}:{urlsplit(url).port}"
     body = b""
     try:
         async with asyncio.timeout(min(within, _PROBE_TIMEOUT)):
             async with (
-                httpx.AsyncClient() as http,
+                httpx.AsyncClient(trust_env=False) as http,
                 http.stream("POST", url, json=ping, headers=headers) as response,
             ):
+                if response.status_code == 401:
+                    return True
                 if not response.is_success:
                     return False
                 async for chunk in response.aiter_bytes():
@@ -194,19 +200,25 @@ def holds_lock(data_dir: Path) -> bool:
     return False
 
 
-def _current_url(config: Config) -> str | None:
-    if config.port != 0:
+def _current_url(config: Config, require_published: bool) -> str | None:
+    if config.port != 0 and not require_published:
         return config.url
-    published = read_port(config.data_dir)
+    published = read_listener(config.data_dir)
     if published is None:
         return None
-    pid, port = published
+    pid, port, host = published.pid, published.port, published.host
+    if config.port not in (0, port):
+        return None
+    if require_published and host is None:
+        return None
     # The file alone proves nothing: a killed daemon leaves it, and the kernel may hand its port
     # to any other program. Only the lock's current owner can have written it. A dead pid needs no
     # lock probe, which briefly takes the lock and could make a daemon starting just then lose it.
     if not _pid_alive(pid) or lock_owner(config.data_dir) != pid:
         return None
-    return replace(config, port=port).url
+    return replace(
+        config, host=host if require_published and host is not None else config.host, port=port
+    ).url
 
 
 def _pid_alive(pid: int) -> bool:
@@ -219,12 +231,23 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-async def current_url(config: Config) -> str | None:
+async def current_url(config: Config, *, require_published: bool = False) -> str | None:
     """Where the daemon for ``config`` is meant to be listening, or ``None`` when that is unknown.
 
-    A fixed port is the config's own URL. Port 0 is the URL of the port the lock's owner published.
+    Credentialed clients require the lock owner's published address. Clients with port 0
+    without credentials may use a legacy port-only publication.
     """
-    return await asyncio.to_thread(_current_url, config)
+    return await asyncio.to_thread(_current_url, config, require_published)
+
+
+async def _ready_url(config: Config, require_published: bool, within: float) -> str | None:
+    url = await current_url(config, require_published=require_published)
+    host_alias = "localhost" if require_published and config.host.lower() == "localhost" else None
+    if url is None or not await speaks_mcp(url, within=within, host_alias=host_alias):
+        return None
+    if require_published and url != await current_url(config, require_published=True):
+        return None  # the daemon may have relinquished the port during the probe
+    return url
 
 
 async def ensure_daemon(
@@ -234,14 +257,15 @@ async def ensure_daemon(
     env: Mapping[str, str],
     wait: float = DEFAULT_START_TIMEOUT,
     command: Sequence[str] | None = None,
+    require_published: bool = False,
 ) -> str:
     """Return the URL where a server answers, starting ``plotroom serve`` if needed.
 
-    The URL is the config's own for a fixed port, or the one the daemon published for port 0.
+    A fixed port without credentials uses the config URL. Other requests use the publication.
     Raises ``UpstreamStartError`` with a reason fit for the client when it cannot.
     """
-    url = await current_url(config)
-    if url is not None and await speaks_mcp(url):
+    url = await _ready_url(config, require_published, _PROBE_TIMEOUT)
+    if url is not None:
         return url
     log_path = config.data_dir / LOG_FILE_NAME
     argv = list(command) if command is not None else serve_command(config_path, log_path)
@@ -262,8 +286,8 @@ async def ensure_daemon(
         # Wait on this child. When it loses the lock it waits for the winner to listen, and starts
         # again only if that winner went away (a daemon still shutting down keeps the lock a while).
         while (remaining := deadline - time.monotonic()) > 0:
-            url = await current_url(config)
-            if url is not None and await speaks_mcp(url, within=remaining):
+            url = await _ready_url(config, require_published, remaining)
+            if url is not None:
                 return url
             code = child.poll()
             if code is not None:
@@ -279,7 +303,7 @@ async def ensure_daemon(
         else:
             break
     owner = await asyncio.to_thread(lock_owner, config.data_dir)
-    url = await current_url(config)
+    url = await current_url(config, require_published=require_published)
     if owner is not None and owner != child.pid:
         if url is None:
             answer = "it has published no address that answers"

@@ -12,10 +12,11 @@ import pytest
 from mcp.client.client import Client
 from mcp.client.stdio import StdioServerParameters
 
-from conftest import Child, start_plotroom, tool_json
+from conftest import Child, authenticated_client, start_plotroom, tool_json
 from plotroom.app.cli import EXIT_CONFIG, EXIT_FAILURE, EXIT_LOCKED, main
 from plotroom.app.daemon_start import speaks_mcp
 from plotroom.app.portfile import PORT_FILE_NAME, read_port
+from plotroom.app.tokens import IssuedToken
 
 EMPTY_BOARD: dict[str, Any] = {
     "ok": True,
@@ -32,9 +33,11 @@ MODES = ["legacy", "auto"]
 
 
 @pytest.mark.parametrize("mode", MODES)
-async def test_snapshot_over_http_is_the_empty_board(server: tuple[Child, str], mode: str) -> None:
+async def test_snapshot_over_http_is_the_empty_board(
+    server: tuple[Child, str], server_token: IssuedToken, mode: str
+) -> None:
     _, url = server
-    async with Client(url, mode=mode) as client:
+    async with authenticated_client(url, server_token.bearer, mode=mode) as client:
         result = await client.call_tool("snapshot", {})
     assert result.is_error is False
     assert tool_json(result) == EMPTY_BOARD
@@ -42,11 +45,13 @@ async def test_snapshot_over_http_is_the_empty_board(server: tuple[Child, str], 
 
 @pytest.mark.parametrize("mode", MODES)
 async def test_snapshot_through_the_stdio_proxy_is_the_same_board(
-    server: tuple[Child, str], mode: str
+    server: tuple[Child, str], server_token: IssuedToken, mode: str
 ) -> None:
     _, url = server
     proxy = StdioServerParameters(
-        command=sys.executable, args=["-m", "plotroom", "connect", "--stdio", "--url", url]
+        command=sys.executable,
+        args=["-m", "plotroom", "connect", "--stdio", "--url", url],
+        env={"PLOTROOM_TOKEN": server_token.bearer},
     )
     async with Client(proxy, mode=mode) as client:
         result = await client.call_tool("snapshot", {})
@@ -54,9 +59,11 @@ async def test_snapshot_through_the_stdio_proxy_is_the_same_board(
     assert tool_json(result) == EMPTY_BOARD
 
 
-async def test_only_snapshot_is_registered(server: tuple[Child, str]) -> None:
+async def test_only_snapshot_is_registered(
+    server: tuple[Child, str], server_token: IssuedToken
+) -> None:
     _, url = server
-    async with Client(url, mode="legacy") as client:
+    async with authenticated_client(url, server_token.bearer) as client:
         tools = await client.list_tools()
     assert [tool.name for tool in tools.tools] == ["snapshot"]
 
@@ -118,9 +125,47 @@ async def test_a_foreign_host_header_is_refused(server: tuple[Child, str]) -> No
         response = await http.post(
             url,
             content=b"{}",
-            headers={"content-type": "application/json", "host": "evil.example"},
+            headers={"host": "unknown.example"},
         )
     assert response.status_code == 421
+
+
+@pytest.mark.parametrize("header", [{}, {"authorization": "Bearer invalid"}])
+async def test_missing_or_invalid_credentials_get_a_bare_401(
+    server: tuple[Child, str], header: dict[str, str]
+) -> None:
+    _, url = server
+    async with httpx.AsyncClient() as http:
+        response = await http.post(url, json={}, headers=header)
+    assert response.status_code == 401
+    assert response.content == b""
+    assert "www-authenticate" not in response.headers
+
+
+async def test_authenticated_requests_still_get_the_sdk_transport_checks(
+    server: tuple[Child, str], server_token: IssuedToken
+) -> None:
+    _, url = server
+    async with httpx.AsyncClient(
+        headers={"authorization": f"Bearer {server_token.bearer}"}
+    ) as http:
+        content_type = await http.post(url, content=b"{}")
+        origin = await http.post(url, json={}, headers={"origin": "https://unknown.example"})
+        too_big = await http.post(
+            url, content=b"x" * (4 * 1024 * 1024 + 1), headers={"content-type": "application/json"}
+        )
+    assert content_type.status_code == 400
+    assert origin.status_code == 403
+    assert too_big.status_code == 413
+
+
+def test_connect_refuses_a_bearer_over_plaintext_remote_http(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("PLOTROOM_TOKEN", "fixture-bearer")
+    code = main(["connect", "--stdio", "--url", "http://plotroom.example.org/mcp"])
+    assert code == EXIT_CONFIG
+    assert "fixture-bearer" not in capsys.readouterr().err
 
 
 def test_a_project_file_that_cannot_migrate_stops_serve_before_it_listens(

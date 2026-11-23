@@ -12,6 +12,7 @@ from fakes import FixedClock, Fixture, MemoryStore
 from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import EventRegistry, FieldSpec, LedgerError, NewEvent
 from plotroom.core.ledger import Ledger
+from plotroom.core.roles import OwnershipView, WriterRule
 from plotroom.core.unit_of_work import UnitOfWork
 
 type Parts = tuple[Ledger, MemoryStore, Fixture, FixedClock]
@@ -131,7 +132,7 @@ async def test_a_handler_may_not_return_anything_but_a_json_object(parts: Parts)
         await uow.append(NewEvent("fixture", "fixture.noted", "k", {"text": "t"}))
         return {"when": object()}
 
-    fixture.catalog.commands.register(Command("bad_result", (), bad))
+    fixture.catalog.commands.register(Command("bad_result", (), bad), rules=(WriterRule("clerk"),))
     with pytest.raises(TypeError, match="JSON object"):
         await ledger.execute("clerk", "bad_result", "r", {})
     assert store.dump() == {"events": [], "project_seq": 0}
@@ -144,7 +145,9 @@ async def test_a_handler_works_on_its_own_copy_of_the_arguments(parts: Parts) ->
         args["items"].append("added by the handler")
         return {"n": len(args["items"])}
 
-    fixture.catalog.commands.register(Command("scribble", (FieldSpec("items", "array"),), scribble))
+    fixture.catalog.commands.register(
+        Command("scribble", (FieldSpec("items", "array"),), scribble), rules=(WriterRule("clerk"),)
+    )
     sent: dict[str, Any] = {"items": ["a"]}
     await ledger.execute("clerk", "scribble", "r", sent)
     assert sent == {"items": ["a"]}
@@ -240,7 +243,9 @@ async def test_a_caller_mutating_its_args_while_the_handler_runs_changes_nothing
         await release.wait()
         return {"saw": args["key"]}
 
-    fixture.catalog.commands.register(Command("slow", (FieldSpec("key", "str"),), slow))
+    fixture.catalog.commands.register(
+        Command("slow", (FieldSpec("key", "str"),), slow), rules=(WriterRule("orchestrator"),)
+    )
     args: dict[str, Any] = {"key": "original"}
     running = asyncio.create_task(ledger.execute("orchestrator", "slow", "req-1", args))
     await started.wait()
@@ -251,3 +256,57 @@ async def test_a_caller_mutating_its_args_while_the_handler_runs_changes_nothing
     assert done.result == {"saw": "original"}
     recorded = (await ledger.events_after(0))[-1]
     assert recorded.fields["args"] == {"key": "original"}
+
+
+async def test_a_registered_command_without_a_writer_rule_is_denied(parts: Parts) -> None:
+    ledger, store, fixture, _ = parts
+
+    async def handler(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
+        pytest.fail("handler ran without a rule")
+
+    fixture.catalog.commands.register(Command("undeclared", (), handler))
+    for role in ("orchestrator", "worker:ada", "system"):
+        with pytest.raises(LedgerError) as raised:
+            await ledger.execute(role, "undeclared", "request", {})
+        assert raised.value.code == "forbidden"
+    assert store.dump() == {"events": [], "project_seq": 0}
+
+
+async def test_ownership_is_checked_for_the_receipts_target_before_replay(parts: Parts) -> None:
+    ledger, store, fixture, _ = parts
+    owned = {"first"}
+    receipt_seen: list[bool] = []
+
+    async def owns(view: OwnershipView, args: dict[str, Any]) -> bool:
+        assert view.role == "worker:ada"
+        assert not hasattr(view, "append")
+        assert not hasattr(view, "allocate_seq")
+        receipt = await view.find_event("core", "core.owned", "worker:ada:request")
+        receipt_seen.append(receipt is not None)
+        return args.get("key") in owned
+
+    async def handler(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
+        return {"key": args["key"]}
+
+    fixture.catalog.commands.register(
+        Command("owned", (FieldSpec("key", "str"),), handler),
+        rules=(WriterRule("worker", owns),),
+    )
+    first = await ledger.execute("worker:ada", "owned", "request", {"key": "first"})
+    before = store.dump()
+    denied = {"key": "second"}
+    replay = await ledger.execute("worker:ada", "owned", "request", denied)
+    assert replay.replayed is True
+    assert replay.result == first.result
+
+    owned.clear()
+    owned.add("second")
+    for request_id, args in [
+        ("request", {"key": "second"}),
+        ("new-request", {"key": "first"}),
+    ]:
+        with pytest.raises(LedgerError) as raised:
+            await ledger.execute("worker:ada", "owned", request_id, args)
+        assert raised.value.code == "forbidden"
+    assert receipt_seen == [False, True, True, True]
+    assert store.dump() == before

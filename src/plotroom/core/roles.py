@@ -4,10 +4,24 @@ contains more than one colon and a worker slug contains none."""
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
-SIMPLE_ROLES: frozenset[str] = frozenset({"orchestrator", "clerk", "drain", "bridge", "system"})
+if TYPE_CHECKING:
+    from plotroom.core.events import Event
+
+SIMPLE_TOKEN_ROLES = frozenset({"orchestrator", "clerk", "drain", "bridge"})
+SIMPLE_ROLES = SIMPLE_TOKEN_ROLES | {"system"}
 WORKER_FAMILY = "worker"
+ROLE_FAMILIES = SIMPLE_ROLES | {WORKER_FAMILY}
 _WORKER = re.compile(r"worker:([a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)")
+
+
+@dataclass(frozen=True)
+class Identity:
+    project_id: str
+    role: str
 
 
 def role_family(role: str) -> str:
@@ -22,3 +36,53 @@ def role_family(role: str) -> str:
     raise ValueError(
         f"invalid role {role!r}: expected one of {sorted(SIMPLE_ROLES)} or worker:<slug>"
     )
+
+
+def validate_token_role(role: str) -> None:
+    """Validate a role that can be issued a credential."""
+    if role_family(role) == "system":
+        raise ValueError("system is an internal role and cannot have a token")
+
+
+@dataclass(frozen=True, slots=True)
+class OwnershipView:
+    """The calling role and read access to events in the command's transaction."""
+
+    role: str
+    _lookup: Callable[[str, str, str], Awaitable[Event | None]] = field(repr=False)
+
+    async def find_event(self, source: str, kind: str, upstream_id: str) -> Event | None:
+        return await self._lookup(source, kind, upstream_id)
+
+
+type Ownership = Callable[[OwnershipView, dict[str, Any]], Awaitable[bool]]
+
+
+@dataclass(frozen=True)
+class WriterRule:
+    """A role family allowed to write, optionally subject to a read-only ownership predicate."""
+
+    family: str
+    owns: Ownership | None = None
+
+    def __post_init__(self) -> None:
+        if self.family not in ROLE_FAMILIES:
+            raise ValueError(f"unknown writer role family {self.family!r}")
+
+
+class WriterRules:
+    """Authorization rows for command names and fully qualified event kinds."""
+
+    def __init__(self) -> None:
+        self._rules: dict[str, dict[str, WriterRule]] = {}
+
+    def declare(self, operation: str, rules: tuple[WriterRule, ...]) -> None:
+        if operation in self._rules:
+            raise ValueError(f"writer rules for {operation!r} are already declared")
+        by_family = {rule.family: rule for rule in rules}
+        if len(by_family) != len(rules):
+            raise ValueError(f"writer rules for {operation!r} declare a role family twice")
+        self._rules[operation] = by_family
+
+    def rule_for(self, operation: str, family: str) -> WriterRule | None:
+        return self._rules.get(operation, {}).get(family)

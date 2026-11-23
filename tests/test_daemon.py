@@ -7,16 +7,24 @@ import os
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import uvicorn
-from mcp.client.client import Client
+from mcp.server.mcpserver import Context, MCPServer
+from starlette.requests import Request
 
-from conftest import tool_json
+from conftest import authenticated_client, tool_json
+from plotroom.adapters.mcp.server import execute_command
 from plotroom.adapters.store_sqlite import SqliteStore, head_revision
 from plotroom.app.config import Config
 from plotroom.app.lock import LockError
-from plotroom.app.portfile import PORT_FILE_NAME, read_port
+from plotroom.app.portfile import PORT_FILE_NAME, PublishedListener, read_listener, read_port
 from plotroom.app.serve import Daemon
+from plotroom.app.tokens import TokenRegistry
+from plotroom.core.catalog import build_catalog
+from plotroom.core.commands import Command
+from plotroom.core.roles import WriterRule
+from plotroom.core.unit_of_work import UnitOfWork
 
 
 def make_config(tmp_path: Path, *projects: str) -> Config:
@@ -27,6 +35,10 @@ def make_config(tmp_path: Path, *projects: str) -> Config:
         allowed_hosts=("127.0.0.1:*",),
         projects=projects or ("demo",),
     )
+
+
+def bearer(config: Config, project: str = "demo", role: str = "orchestrator") -> str:
+    return TokenRegistry(config.data_dir).issue(project, role, local=False).bearer
 
 
 async def run_daemon(daemon: Daemon) -> tuple[asyncio.Task[None], int]:
@@ -68,7 +80,7 @@ async def test_a_second_daemon_on_the_directory_is_refused_and_the_first_unaffec
     try:
         with pytest.raises(LockError):
             await Daemon(config).run()
-        async with Client(f"http://127.0.0.1:{port}/mcp", mode="legacy") as client:
+        async with authenticated_client(f"http://127.0.0.1:{port}/mcp", bearer(config)) as client:
             assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
     finally:
         await stop(first, task)
@@ -85,7 +97,7 @@ async def test_old_sqlite_serves_unavailable_and_never_opens_a_project_file(
     daemon = Daemon(config, sqlite_version="3.50.4")
     task, port = await run_daemon(daemon)
     try:
-        async with Client(f"http://127.0.0.1:{port}/mcp", mode="legacy") as client:
+        async with authenticated_client(f"http://127.0.0.1:{port}/mcp", bearer(config)) as client:
             result = tool_json(await client.call_tool("snapshot", {}))
         assert result["ok"] is False
         assert result["error"]["code"] == "unavailable"
@@ -95,8 +107,10 @@ async def test_old_sqlite_serves_unavailable_and_never_opens_a_project_file(
         await stop(daemon, task)
 
 
-async def test_several_projects_are_all_migrated_but_snapshot_needs_a_credential(
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+async def test_several_projects_are_migrated_and_each_token_only_sees_its_project(
     tmp_path: Path,
+    mode: str,
 ) -> None:
     config = make_config(tmp_path, "alpha", "beta")
     daemon = Daemon(config)
@@ -108,9 +122,78 @@ async def test_several_projects_are_all_migrated_but_snapshot_needs_a_credential
                 assert await store.revision() == head_revision()
             finally:
                 await store.close()
-        async with Client(f"http://127.0.0.1:{port}/mcp", mode="legacy") as client:
-            result = tool_json(await client.call_tool("snapshot", {}))
-        assert result["error"]["code"] == "invalid"
+            url = f"http://127.0.0.1:{port}/mcp"
+            async with authenticated_client(url, bearer(config, project_id), mode=mode) as client:
+                board = tool_json(await client.call_tool("snapshot", {}))
+                assert board["data"]["project"] == project_id
+                assert (
+                    "project" not in (await client.list_tools()).tools[0].input_schema["properties"]
+                )
+    finally:
+        await stop(daemon, task)
+
+
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+async def test_a_mutating_tool_uses_the_authenticated_role_and_project_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    catalog = build_catalog()
+
+    async def record(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
+        return {"role": uow.role}
+
+    catalog.commands.register(
+        Command("record_decision", (), record), rules=(WriterRule("orchestrator"),)
+    )
+    sdk = MCPServer("fixture")
+
+    @sdk.tool()
+    async def record_decision(  # pyright: ignore[reportUnusedFunction]
+        request_id: str, ctx: Context[Any, Request]
+    ) -> dict[str, Any]:
+        return await execute_command(ctx, "record_decision", request_id, {})
+
+    def fixture_server(_name: str) -> MCPServer[Any]:
+        return sdk
+
+    monkeypatch.setattr("plotroom.adapters.mcp.server.MCPServer", fixture_server)
+    monkeypatch.setattr("plotroom.app.serve.build_catalog", lambda: catalog)
+    config = make_config(tmp_path, "alpha", "beta")
+    daemon = Daemon(config)
+    task, port = await run_daemon(daemon)
+    url = f"http://127.0.0.1:{port}/mcp"
+    args = {"request_id": "test-request"}
+    try:
+        ledgers = daemon.ledgers
+        async with authenticated_client(
+            url, bearer(config, "alpha", "worker:ada"), mode=mode
+        ) as client:
+            denied = tool_json(await client.call_tool("record_decision", args))
+        assert denied["error"]["code"] == "forbidden"
+        assert await ledgers["alpha"].head_seq() == await ledgers["beta"].head_seq() == 0
+
+        async with authenticated_client(url, bearer(config, "alpha"), mode=mode) as client:
+            allowed = tool_json(await client.call_tool("record_decision", args))
+        assert allowed == {"ok": True, "data": {"role": "orchestrator"}}
+        assert await ledgers["alpha"].head_seq() == 1
+        assert await ledgers["beta"].head_seq() == 0
+    finally:
+        await stop(daemon, task)
+
+
+async def test_a_token_for_a_project_outside_the_running_config_gets_401(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    daemon = Daemon(config)
+    task, port = await run_daemon(daemon)
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"http://127.0.0.1:{port}/mcp",
+                json={},
+                headers={"authorization": f"Bearer {bearer(config, 'alpha')}"},
+            )
+        assert response.status_code == 401
+        assert not response.content
     finally:
         await stop(daemon, task)
 
@@ -137,7 +220,7 @@ async def test_a_failed_port_publication_closes_the_listener_and_frees_the_direc
     config = make_config(tmp_path)
     bound: list[int] = []
 
-    def refuse(_data_dir: Path, port: int) -> None:
+    def refuse(_data_dir: Path, port: int, *, host: str) -> None:
         bound.append(port)
         raise OSError("no space left on device")
 
@@ -194,7 +277,8 @@ async def test_the_bound_port_is_published_with_the_pid_and_answers(tmp_path: Pa
     try:
         assert port != 0, "the config's port of 0 became the port that was bound"
         assert read_port(config.data_dir) == (os.getpid(), port)
-        async with Client(f"http://127.0.0.1:{port}/mcp", mode="legacy") as client:
+        assert read_listener(config.data_dir) == PublishedListener(os.getpid(), port, "127.0.0.1")
+        async with authenticated_client(f"http://127.0.0.1:{port}/mcp", bearer(config)) as client:
             assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
     finally:
         await stop(daemon, task)

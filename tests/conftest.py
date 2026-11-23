@@ -9,13 +9,19 @@ import socket
 import subprocess
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import AsyncGenerator, Iterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx2
 import pytest
+from mcp.client.client import Client
+from mcp.client.streamable_http import streamable_http_client
 from mcp_types import TextContent
+
+from plotroom.app.tokens import IssuedToken, TokenRegistry
 
 CHILD_TIMEOUT = 60.0
 
@@ -123,7 +129,20 @@ def config_path(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def server(config_path: Path) -> Iterator[tuple[Child, str]]:
+def token_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.fixture
+def server_token(config_path: Path) -> IssuedToken:
+    return TokenRegistry(config_path.parent / "data").issue("demo", "orchestrator", local=False)
+
+
+@pytest.fixture
+def server(config_path: Path, server_token: IssuedToken) -> Iterator[tuple[Child, str]]:
     """A running ``plotroom serve`` and its MCP URL."""
     child = start_plotroom("serve", "--config", str(config_path))
     try:
@@ -131,6 +150,17 @@ def server(config_path: Path) -> Iterator[tuple[Child, str]]:
         yield child, f"http://127.0.0.1:{serving['port']}/mcp"
     finally:
         child.stop()
+
+
+@asynccontextmanager
+async def authenticated_client(
+    url: str, bearer: str, *, mode: str = "legacy"
+) -> AsyncGenerator[Client]:
+    async with (
+        httpx2.AsyncClient(headers={"authorization": f"Bearer {bearer}"}) as http,
+        Client(streamable_http_client(url, http_client=http), mode=mode) as client,
+    ):
+        yield client
 
 
 def tool_json(result: Any) -> dict[str, Any]:

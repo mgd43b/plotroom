@@ -14,11 +14,10 @@ from datetime import UTC, datetime
 from typing import Any, Literal, get_args
 
 from plotroom.core.envelope import ERROR_CODES, ErrorCode
-from plotroom.core.roles import SIMPLE_ROLES, WORKER_FAMILY, role_family
+from plotroom.core.roles import ROLE_FAMILIES, WriterRule, WriterRules, role_family
 
 FieldType = Literal["str", "int", "bool", "number", "object", "array"]
 FIELD_TYPES: tuple[str, ...] = get_args(FieldType)
-ROLE_FAMILIES: frozenset[str] = SIMPLE_ROLES | {WORKER_FAMILY}
 _KIND = re.compile(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*")
 
 
@@ -174,10 +173,12 @@ class EventRegistry:
 
     def __init__(self) -> None:
         self._kinds: dict[str, EventKind] = {}
+        self.writer_rules = WriterRules()
 
     def register(self, kind: EventKind) -> None:
         if kind.kind in self._kinds:
             raise ValueError(f"event kind {kind.kind!r} is already registered")
+        self.writer_rules.declare(kind.kind, tuple(WriterRule(role) for role in kind.appenders))
         self._kinds[kind.kind] = kind
 
     def get(self, kind: str) -> EventKind | None:
@@ -207,7 +208,7 @@ class EventRegistry:
                 "invalid",
                 f"{event.kind}: source must be {registered.source!r}, got {event.source!r}",
             )
-        if family not in registered.appenders:
+        if self.writer_rules.rule_for(event.kind, family) is None:
             raise LedgerError("forbidden", f"role {role!r} may not append {event.kind}")
         if not isinstance(event.upstream_id, str) or not event.upstream_id:  # pyright: ignore[reportUnnecessaryIsInstance]
             raise LedgerError("invalid", f"{event.kind}: upstream_id must be a non-empty string")

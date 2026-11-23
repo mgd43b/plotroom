@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import sys
@@ -14,6 +15,7 @@ from pathlib import Path
 from plotroom.app.config import Config, ConfigError, load_config
 from plotroom.app.lock import LockError
 from plotroom.app.logging import setup_logging
+from plotroom.app.tokens import TokenError, TokenRegistry, select_local_token
 
 EXIT_FAILURE = 1
 EXIT_CONFIG = 2
@@ -52,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     connect.add_argument("--stdio", action="store_true", required=True, help="proxy stdio to HTTP")
     connect.add_argument("--url", help="the server's MCP endpoint (default: from the config)")
     connect.add_argument("--config", type=Path, help="TOML config file (default: PLOTROOM_CONFIG)")
+    connect.add_argument("--token-id", help="local token ID (default: PLOTROOM_TOKEN_ID)")
     connect.add_argument(
         "--start-timeout",
         type=_positive_seconds,
@@ -59,6 +62,22 @@ def _parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="how long to wait for a daemon started on demand (default: %(default)s)",
     )
+    token = commands.add_parser("token", help="manage credentials without a running daemon")
+    token_commands = token.add_subparsers(dest="action", required=True)
+    issue = token_commands.add_parser("issue", help="issue a token and print it once as JSON")
+    issue.add_argument("--project", required=True, help="project ID from the server config")
+    issue.add_argument(
+        "--role", required=True, help="orchestrator, clerk, worker:<name>, drain, bridge"
+    )
+    revoke = token_commands.add_parser("revoke", help="revoke a token by its public ID")
+    revoke.add_argument("token_id", help="the public ID returned at issue")
+    for action in (issue, revoke):
+        action.add_argument(
+            "--config", type=Path, help="TOML config file (default: PLOTROOM_CONFIG)"
+        )
+        action.add_argument(
+            "--no-local", action="store_true", help="skip the local credentials file"
+        )
     return parser
 
 
@@ -67,7 +86,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "serve":
         return _serve(args.config, args.log_file)
     setup_logging(sys.stderr)  # stdout is the protocol channel
-    return _connect(args.url, args.config, args.start_timeout)
+    if args.command == "token":
+        return _token(args)
+    return _connect(args.url, args.config, args.start_timeout, args.token_id)
+
+
+def _token(args: argparse.Namespace) -> int:
+    try:
+        issuing = args.action == "issue"
+        config = load_config(args.config, os.environ, require_projects=issuing)
+        registry = TokenRegistry(config.data_dir)
+        if issuing:
+            if args.project not in config.projects:
+                raise TokenError("the selected project is not configured")
+            try:
+                issued = registry.issue(args.project, args.role, local=not args.no_local)
+            except ValueError:
+                raise TokenError(
+                    "token role must be orchestrator, clerk, worker:<name>, drain or bridge"
+                ) from None
+            print(json.dumps({"token_id": issued.token_id, "token": issued.bearer}))
+        else:
+            registry.revoke(args.token_id, local=not args.no_local)
+    except (ConfigError, TokenError) as exc:
+        log.error("cannot manage token", extra={"reason": str(exc)})
+        return EXIT_CONFIG
+    except OSError as exc:
+        log.error("cannot write token files", extra={"reason": exc.strerror})
+        return EXIT_FAILURE
+    return 0
 
 
 def _serve(config_path: Path | None, log_file: Path | None) -> int:
@@ -102,25 +149,34 @@ def _serve(config_path: Path | None, log_file: Path | None) -> int:
     return 0
 
 
-def _connect(url: str | None, config_path: Path | None, start_timeout: float) -> int:
+def _connect(
+    url: str | None, config_path: Path | None, start_timeout: float, token_id: str | None
+) -> int:
     from plotroom.adapters.mcp.proxy import EndpointError, StdioProxy
 
     target = url or os.environ.get("PLOTROOM_URL")
+    bearer = os.environ.get("PLOTROOM_TOKEN")
+    token_id = token_id or os.environ.get("PLOTROOM_TOKEN_ID")
     ensure: Callable[[], Awaitable[str | None]] | None = None
-    if target is None:
-        try:
-            config = load_config(config_path, os.environ, require_projects=False)
-        except ConfigError as exc:
-            log.error("invalid configuration", extra={"reason": str(exc)})
-            return EXIT_CONFIG
-        target = config.url
-        # Only a local server this config describes is started for the client; an explicit URL
-        # names a server someone else runs.
-        ensure = _starter(config, config_path, start_timeout)
+    published: Callable[[], Awaitable[str | None]] | None = None
+    host_alias: str | None = None
     try:
-        proxy = StdioProxy(target, ensure=ensure)
-    except EndpointError as exc:
-        log.error("invalid endpoint", extra={"reason": str(exc)})
+        if token_id is not None and (target is not None or bearer is not None):
+            raise TokenError("--token-id is for locally stored credentials and config-derived URLs")
+        if target is None:
+            config = load_config(config_path, os.environ, require_projects=False)
+            target = config.url
+            if bearer is None:
+                bearer = select_local_token(config.data_dir, token_id)
+            ensure, published = _starter(config, config_path, start_timeout, bearer is not None)
+            if bearer is not None and config.host.lower() == "localhost":
+                # Connect to the published socket while preserving an explicitly allowed Host.
+                host_alias = "localhost"
+        proxy = StdioProxy(
+            target, ensure=ensure, bearer=bearer, current_url=published, host_alias=host_alias
+        )
+    except (ConfigError, EndpointError, TokenError, OSError) as exc:
+        log.error("invalid connection configuration", extra={"reason": str(exc)})
         return EXIT_CONFIG
     with contextlib.suppress(KeyboardInterrupt, BrokenPipeError):
         asyncio.run(proxy.run())
@@ -128,11 +184,16 @@ def _connect(url: str | None, config_path: Path | None, start_timeout: float) ->
 
 
 def _starter(
-    config: Config, config_path: Path | None, timeout: float
-) -> Callable[[], Awaitable[str | None]]:
-    from plotroom.app.daemon_start import ensure_daemon  # keeps `serve` from loading the proxy
+    config: Config, config_path: Path | None, timeout: float, credentialed: bool
+) -> tuple[Callable[[], Awaitable[str | None]], Callable[[], Awaitable[str | None]] | None]:
+    from plotroom.app.daemon_start import current_url, ensure_daemon
 
     async def start() -> str | None:
-        return await ensure_daemon(config, config_path, env=os.environ, wait=timeout)
+        return await ensure_daemon(
+            config, config_path, env=os.environ, wait=timeout, require_published=credentialed
+        )
 
-    return start
+    async def published_url() -> str | None:
+        return await current_url(config, require_published=True)
+
+    return start, published_url if credentialed else None

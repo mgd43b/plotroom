@@ -11,9 +11,11 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from mcp.client.client import Client
 from mcp.client.stdio import StdioServerParameters
@@ -34,10 +36,12 @@ from plotroom.app.daemon_start import (
 )
 from plotroom.app.lock import LOCK_FILE_NAME, DataDirLock, LockError
 from plotroom.app.portfile import PORT_FILE_NAME, read_port, write_port
-from rawproxy import ERAS, RawProxy, first_request, spawn_proxy
+from plotroom.app.tokens import TokenRegistry, select_local_token
+from rawproxy import ERAS, RawProxy, connected, first_request, spawn_proxy
 
 MODES = ["legacy", "auto"]
 WAIT = 60.0
+pytestmark = pytest.mark.usefixtures("token_home")
 EMPTY_BOARD_DATA: dict[str, Any] = {
     "project": "demo",
     "cursor": 0,
@@ -86,6 +90,9 @@ def data_dir(tmp_path: Path) -> Iterator[Path]:
 
 
 def proxy_params(config: Path, *extra: str) -> StdioServerParameters:
+    settings = load_config(config, {})
+    if select_local_token(settings.data_dir, None) is None:
+        TokenRegistry(settings.data_dir).issue(settings.projects[0], "orchestrator")
     return StdioServerParameters(
         command=sys.executable,
         args=["-m", "plotroom", "connect", "--stdio", "--config", str(config), *extra],
@@ -119,6 +126,8 @@ def test_the_daemon_environment_keeps_the_runtime_and_config_names_and_nothing_e
         "GITHUB_TOKEN": "client-secret",
         "CLAUDECODE": "1",
         "PLOTROOM_DEMO_TOKEN": "adapter-secret",
+        "PLOTROOM_TOKEN": "proxy-secret",
+        "PLOTROOM_TOKEN_ID": "proxy-id",
         "PYTHONPATH": "/somewhere",
     }
     clean = daemon_env(env)
@@ -248,14 +257,14 @@ def http_reply(status: str, body: str, content_type: str = "application/json") -
     [
         (http_reply("200 OK", PING_RESULT), True),
         (http_reply("200 OK", f"data: {PING_RESULT}\n\n", "text/event-stream"), True),
+        (http_reply("401 Unauthorized", ""), True),
+        (http_reply("421 Misdirected Request", ""), False),
         (http_reply("500 Internal Server Error", PING_RESULT), False),
         (http_reply("200 OK", '{"jsonrpc":"2.0","id":"x","result":{}}'), False),
         (http_reply("200 OK", "<html>hello</html>", "text/html"), False),
     ],
 )
-async def test_the_probe_accepts_only_a_successful_ping_answer(
-    reply: bytes, expected: bool
-) -> None:
+async def test_the_probe_accepts_a_successful_ping_or_a_401(reply: bytes, expected: bool) -> None:
     server, url = await answer_with(reply)
     try:
         assert await speaks_mcp(url) is expected
@@ -314,6 +323,44 @@ async def test_a_running_daemon_is_used_and_none_is_started(
         assert tool_json(result)["ok"] is True
         assert owner_pid(data_dir) == pid
         assert not (data_dir / LOG_FILE_NAME).exists(), "no process was started"
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize("era", ERAS)
+async def test_revoking_a_token_is_visible_to_http_and_the_proxy_without_restart(
+    tmp_path: Path, data_dir: Path, era: str
+) -> None:
+    config = write_config(tmp_path)
+    registry = TokenRegistry(data_dir)
+    token = registry.issue("demo", "orchestrator")
+    server = start_plotroom("serve", "--config", str(config))
+    try:
+        port = server.wait_for_log("serving")["port"]
+        proxy = await spawn_proxy("--config", str(config))
+        try:
+            call = await connected(proxy, era)
+            proxy.send(call(1, "snapshot", {}))
+            assert (await proxy.answer(1))["result"]["isError"] is False
+            assert main(["token", "revoke", "--config", str(config), token.token_id]) == 0
+            proxy.send(call(2, "snapshot", {}))
+            assert "HTTP 401" in (await proxy.answer(2))["error"]["message"]
+            async with httpx.AsyncClient() as http:
+                response = await http.post(
+                    f"http://127.0.0.1:{port}/mcp",
+                    json={},
+                    headers={"authorization": f"Bearer {token.bearer}"},
+                )
+            assert response.status_code == 401
+            assert response.content == b""
+            assert "www-authenticate" not in response.headers
+        finally:
+            await proxy.close()
+
+        stale = await spawn_proxy("--config", str(config), env={"PLOTROOM_TOKEN": token.bearer})
+        assert "HTTP 401" in await first_error(stale, era)
+        assert published(data_dir) == (server.process.pid, port)
+        assert not (data_dir / LOG_FILE_NAME).exists(), "401 readiness should skip daemon startup"
     finally:
         server.stop()
 
@@ -450,6 +497,43 @@ async def test_two_data_directories_each_reach_their_own_daemon(tmp_path: Path) 
             await asyncio.to_thread(stop_owner, tmp_path / name / "data")
 
 
+async def test_the_proxy_selects_the_requested_project_token_by_id(
+    tmp_path: Path, data_dir: Path
+) -> None:
+    config = write_config(tmp_path, projects=("alpha", "beta"))
+    registry = TokenRegistry(data_dir)
+    first = registry.issue("alpha", "orchestrator")
+    second = registry.issue("beta", "worker:ada")
+    selectors: list[tuple[str, list[str], dict[str, str]]] = [
+        ("alpha", ["--token-id", first.token_id], {}),
+        ("beta", [], {"PLOTROOM_TOKEN_ID": second.token_id}),
+    ]
+    for expected, flags, env in selectors:
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "plotroom", "connect", "--stdio", "--config", str(config), *flags],
+            env={**child_env(), **env},
+        )
+        async with Client(params, mode="auto") as client:
+            board = tool_json(await client.call_tool("snapshot", {}))
+            assert board["data"]["project"] == expected
+    assert len(serving_lines(data_dir)) == 1
+
+
+async def test_the_proxy_preserves_an_explicitly_allowed_localhost_header(
+    tmp_path: Path, data_dir: Path
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'data_dir = "data"\nhost = "localhost"\nport = 0\n'
+        'allowed_hosts = ["localhost:*"]\n[projects.demo]\n',
+        encoding="utf-8",
+    )
+    async with Client(proxy_params(config), mode="auto") as client:
+        assert tool_json(await client.call_tool("snapshot", {}))["data"]["project"] == "demo"
+    assert len(serving_lines(data_dir)) == 1
+
+
 # --- reading the port back ------------------------------------------------------------------
 
 
@@ -458,8 +542,44 @@ async def test_a_fixed_port_is_the_configs_own_url_whatever_the_directory_holds(
 ) -> None:
     config = load_config(write_config(tmp_path, port=held_port), {})
     assert await current_url(config) == f"http://127.0.0.1:{held_port}/mcp"
+    assert await current_url(config, require_published=True) is None
     write_port(config.data_dir, held_port + 1)  # a file nobody owns
     assert await current_url(config) == f"http://127.0.0.1:{held_port}/mcp"
+    assert await current_url(config, require_published=True) is None
+
+
+async def test_a_local_bearer_uses_the_published_host_even_with_a_different_config_host(
+    tmp_path: Path,
+) -> None:
+    config = replace(load_config(write_config(tmp_path, port=41000), {}), host="127.0.0.2")
+    with DataDirLock(config.data_dir):
+        write_port(config.data_dir, config.port)
+        assert await current_url(config) == "http://127.0.0.2:41000/mcp"
+        assert await current_url(config, require_published=True) is None
+
+        write_port(config.data_dir, config.port, host="127.0.0.1")
+        assert await current_url(config, require_published=True) == "http://127.0.0.1:41000/mcp"
+
+
+async def test_a_local_bearer_is_not_sent_to_a_foreign_listener_on_a_fixed_port(
+    tmp_path: Path, data_dir: Path
+) -> None:
+    requests: list[bytes] = []
+
+    async def respond(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        requests.append(await reader.readuntil(b"\r\n\r\n"))
+        writer.write(http_reply("401 Unauthorized", ""))
+        await writer.drain()
+        writer.close()
+
+    foreign = await asyncio.start_server(respond, "127.0.0.1", 0)
+    async with foreign:
+        port = int(foreign.sockets[0].getsockname()[1])
+        config = write_config(tmp_path, port=port)
+        TokenRegistry(data_dir).issue("demo", "orchestrator")
+        proxy = await spawn_proxy("--config", str(config))
+        assert "could not start" in await first_error(proxy, "modern")
+    assert requests == []
 
 
 async def test_a_port_of_zero_is_the_published_port_only_while_its_pid_owns_the_lock(
