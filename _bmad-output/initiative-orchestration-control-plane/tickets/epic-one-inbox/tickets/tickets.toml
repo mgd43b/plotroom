@@ -168,8 +168,8 @@ references = ["architecture-orchestration-control-plane/architecture-orchestrati
 id = 9
 type = "story"
 title = "Claude intake through ingest(), the SessionReader port and inbound-message items"
-description = "ingest() appends only claude.* events (turn reports, session messages) from orchestrator, clerk and worker tokens, a worker's forced to its current lane, deduplicated on session and turn; the SessionReader port is defined, shaped by entry 1's finding, so a local reader can write the same events as well; an unhandled Codex message (entry 7), Claude session message or Claude turn report raises an inbound-message item that ack closes and that wakes plotroom watch. Hands on: the port to entry 18."
-verify = "A turn report sent through ingest twice is stored once; a worker token's report lands on its own lane whatever lane it names, and a github.* kind from it is refused; a turn report and a switchboard message each raise an item that wakes a running plotroom watch and closes on ack."
+description = "ingest() appends only claude.* events (turn reports, session messages) from orchestrator, clerk and worker tokens, a worker's forced to its current lane; claude.turn_report takes an optional turn_index, deduplicated on (session, turn_index) when given and otherwise on (session, a digest of the report text) within one turn, matching the reader's key (cliSessionId, turnIndex) from entry 1's finding; the SessionReader port is defined, shaped by entry 1's finding, so a local reader can write the same events as well; an unhandled Codex message (entry 7), Claude session message or Claude turn report raises an inbound-message item that ack closes and that wakes plotroom watch. Hands on: the port to entry 18."
+verify = "A turn report sent through ingest twice is stored once, with or without turn_index; a worker token's report lands on its own lane whatever lane it names, and a github.* kind from it is refused; a turn report and a switchboard message each raise an item that wakes a running plotroom watch and closes on ack."
 covers = ["R6", "R7", "R10"]
 after = [1, 7, "1.4", "1.5", "1.6", "1.8", "1.9"]
 hitl = false
@@ -185,7 +185,7 @@ covers = ["R7"]
 after = [1, 9]
 hitl = true
 risk = "medium"
-unknown = "Whether a mechanism exists and what it is; entry 1 answers."
+notes = ["Entry 1 found a mechanism (#31, PR #48): the three sources, the turn key (cliSessionId, turnIndex) and the reader's limits are in the epic's Notes."]
 
 [[entry]]
 id = 12

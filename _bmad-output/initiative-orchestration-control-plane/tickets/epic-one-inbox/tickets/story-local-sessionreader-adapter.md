@@ -28,4 +28,4 @@ Verify: On a machine running the Claude desktop app, a lane's turn end appears o
 
 ## Notes
 
-- Unknown: Whether a mechanism exists and what it is; entry 1 answers.
+- Entry 1 found a mechanism (#31, PR #48): the three sources, the turn key (cliSessionId, turnIndex) and the reader's limits are in the epic's Notes.

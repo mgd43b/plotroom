@@ -2,7 +2,7 @@
 
 Status: HELD, waiting for mgd43b's go-ahead, typed in the ticketer's session. Nothing below has been done.
 
-Summary: 38 new issues, 16 body edits, 38 parent links, 110 blocked-by relations on new issues and 3 on existing epics, 1 label removal, 1 comment and 1 close (#13).
+Summary: 38 new issues, 18 body edits, 38 parent links, 110 blocked-by relations on new issues and 3 on existing epics, 2 label removals, 2 comments and 2 closes (#13, #31).
 
 ## Creates (in this order; milestone "Orchestration control plane"; no assignee)
 | # | Entry | Type | Title | Parent | Blocked by | Labels |
@@ -64,6 +64,8 @@ Summary: 38 new issues, 16 body edits, 38 parent links, 110 blocked-by relations
 | #38 | 2.16 | One work-item source per project | this pass |
 | #29 | 2.2 | How a daemon started on demand reads its PAT (secret file), from lane #14 | none after #47 merges |
 | #42 | 2.8 | Note on real clients' protocol eras and cancellation, from lane #14 | none after #47 merges |
+| #43 | 2.9 | Turn key: optional turn_index on claude.turn_report, else a digest of the report within one turn (from spike #31) | none |
+| #44 | 2.18 | Unknown removed; points at the epic's Notes for the mechanism; stays hitl, not dropped | none |
 | #24 | 1.15 | Note on real clients' protocol eras and cancellation, from lane #14 | none |
 
 ## Relations
@@ -183,12 +185,17 @@ Summary: 38 new issues, 16 body edits, 38 parent links, 110 blocked-by relations
 ## Labels
 - None created; every label used exists.
 - #13: remove `backlog` (done is the closed state).
+- #31: remove `backlog`.
 
 ## Comments (exact text)
+**On #31:**
+> Done: PR #48 merged at 071b368; the epic 2 Notes record the session-state mechanism and the probe is in spikes/claude-session-state/.
+
 **On #13:**
 > Done: built in PR #28, merged at ec2d985e; main's ci.yml run on that commit passed (https://github.com/mgd43b/plotroom/actions/runs/45087667919).
 
 ## Closes (verification recorded)
+- #31 (entry 2.1, the spike) as completed: PR #48 merged at 071b368; the epic's Notes record the mechanism and the probe is in spikes/claude-session-state/, which meets its Verify; verification by the coordinator.
 - #13 (entry 1.2, the tracer) as completed: PR #28 merged at ec2d985e, and main's ci.yml run 45087667919 on that commit succeeded (checked 2026-11-22); verification by the coordinator.
 
 ## Not on this list, on purpose
