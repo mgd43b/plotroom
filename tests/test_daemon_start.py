@@ -11,6 +11,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
@@ -41,7 +42,9 @@ from plotroom.app.daemon_start import (
 from plotroom.app.lock import LOCK_FILE_NAME, DataDirLock, LockError
 from plotroom.app.portfile import (
     PORT_FILE_NAME,
+    directory_identity,
     prepare_local_socket,
+    published_socket,
     read_listener,
     read_port,
     remove_local_socket,
@@ -941,6 +944,20 @@ def test_each_socket_attempt_uses_a_fresh_private_directory(
     assert first.name == second.name
     assert first.parent.stat().st_mode & 0o777 == 0o700
     assert second.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_a_short_shared_data_directory_works_across_different_temporary_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="plotroom-test-", dir="/tmp") as shared:
+        data_dir = Path(shared)
+        path = prepare_local_socket(data_dir)
+        try:
+            assert path.parent.parent == data_dir
+            monkeypatch.setattr("plotroom.app.portfile._SOCKET_ROOT", tmp_path / "private-tmp")
+            assert published_socket(data_dir, directory_identity(data_dir), str(path)) == path
+        finally:
+            remove_local_socket(path)
 
 
 @pytest.mark.parametrize("pid", [10**12, 2**63, 2**200])

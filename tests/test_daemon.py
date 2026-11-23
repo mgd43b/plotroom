@@ -302,7 +302,7 @@ async def test_public_http_serves_when_the_private_listener_is_unavailable(
     config = make_config(tmp_path)
     credential = bearer(config)
 
-    def unavailable(_data_dir: Path | int) -> Path:
+    def unavailable(_data_dir: Path, *, directory_fd: int | None = None) -> Path:
         raise PermissionError("private socket directory unavailable")
 
     monkeypatch.setattr("plotroom.app.serve.prepare_local_socket", unavailable)
@@ -359,8 +359,12 @@ async def test_cancelling_during_uvicorns_own_shutdown_waits_for_it_and_keeps_th
     config = make_config(tmp_path)
     daemon = Daemon(config)
     task, _ = await run_daemon(daemon)
+    publication = read_listener(config.data_dir)
+    assert publication is not None
+    assert publication.local_socket is not None
     daemon.stop()  # uvicorn starts its graceful shutdown
     await asyncio.wait_for(in_shutdown.wait(), timeout=30)
+    assert not await asyncio.to_thread(Path(publication.local_socket).parent.exists)
     task.cancel()
     task.cancel()  # a second cancel must not cut the shutdown short either
     await asyncio.sleep(0)
@@ -406,7 +410,9 @@ async def test_the_bound_port_is_published_with_the_pid_and_answers(tmp_path: Pa
         assert publication is not None
         assert publication.host == "127.0.0.1"
         assert publication.local_socket is not None
-        path = published_socket(directory_identity(config.data_dir), publication.local_socket)
+        path = published_socket(
+            config.data_dir, directory_identity(config.data_dir), publication.local_socket
+        )
         assert path is not None
         assert path.is_socket()
         async with authenticated_client(f"http://127.0.0.1:{port}/mcp", bearer(config)) as client:

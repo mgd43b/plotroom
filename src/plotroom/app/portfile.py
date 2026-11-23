@@ -7,6 +7,7 @@ A client trusts the file only while the data-directory lock is held by the pid t
 from __future__ import annotations
 
 import contextlib
+import errno
 import ipaddress
 import json
 import os
@@ -21,6 +22,7 @@ PORT_FILE_NAME = "plotroom.port"
 START_DIRECTORY_ENV = "_PLOTROOM_START_DIRECTORY"
 _MAX_PORT = 65535
 _SOCKET_ROOT = Path("/tmp")  # noqa: S108 - use a short path and create a private directory
+_MAX_SOCKET_PATH_BYTES = 103  # macOS's sockaddr_un.sun_path holds 104 bytes including NUL
 
 type DirectoryIdentity = tuple[int, int]
 
@@ -56,31 +58,59 @@ def directory_key(identity: DirectoryIdentity) -> str:
     return f"{device:x}-{inode:x}"
 
 
-def published_socket(identity: DirectoryIdentity, published: str) -> Path | None:
-    path = Path(published)
-    if (
-        path.parent.parent != _SOCKET_ROOT
-        or not path.parent.name.startswith(f"plotroom-{os.geteuid()}-")
-        or path.name != f"{directory_key(identity)}.sock"
-    ):
-        return None
+def _private_directory(path: Path) -> bool:
     try:
-        info = path.parent.lstat()
+        info = path.lstat()
     except OSError:
-        return None
-    private = (
+        return False
+    return (
         stat.S_ISDIR(info.st_mode)
         and info.st_uid == os.geteuid()
         and stat.S_IMODE(info.st_mode) == 0o700
     )
-    return path if private else None
 
 
-def prepare_local_socket(data_dir: Path | int) -> Path:
-    # Keep the path short even for deep data directories or TMPDIR.
-    socket_name = f"{directory_key(directory_identity(data_dir))}.sock"
-    directory = tempfile.mkdtemp(prefix=f"plotroom-{os.geteuid()}-", dir=_SOCKET_ROOT)
-    return Path(directory) / socket_name
+def _socket_roots(data_dir: Path) -> tuple[Path, ...]:
+    # The data directory and the standard user runtime directory can be shared across PrivateTmp.
+    runtime = Path("/run/user") / str(os.geteuid())
+    return (
+        (data_dir, runtime, _SOCKET_ROOT)
+        if _private_directory(runtime)
+        else (data_dir, _SOCKET_ROOT)
+    )
+
+
+def published_socket(data_dir: Path, identity: DirectoryIdentity, published: str) -> Path | None:
+    path = Path(published)
+    if (
+        path.parent.parent not in _socket_roots(data_dir)
+        or not path.parent.name.startswith(f"plotroom-{os.geteuid()}-")
+        or path.name != f"{directory_key(identity)}.sock"
+        or not _private_directory(path.parent)
+    ):
+        return None
+    return path
+
+
+def prepare_local_socket(data_dir: Path, *, directory_fd: int | None = None) -> Path:
+    identity = directory_identity(data_dir if directory_fd is None else directory_fd)
+    socket_name = f"{directory_key(identity)}.sock"
+    prefix = f"plotroom-{os.geteuid()}-"
+    error = OSError(errno.ENAMETOOLONG, "no private socket location fits the Unix path limit")
+    for root in _socket_roots(data_dir):
+        if len(os.fsencode(root / prefix / socket_name)) >= _MAX_SOCKET_PATH_BYTES:
+            continue
+        try:
+            directory = Path(tempfile.mkdtemp(prefix=prefix, dir=root))
+        except OSError as exc:
+            error = exc
+            continue
+        path = directory / socket_name
+        if len(os.fsencode(path)) <= _MAX_SOCKET_PATH_BYTES:
+            return path
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+    raise error
 
 
 def remove_local_socket(path: Path) -> None:

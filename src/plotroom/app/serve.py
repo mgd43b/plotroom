@@ -67,6 +67,7 @@ class _Server(uvicorn.Server):
         self._directory_fd = directory_fd
         self._identity = directory_identity(directory_fd)
         self._local_socket: Path | None = None
+        self._local_listener: asyncio.Server | None = None
 
     _shutdown_task: asyncio.Task[None] | None = None
 
@@ -78,11 +79,10 @@ class _Server(uvicorn.Server):
 
     async def _shut_down(self, sockets: Any) -> None:
         # Stop publishing the listener as soon as it starts shutting down.
+        self._stop_local_socket()
         with contextlib.suppress(OSError):
             remove_port(self._data_dir, directory_fd=self._directory_fd)
         await uvicorn.Server.shutdown(self, sockets)
-        if self._local_socket is not None:
-            remove_local_socket(self._local_socket)
 
     async def shutdown(self, sockets: Any = None) -> None:
         # Shielded: a cancel must not abort a shutdown that is draining requests and lifespan
@@ -127,24 +127,29 @@ class _Server(uvicorn.Server):
                 _loop=loop,
             )
 
-        listener: asyncio.Server | None = None
         try:
-            local_socket = prepare_local_socket(self._directory_fd)
+            local_socket = prepare_local_socket(self._data_dir, directory_fd=self._directory_fd)
             self._local_socket = local_socket
+            _require_directory(self._data_dir, self._identity)
             listener = await loop.create_unix_server(
                 protocol, path=local_socket, start_serving=False
             )
+            self._local_listener = listener
             self.servers.append(listener)  # shutdown owns the socket before it starts accepting
             await listener.start_serving()
         except OSError as exc:
-            if listener is not None:
-                listener.close()
-            if self._local_socket is not None:
-                remove_local_socket(self._local_socket)
-                self._local_socket = None
+            self._stop_local_socket()
             log.warning("private local listener unavailable", extra={"reason": str(exc)})
             return None
         return local_socket
+
+    def _stop_local_socket(self) -> None:
+        if self._local_listener is not None:
+            self._local_listener.close()
+            self._local_listener = None
+        if self._local_socket is not None:
+            remove_local_socket(self._local_socket)
+            self._local_socket = None
 
 
 async def _finish(task: asyncio.Task[None]) -> None:
@@ -247,7 +252,7 @@ class Daemon:
         old = read_listener(config.data_dir, directory_fd=directory_fd)
         remove_port(config.data_dir, directory_fd=directory_fd)
         if old is not None and old.local_socket is not None:
-            stale_socket = published_socket(identity, old.local_socket)
+            stale_socket = published_socket(config.data_dir, identity, old.local_socket)
             if stale_socket is not None:
                 remove_local_socket(stale_socket)
         try:

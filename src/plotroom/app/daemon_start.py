@@ -244,7 +244,7 @@ class DaemonLocation:
         if published.local_unavailable:
             raise UpstreamStartError("the running plotroom serve has no private local listener")
         socket_path = (
-            published_socket(self.identity, published.local_socket)
+            published_socket(self.config.data_dir, self.identity, published.local_socket)
             if published.local_socket is not None
             else None
         )
