@@ -46,6 +46,8 @@ class ObservedPull:
     state: Literal["open", "closed", "merged"]
     updated_at: str
     body: str
+    draft: bool | None = False
+    merge_commit_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,8 @@ class PullRequest:
     as_of: str
     complete: bool
     version: int
+    draft: bool | None = False
+    merge_commit_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,7 +96,7 @@ async def apply_pull_poll(
         return False
     branches: set[str] = set()
     for observed in pulls:
-        await _project_pull(uow, repository, observed, as_of, branches)
+        await _project_pull(uow, repository, observed, as_of, branches, initial=baseline is None)
     for branch in sorted(branches):
         await refresh_ready_lanes(uow, repository, branch)
     watermark = max((pull.updated_at for pull in pulls), default="")
@@ -128,7 +132,13 @@ def _changes(current: PullRequest | None, observed: ObservedPull) -> tuple[str, 
 
 
 async def _project_pull(
-    uow: UnitOfWork, repository: str, observed: ObservedPull, as_of: str, branches: set[str]
+    uow: UnitOfWork,
+    repository: str,
+    observed: ObservedPull,
+    as_of: str,
+    branches: set[str],
+    *,
+    initial: bool,
 ) -> None:
     current = await uow.pull_request(repository, observed.number)
     if current is not None and (
@@ -149,6 +159,8 @@ async def _project_pull(
         as_of,
         True,
         previous_version + len(changes),
+        observed.draft,
+        observed.merge_commit_sha or (current.merge_commit_sha if current else None),
     )
     if current is not None and current.head_sha != projected.head_sha:
         files = await uow.github_resource(repository, FILES, str(projected.number))
@@ -187,7 +199,7 @@ async def _project_pull(
     for version, kind in enumerate(changes, start=previous_version + 1):
         uid = f"{repository}#{projected.number}@{version}:{projected.updated_at}"
         await uow.append(NewEvent("github", kind, uid, fields, observed.body, lane_id))
-    await uow.save_pull_request(projected)
+    await uow.save_pull_request(projected, historical=initial and current is None)
     uow.pull_overlaps_changed()
 
 

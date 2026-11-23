@@ -9,7 +9,7 @@ hitl: false
 risk: low
 tracker_id: "40"
 remote: "https://github.com/mgd43b/plotroom/issues/40"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Deploy status from GitHub Deployments and lane reports

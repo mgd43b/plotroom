@@ -12,8 +12,9 @@ from plotroom.core.lanes import Lane
 _FIND = text("SELECT * FROM lanes WHERE id = :id")
 _WORKER = text("SELECT * FROM lanes WHERE worker = :worker AND state != 'archived'")
 _SAVE = text(
-    "INSERT INTO lanes (id, worker, work_items, branch, state, waiting_on, pr, head_sha) VALUES "
-    "(:id, :worker, :work_items, :branch, :state, :waiting_on, :pr, :head_sha) "
+    "INSERT INTO lanes (id, worker, work_items, branch, state, waiting_on, pr, head_sha, "
+    "branch_pattern) VALUES (:id, :worker, :work_items, :branch, :state, :waiting_on, :pr, "
+    ":head_sha, :branch_pattern) "
     "ON CONFLICT(id) DO UPDATE SET state=excluded.state, waiting_on=excluded.waiting_on, "
     "pr=excluded.pr, head_sha=excluded.head_sha"
 )

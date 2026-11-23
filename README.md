@@ -87,6 +87,9 @@ min_checks = 2
 ignore_checks = ["Optional review"]
 ci_workflow = "ci.yml"
 fix_label = "main-fix"
+skip_label = "skip-merge"
+merge_method = "merge"
+controller_merges = false
 authorized_label_logins = ["maintainer"]
 ```
 
@@ -96,6 +99,18 @@ fix label waives a red main verdict when a configured GitHub user applied it.
 An authorized user can apply `allow-overlap` after Plotroom has observed the
 current PR head. The waiver applies to that head occurrence. Automatic branch
 updates run through an injected fixture write port.
+
+An authorized human can apply `keywords-ok` to waive closing keywords in the
+PR body or commit messages. Draft PRs and PRs with the configured skip label
+stay out of the live queue. Each lane can set a case-sensitive `branch_pattern`
+with `lane_start`. The exact lane branch is the default.
+
+The live controller logs verdict changes and creates a `merge_ready` item
+for the clerk, or for the orchestrator when the project has no clerk token.
+The item includes SHA pins for a fresh `merge_gate` call and the full command
+using the configured merge method. GitHub enforces the PR head pin on the
+printed command. The fixture controller checks both refs at dispatch. Controller-run merges default to off.
+The opt-in requires an injected loopback test fixture.
 
 The orchestrator can set the deploy window with `freeze(reason, request_id)` and
 clear it with `unfreeze(request_id)`. The window is stored in the project ledger

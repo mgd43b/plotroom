@@ -10,7 +10,9 @@ from mcp.client.stdio import StdioServerParameters
 from conftest import authenticated_client, start_plotroom, tool_json, write_config
 from fakes import MemoryStore
 from plotroom.app.tokens import TokenRegistry
+from plotroom.core.github import PullRequest
 from plotroom.core.lanes import Lane
+from plotroom.core.merge_lane import merge_lane_evidence
 
 
 @asynccontextmanager
@@ -55,6 +57,7 @@ async def test_local_lane_smoke(transport: str, tmp_path: Path, token_home: Path
             "worker": "fixture",
             "work_items": ["fixture.1"],
             "branch": "demo",
+            "branch_pattern": "demo*",
         }
         async with (
             lane_client(transport, config, url, orch.bearer, orch.token_id) as orchestrator,
@@ -64,6 +67,7 @@ async def test_local_lane_smoke(transport: str, tmp_path: Path, token_home: Path
             assert denied["error"]["code"] == "forbidden"
             started = tool_json(await orchestrator.call_tool("lane_start", args))
             assert started["data"]["worker"] == "fixture"
+            assert started["data"]["branch_pattern"] == "demo*"
             update = tool_json(
                 await worker_client.call_tool(
                     "lane_update",
@@ -130,3 +134,21 @@ async def test_memory_board_matches_lane_visibility_and_counts() -> None:
     assert (await store.read_board("orchestrator"))[2:] == ({"active": 1, "archived": 1}, [active])
     assert (await store.read_board("worker:fixture"))[2:] == ({"active": 1}, [active])
     assert (await store.read_board("worker:other"))[2:] == ({"archived": 1}, [])
+
+
+async def test_projected_branch_identity_uses_literal_fallback_and_unique_live_match() -> None:
+    store = MemoryStore()
+    repo = "fixture/project"
+    stamp = "2026-11-23T12:00:00Z"
+    pull = PullRequest(repo, 7, "work/b", "a" * 40, repo, "open", stamp, stamp, True, 1)
+    literal = Lane("literal", "worker1", (), "work/[b]")
+    pattern = Lane("pattern", "worker2", (), "work/a", branch_pattern="work/[ab]")
+    archived = Lane("archived", "worker3", (), "work/b", state="archived")
+    async with store.transaction() as tx:
+        await tx.save_lane(literal)
+        await tx.save_lane(archived)
+        assert await merge_lane_evidence(tx, pull) == (None, None, False)
+        await tx.save_lane(pattern)
+        assert await merge_lane_evidence(tx, pull) == (pattern, None, False)
+        await tx.save_lane(Lane("overlap", "worker4", (), "work/b"))
+        assert await merge_lane_evidence(tx, pull) == (None, None, True)

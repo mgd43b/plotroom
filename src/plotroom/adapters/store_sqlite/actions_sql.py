@@ -5,7 +5,7 @@ import json
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from plotroom.core.actions import BRANCH_UPDATE, Action, QueuedAction
+from plotroom.core.actions import BRANCH_UPDATE, CONTROLLER_MERGE, Action, QueuedAction
 
 _INSERT = text(
     "INSERT INTO actions (action_key, kind, cause_id, payload, attempts, state) "
@@ -15,7 +15,8 @@ _INSERT = text(
 _UPDATE = text("UPDATE actions SET attempts = :attempts, state = :state WHERE action_key = :key")
 _PENDING = text(
     "SELECT rowid AS queue_position, * FROM actions WHERE state = 'pending' AND rowid > :after "
-    "AND (:skip_branch_updates = 0 OR kind != :branch_update) ORDER BY rowid LIMIT :limit"
+    "AND (:skip_branch_updates = 0 OR kind != :branch_update) "
+    "AND (:skip_controller_merges = 0 OR kind != :controller_merge) ORDER BY rowid LIMIT :limit"
 )
 
 
@@ -43,6 +44,7 @@ async def pending_actions(
     after: int,
     limit: int,
     skip_branch_updates: bool,
+    skip_controller_merges: bool = False,
 ) -> tuple[QueuedAction, ...]:
     rows = await connection.execute(
         _PENDING,
@@ -51,6 +53,8 @@ async def pending_actions(
             "limit": limit,
             "skip_branch_updates": skip_branch_updates,
             "branch_update": BRANCH_UPDATE,
+            "controller_merge": CONTROLLER_MERGE,
+            "skip_controller_merges": skip_controller_merges,
         },
     )
     return tuple(

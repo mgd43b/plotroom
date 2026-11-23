@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "57"
 remote: "https://github.com/mgd43b/plotroom/issues/57"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Run reports, run_finished and main_green_with_images

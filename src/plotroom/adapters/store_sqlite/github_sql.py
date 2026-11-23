@@ -18,15 +18,16 @@ PULL = text(
 SAVE_PULL = text("""
     INSERT INTO github_pull_requests
       (repository, number, branch, head_sha, head_repository, state, updated_at,
-       as_of, complete, version)
+       as_of, complete, version, draft, merge_commit_sha)
     VALUES (
       :repository, :number, :branch, :head_sha, :head_repository, :state, :updated_at,
-      :as_of, :complete, :version
+      :as_of, :complete, :version, :draft, :merge_commit_sha
     )
     ON CONFLICT (repository, number) DO UPDATE SET branch = excluded.branch,
       head_sha = excluded.head_sha, state = excluded.state, updated_at = excluded.updated_at,
       head_repository = excluded.head_repository,
-      as_of = excluded.as_of, complete = excluded.complete, version = excluded.version
+      as_of = excluded.as_of, complete = excluded.complete, version = excluded.version,
+      draft = excluded.draft, merge_commit_sha = excluded.merge_commit_sha
 """)
 CURSOR = text("""
     SELECT watermark, as_of, generation FROM github_fetch_cursors
@@ -91,6 +92,8 @@ def _pull_from_row(row: Row[Any]) -> PullRequest:
         row.as_of,
         bool(row.complete),
         row.version,
+        None if row.draft is None else bool(row.draft),
+        row.merge_commit_sha,
     )
 
 

@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+from plotroom.core.merge_gate import GateSnapshot
+
 type BranchUpdateOutcome = Literal["updated", "conflict"]
 
 
@@ -32,5 +34,30 @@ class FixtureGitHubWrite(Protocol):
         ...
 
     async def merge(
-        self, *, repository: str, number: int, action_key: str, expected_head_sha: str
-    ) -> None: ...
+        self,
+        *,
+        repository: str,
+        number: int,
+        action_key: str,
+        expected_head_sha: str,
+        expected_main_sha: str,
+        method: Literal["merge", "squash", "rebase"],
+        evidence_revision: str,
+    ) -> bool:
+        """Atomically apply the exact evidence revision, refs, and method at most once."""
+        ...
+
+
+@dataclass(frozen=True)
+class FixtureMergeEvidence:
+    snapshot: GateSnapshot | None
+    revision: str
+    applied: bool = False
+
+
+class FixtureGitHubMerge(FixtureGitHubWrite, Protocol):
+    async def merge_evidence(
+        self, *, repository: str, number: int, action_key: str
+    ) -> FixtureMergeEvidence:
+        """Read authoritative current facts or a durable receipt for this exact action key."""
+        ...

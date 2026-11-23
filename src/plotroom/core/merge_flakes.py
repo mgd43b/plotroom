@@ -340,7 +340,7 @@ async def record_main_flakes(
     await _record_candidates(uow, repository, candidates)
     if fully_proven:
         check_id = pair.failure.fields["id"]
-        await uow.append(
+        proof = await uow.append(
             NewEvent(
                 SOURCE,
                 MAIN_FLAKE_EVENT,
@@ -348,3 +348,5 @@ async def record_main_flakes(
                 {"repository": repository, "head_sha": pair.base, "check_id": check_id},
             )
         )
+        if proof.created:
+            uow.all_merge_pulls = True

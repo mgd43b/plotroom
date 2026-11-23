@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "58"
 remote: "https://github.com/mgd43b/plotroom/issues/58"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Event leaves, deploys, idle lanes and every-triggers

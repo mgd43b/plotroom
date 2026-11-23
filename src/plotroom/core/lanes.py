@@ -32,6 +32,7 @@ class Lane:
     waiting_on: str | None = None
     pr: int | None = None
     head_sha: str | None = None
+    branch_pattern: str | None = None
     checklist: Checklist | None = None
 
     def with_checklist(self, checklist: Checklist | None) -> Lane:
@@ -51,6 +52,7 @@ class Lane:
             "waiting_on": self.waiting_on,
             "pr": self.pr,
             "head_sha": self.head_sha,
+            "branch_pattern": self.branch_pattern,
         }
         if self.checklist is not None:
             result["checklist"] = self.checklist.render()
@@ -86,11 +88,14 @@ async def start_lane(
     lane_id: str = args["lane"]
     worker: str = args["worker"]
     branch: str = args["branch"]
+    branch_pattern: str | None = args.get("branch_pattern")
     work_items: list[Any] = args["work_items"]
     if worker not in workers:
         raise LedgerError("invalid", "worker is not configured for this project")
     if not lane_id.strip() or len(lane_id.encode()) > 128 or not branch.strip():
         raise LedgerError("invalid", "lane must be 1-128 UTF-8 bytes and branch must be non-empty")
+    if branch_pattern is not None and not branch_pattern.strip():
+        raise LedgerError("invalid", "branch_pattern must be non-empty when supplied")
     if not all(isinstance(item, str) and item.strip() for item in work_items):
         raise LedgerError("invalid", "work_items must contain non-empty strings")
     if await uow.find_lane(lane_id) is not None:
@@ -99,7 +104,7 @@ async def start_lane(
         raise LedgerError("conflict", "worker already has a lane")
     if work_items and not set(work_items).isdisjoint(await uow.claimed_work_items()):
         raise LedgerError("conflict", "one or more work items are already assigned")
-    lane = Lane(lane_id, worker, tuple(work_items), branch)
+    lane = Lane(lane_id, worker, tuple(work_items), branch, branch_pattern=branch_pattern)
     await uow.save_lane(lane)
     uow.pull_overlaps_changed()
     await refresh_idle_workers(uow, workers)

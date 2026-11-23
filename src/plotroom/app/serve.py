@@ -9,12 +9,13 @@ import os
 import signal
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from types import FrameType
 from typing import Any
+from urllib.parse import urlsplit
 
 import uvicorn
 from uvicorn.protocols.http.h11_impl import H11Protocol
@@ -57,6 +58,7 @@ from plotroom.core.actions import SWITCHBOARD_SEND
 from plotroom.core.catalog import build_catalog
 from plotroom.core.ledger import Ledger
 from plotroom.ports import Clock
+from plotroom.ports.github_write import FixtureGitHubMerge
 from plotroom.ports.work_items import WorkItemSource
 
 log = logging.getLogger("plotroom.serve")
@@ -206,8 +208,15 @@ class Daemon:
         sqlite_version: str | None = None,
         clock: Clock | None = None,
         expected_directory: str | None = None,
+        fixture_github_writes: Mapping[str, FixtureGitHubMerge] | None = None,
     ) -> None:
         self._config = config
+        self._fixture_github_writes = dict(fixture_github_writes or {})
+        for project_id in self._fixture_github_writes:
+            github = config.github.get(project_id)
+            url = urlsplit(github.api_url) if github is not None else None
+            if url is None or url.scheme != "http" or url.hostname not in ("127.0.0.1", "::1"):
+                raise ConfigError("GitHub fixture writes require a loopback fixture project")
         self._expected_directory = expected_directory
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._projects: dict[str, _Project] = {}
@@ -355,6 +364,7 @@ class Daemon:
 
     async def _open_projects(self) -> None:
         """Migrate each project file and start its ledger (never reached below the SQLite floor)."""
+        tokens = TokenRegistry(self._config.data_dir)
         for project_id in self._config.projects:
             project = _Project(SqliteStore(project_id, self._config.data_dir))
             self._projects[project_id] = project  # registered first so a failure closes it
@@ -373,6 +383,9 @@ class Daemon:
             repository = github.repository if github is not None else None
             remote_tree = self._config.github_ticket_trees.get(project_id)
             routes = self._config.delivery_routes.get(project_id)
+            fixture_write = self._fixture_github_writes.get(project_id)
+            policy = github.merge_gate_policy if github is not None else None
+            live_merge = policy is not None and policy.ci_workflow is not None
             project.ledger = Ledger(
                 project.store,
                 build_catalog(
@@ -391,9 +404,14 @@ class Daemon:
                 session_workers=desktop.sessions if desktop is not None else None,
                 drain_enabled=project_id in self._config.drain_sessions,
                 brief_settings=self._config.briefs.get(project_id),
+                live_merge_controller=live_merge,
+                merge_clerk=partial(tokens.has_role, project_id, "clerk") if live_merge else None,
+                fixture_merge_enabled=fixture_write is not None,
+                fixture_branch_updates=fixture_write is not None,
             )
             project.ledger.start()
             await project.ledger.initialize_overlaps()
+            await project.ledger.clean_disabled_merge_items()
             relay = self._config.switchboards.get(project_id)
             switchboard = (
                 Switchboard(project.ledger, relay.board, relay.command, relay.senders)
@@ -432,6 +450,7 @@ class Daemon:
                     include_issue_tree=issue_source is not None,
                     ci_workflow=github.merge_gate_policy.ci_workflow,
                 )
+                project.ledger.confirm_merge_gate = details.confirm_gate
                 inputs.append(partial(poller.run, details.poll))
                 if remote_tree is not None:
                     tree, installation = remote_tree
@@ -463,6 +482,8 @@ class Daemon:
                 workers=workers,
                 work_items=work_items,
                 inputs=tuple(inputs),
+                fixture_github_write=fixture_write,
+                fixture_github_merge=fixture_write,
             )
             project.runtime.start()
 

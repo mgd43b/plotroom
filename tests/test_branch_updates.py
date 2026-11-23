@@ -1,5 +1,6 @@
 """Deterministic Rule 4 observations and fixture-only effects."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -25,6 +26,7 @@ from plotroom.core.github_projection import (
     LABELS,
     MAIN,
     MAIN_CI,
+    PULL_TEXT,
     THREADS,
     GitHubRecord,
     GitHubResource,
@@ -86,9 +88,17 @@ class FixtureWrite(FixtureGitHubWrite):
         return self.effects[action_key]
 
     async def merge(
-        self, *, repository: str, number: int, action_key: str, expected_head_sha: str
-    ) -> None:
-        raise AssertionError("the fixture runner must never merge")
+        self,
+        *,
+        repository: str,
+        number: int,
+        action_key: str,
+        expected_head_sha: str,
+        expected_main_sha: str,
+        method: str,
+        evidence_revision: str,
+    ) -> bool:
+        raise AssertionError("the branch-update fixture runner must never merge")
 
 
 async def setup(
@@ -190,6 +200,15 @@ async def observe(
                 "7",
                 GitHubResource((), complete=complete, attributes=comparison, as_of=now),
             ),
+            (
+                PULL_TEXT,
+                "7",
+                GitHubResource(
+                    (),
+                    attributes={**pins, "body": "", "commit_count": 1, "commit_messages": ["Refs"]},
+                    as_of=now,
+                ),
+            ),
         ):
             await uow.save_github_resource(REPO, resource, scope, snapshot)
         labels = {"fix-main": "owner"} if fix_label else {}
@@ -224,6 +243,67 @@ async def observe(
         )
 
     await ledger.run("system", write)
+
+
+async def test_earlier_open_lane_pull_blocks_queued_update_and_gate(tmp_path: Path) -> None:
+    port = FixtureWrite()
+    store, ledger, runtime = await setup(tmp_path, FixedClock(), port, lane=False)
+
+    async def add_earlier_pulls(uow: UnitOfWork) -> None:
+        candidate = await uow.pull_request(REPO, 7)
+        assert candidate is not None
+        for number, branch, repo in (
+            (5, "work/first", REPO),
+            (3, "work/oldest", REPO),
+            (2, "Work/case-difference", REPO),
+            (1, "work/fork", "fork/demo"),
+        ):
+            await uow.save_pull_request(
+                replace(candidate, number=number, branch=branch, head_repository=repo)
+            )
+
+    async def close(uow: UnitOfWork, number: int) -> None:
+        pull = await uow.pull_request(REPO, number)
+        assert pull is not None
+        await uow.save_pull_request(replace(pull, state="closed", version=pull.version + 1))
+
+    try:
+        await ledger.execute(
+            "orchestrator",
+            "lane_start",
+            "work-lane",
+            {
+                "lane": "lane1",
+                "worker": "worker1",
+                "branch": "work",
+                "branch_pattern": "work/*",
+                "work_items": [],
+            },
+        )
+        await observe(ledger, branch="work/second")
+        assert await runtime.stage_branch_update(7)
+        await ledger.run("system", add_earlier_pulls)
+        assert (await ledger.merge_gate("clerk", 7)).reasons[0].code == "stale_ci"
+        assert not await runtime.run_one_action()
+        assert port.lookups == [KEY]
+        assert not port.calls
+
+        await observe(ledger, branch="work/second", overlap=False)
+        snapshot = await store.read_merge_gate(REPO, 7)
+        assert snapshot.lane is not None
+        assert snapshot.lane.branch_pattern == "work/*"
+        assert snapshot.earlier_pull == 3
+        reason = (await ledger.merge_gate("clerk", 7)).reasons[0]
+        assert reason.code == "duplicate_lane_pr"
+        assert "PR #3" in reason.detail
+        await ledger.run("system", lambda uow: close(uow, 3))
+        assert (await store.read_merge_gate(REPO, 7)).earlier_pull == 5
+        await ledger.run("system", lambda uow: close(uow, 5))
+        assert (await store.read_merge_gate(REPO, 7)).earlier_pull is None
+        assert (await ledger.merge_gate("clerk", 7)).verdict == "MERGE"
+    finally:
+        await ledger.stop()
+        await store.close()
 
 
 @pytest.mark.parametrize(

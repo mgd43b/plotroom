@@ -296,11 +296,20 @@ class SqliteStore:
         return page[0].action if page else None
 
     async def pending_actions(
-        self, *, after: int, limit: int, skip_branch_updates: bool = False
+        self,
+        *,
+        after: int,
+        limit: int,
+        skip_branch_updates: bool = False,
+        skip_controller_merges: bool = False,
     ) -> tuple[QueuedAction, ...]:
         async with self._engine.connect() as connection:
             return await pending_actions(
-                connection, after=after, limit=limit, skip_branch_updates=skip_branch_updates
+                connection,
+                after=after,
+                limit=limit,
+                skip_branch_updates=skip_branch_updates,
+                skip_controller_merges=skip_controller_merges,
             )
 
     async def outbox_readiness(self, now: str) -> OutboxReadiness:

@@ -115,6 +115,13 @@ async def test_ready_stores_three_ordered_rows_and_activates_once(
             "replace-active",
             {**_ready([], head=later.head_sha), "pr": later.number},
         )
+    with pytest.raises(LedgerError, match="already has an active checklist"):
+        await ledger.execute(
+            "orchestrator",
+            "lane_ready",
+            "replace-with-legacy-ready",
+            {"lane": "lane", "head_sha": later.head_sha, "pr": later.number},
+        )
     lane = await _lane(ledger)
     assert (lane["pr"], lane["head_sha"]) == (observed.number, observed.head_sha)
     assert lane["checklist"] == active

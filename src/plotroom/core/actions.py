@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
 FAILED_ACTION = "failed_action"
 BRANCH_UPDATE = "branch_update"
+CONTROLLER_MERGE = "controller_merge"
 SWITCHBOARD_SEND = "switchboard.send"
 ACTION_FIELDS = (FieldSpec("action_key", "str"), FieldSpec("attempt", "int"))
 ACTION_PAGE_SIZE = 32

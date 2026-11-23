@@ -1,6 +1,7 @@
 import json
 import shutil
 import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -17,8 +18,8 @@ from plotroom.app.serve import Daemon
 from plotroom.core.catalog import build_catalog
 from plotroom.core.claims import TICKET_TREE_MOVE
 from plotroom.core.events import NewEvent
-from plotroom.core.github import ObservedPull, apply_pull_poll
-from plotroom.core.github_projection import FILES, GitHubRecord, GitHubResource, apply_resource
+from plotroom.core.github import PR_MERGED, PR_OPENED, ObservedPull
+from plotroom.core.github_projection import FILES, GitHubRecord, GitHubResource
 from plotroom.core.lanes import Lane
 from plotroom.core.ledger import Ledger
 from plotroom.core.unit_of_work import UnitOfWork
@@ -73,6 +74,47 @@ async def test_migrating_twice_changes_nothing(tmp_path: Path) -> None:
         await store.close()
 
 
+def seed_legacy_pull(path: Path, repository: str, pull: ObservedPull) -> None:
+    # Keep the fixture at its historical schema when current writers gain columns.
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute(
+            "INSERT INTO github_pull_requests (repository, number, branch, head_sha, "
+            "head_repository, state, updated_at, as_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                repository,
+                pull.number,
+                pull.branch,
+                pull.head_sha,
+                pull.head_repository,
+                pull.state,
+                pull.updated_at,
+                pull.updated_at,
+            ),
+        )
+
+
+async def append_legacy_pull(uow: UnitOfWork, repository: str, pull: ObservedPull) -> None:
+    fields = {
+        "repository": repository,
+        "number": pull.number,
+        "branch": pull.branch,
+        "head_sha": pull.head_sha,
+        "state": pull.state,
+        "updated_at": pull.updated_at,
+    }
+    if pull.head_repository is not None:
+        fields["head_repository"] = pull.head_repository
+    await uow.append(
+        NewEvent(
+            "github",
+            PR_MERGED if pull.state == "merged" else PR_OPENED,
+            f"{repository}#{pull.number}@1:{pull.updated_at}",
+            fields,
+            pull.body,
+        )
+    )
+
+
 async def test_checklist_upgrade_preserves_existing_ready_lane(tmp_path: Path) -> None:
     revision = ScriptDirectory.from_config(alembic_config()).get_revision("0017")
     assert revision is not None
@@ -115,10 +157,12 @@ async def test_populated_claims_upgrade_reconciles_existing_tree_move(
         ObservedPull(2, "mover", "b" * 40, repo, "open", stamp, "Existing move"),
     )
     story = "tickets/story.md"
+    for pull in pulls:
+        seed_legacy_pull(store.path, repo, pull)
 
     async def existing_facts(uow: UnitOfWork) -> None:
-        await apply_pull_poll(uow, repo, None, pulls, stamp)
         for pull in pulls:
+            await append_legacy_pull(uow, repo, pull)
             renamed = pull.number == 2
             path = "tickets/renamed.md" if renamed else story
             fields = {
@@ -130,13 +174,24 @@ async def test_populated_claims_upgrade_reconciles_existing_tree_move(
             if renamed:
                 fields["previous_path"] = story
             record = GitHubRecord(path, "pull_file", fields)
-            await apply_resource(
-                uow,
+            await uow.append(
+                NewEvent(
+                    "github",
+                    "github.pull_file",
+                    f"{repo}:files:{pull.number}:{path}@1",
+                    {
+                        "repository": repo,
+                        **fields,
+                    },
+                )
+            )
+            await uow.save_github_resource(
                 repo,
                 FILES,
                 str(pull.number),
-                GitHubResource((record,), attributes={"head_sha": pull.head_sha}),
-                stamp,
+                GitHubResource(
+                    (record,), attributes={"head_sha": pull.head_sha}, generation=1, as_of=stamp
+                ),
             )
 
     ledger.start()
@@ -180,6 +235,7 @@ async def test_populated_claims_upgrade_reconciles_existing_tree_move(
             assert result["data"]["cursor"] > observed[-1]["data"]["cursor"]
     finally:
         await stop(disabled, task)
+    assert script_heads() == [head_revision()]
     with sqlite3.connect(store.path) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
             head_revision(),
@@ -351,10 +407,10 @@ async def test_trigger_migration_preserves_projected_prs_and_pending_actions(
     ledger = Ledger(store, catalog, FixedClock())
     timestamp = "2026-11-23T12:00:00.000000Z"
     details = GitHubResource((), attributes={"fixture": True}, generation=1, as_of=timestamp)
+    pull = ObservedPull(7, "fixture", "a" * 40, repo, "merged", timestamp, "before upgrade")
 
     async def seed(uow: UnitOfWork) -> str:
-        pull = ObservedPull(7, "fixture", "a" * 40, repo, "merged", timestamp, "before upgrade")
-        assert await apply_pull_poll(uow, repo, None, (pull,), timestamp)
+        await append_legacy_pull(uow, repo, pull)
         if prior == "0011":
             await uow.save_github_resource(repo, "fixture_resource", "", details)
         cause = (await uow.append(NewEvent("core", "core.tick", "before-upgrade"))).event
@@ -363,6 +419,7 @@ async def test_trigger_migration_preserves_projected_prs_and_pending_actions(
     try:
         await upgrade_to_head(store._engine, config)  # pyright: ignore[reportPrivateUsage]
         assert await store.revision() == prior
+        seed_legacy_pull(store.path, repo, pull)
         ledger.start()
         key = await ledger.run("system", seed)
         await ledger.stop()
@@ -381,4 +438,37 @@ async def test_trigger_migration_preserves_projected_prs_and_pending_actions(
             assert await tx.first_matching_pull(repo, "fixture*") == 7
     finally:
         await ledger.stop()
+        await store.close()
+
+
+async def test_merge_controller_upgrade_preserves_existing_lane_and_pull(tmp_path: Path) -> None:
+    legacy = _migrations_at(tmp_path / "before-merge-controller", "0015")
+    repository = "fixture/project"
+    timestamp = "2026-11-23T12:00:00.000000Z"
+    head = "a" * 40
+    store = SqliteStore("demo", tmp_path)
+    try:
+        await upgrade_to_head(store._engine, alembic_config(legacy))  # pyright: ignore[reportPrivateUsage]
+        assert await store.revision() == head_revision(alembic_config(legacy))
+        seed_legacy_pull(
+            store.path, repository, ObservedPull(7, "work", head, repository, "open", timestamp, "")
+        )
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.execute(
+                "INSERT INTO lanes (id, worker, work_items, branch, state, pr, head_sha) "
+                "VALUES ('lane', 'worker', '[\"ticket\"]', 'work', 'ready', 7, ?)",
+                (head,),
+            )
+        await store.migrate()
+        assert await store.revision() == head_revision()
+        snapshot = await store.read_merge_gate(repository, 7)
+        assert snapshot.pull is not None
+        assert snapshot.pull.draft is None
+        assert snapshot.pull.merge_commit_sha is None
+        assert snapshot.lane is not None
+        assert snapshot.lane.branch_pattern is None
+        assert (snapshot.lane.state, snapshot.lane.pr, snapshot.lane.head_sha) == ("ready", 7, head)
+        assert snapshot.lane.work_items == ("ticket",)
+        assert snapshot.earlier_pull is None
+    finally:
         await store.close()

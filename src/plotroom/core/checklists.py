@@ -78,14 +78,14 @@ def _parse_steps(rows: list[Any]) -> tuple[ChecklistStep, ...]:
 async def declare_checklist(
     uow: UnitOfWork, lane: Lane, repository: str | None, args: dict[str, Any]
 ) -> None:
+    current = await uow.find_checklist(lane.id)
+    if current is not None and current.state == "active":
+        raise LedgerError("conflict", "the lane already has an active checklist")
     if "checklist" not in args:
         return
     steps = _parse_steps(args["checklist"])
     if repository is None:
         raise LedgerError("conflict", "a READY checklist requires a GitHub projection")
-    current = await uow.find_checklist(lane.id)
-    if current is not None and current.state == "active":
-        raise LedgerError("conflict", "the lane already has an active checklist")
     version = current.version if current is not None else 0
     pending = Checklist(
         lane.id, version, repository, lane.branch, args["pr"], args["head_sha"], "pending", steps
