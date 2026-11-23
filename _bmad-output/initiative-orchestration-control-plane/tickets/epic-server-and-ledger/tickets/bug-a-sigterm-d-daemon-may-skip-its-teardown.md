@@ -11,6 +11,7 @@ risk: medium
 tracker_id: "129"
 remote: "https://github.com/mgd43b/plotroom/issues/129"
 tracker_status: backlog
+status: built
 ---
 
 # A SIGTERM'd daemon may skip its teardown
@@ -26,3 +27,7 @@ Verify: A test that sends SIGTERM to a running daemon with an open project shows
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md
+
+## Notes
+
+- Built: https://github.com/mgd43b/plotroom/pull/135

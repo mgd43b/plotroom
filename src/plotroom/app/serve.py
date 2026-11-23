@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import signal
 import sqlite3
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import uvicorn
@@ -46,9 +49,7 @@ class _Server(uvicorn.Server):
         return self._shutdown_task
 
     async def _shut_down(self, sockets: Any) -> None:
-        # The port is no longer ours to publish. Done here, not only in ``Daemon.run``: after a
-        # SIGTERM uvicorn re-raises the signal as soon as it has shut down, which ends the process
-        # before ``Daemon.run`` gets to clean up.
+        # Stop publishing the listener as soon as it starts shutting down.
         with contextlib.suppress(OSError):
             remove_port(self._data_dir)
         await uvicorn.Server.shutdown(self, sockets)
@@ -109,6 +110,7 @@ class Daemon:
         )
         self._started: asyncio.Future[int] | None = None
         self._server: _Server | None = None
+        self._received_sigterm = False
 
     async def wait_started(self) -> int:
         """The port the server is listening on, once it is."""
@@ -119,6 +121,26 @@ class Daemon:
     def stop(self) -> None:
         if self._server is not None:
             self._server.should_exit = True
+
+    async def run_as_service(self) -> None:
+        """Serve from the CLI, replaying SIGTERM after releasing the data directory."""
+        if threading.current_thread() is not threading.main_thread():
+            await self.run()
+            return
+        # Uvicorn saves this handler, then calls it when replaying SIGTERM after HTTP shutdown.
+        # SIGINT still follows Uvicorn's and asyncio's usual handling.
+        previous = signal.signal(signal.SIGTERM, self._handle_sigterm)
+        try:
+            await self.run()
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+            if self._received_sigterm:
+                self._received_sigterm = False
+                signal.raise_signal(signal.SIGTERM)
+
+    def _handle_sigterm(self, _signal: int, _frame: FrameType | None) -> None:
+        self._received_sigterm = True
+        self.stop()
 
     @property
     def ledgers(self) -> dict[str, Ledger]:
@@ -158,6 +180,8 @@ class Daemon:
                     access_log=False,
                 )
                 self._server = _Server(uvicorn_config, self._started, config.data_dir)
+                if self._received_sigterm:  # opening finished after a stop request
+                    return
                 serving = asyncio.ensure_future(self._announce())
                 try:
                     await self._server.serve()

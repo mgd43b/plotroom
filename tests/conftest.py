@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -78,9 +79,13 @@ class Child:
 
     def wait_for_log(self, msg: str) -> dict[str, Any]:
         """The first log line whose ``msg`` matches; fails with what was seen if the child ends."""
+        deadline = time.monotonic() + CHILD_TIMEOUT
         while True:
             try:
-                line = self.lines.get(timeout=CHILD_TIMEOUT)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise queue.Empty
+                line = self.lines.get(timeout=remaining)
             except queue.Empty:
                 pytest.fail(f"no {msg!r} log line within {CHILD_TIMEOUT}s; saw {self.seen}")
             if line is None:
@@ -97,12 +102,16 @@ class Child:
             return self.process.wait(timeout=CHILD_TIMEOUT)
         except subprocess.TimeoutExpired:
             self.process.kill()
-            return self.process.wait()
+            return self.process.wait(timeout=CHILD_TIMEOUT)
 
 
 def start_plotroom(*args: str) -> Child:
+    return start_python("-m", "plotroom", *args)
+
+
+def start_python(*args: str) -> Child:
     process = subprocess.Popen(
-        [sys.executable, "-m", "plotroom", *args],
+        [sys.executable, *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
