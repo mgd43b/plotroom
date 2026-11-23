@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "103"
 remote: "https://github.com/mgd43b/plotroom/issues/103"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Stop at 100%

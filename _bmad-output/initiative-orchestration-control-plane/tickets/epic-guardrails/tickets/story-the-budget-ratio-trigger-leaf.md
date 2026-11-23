@@ -9,7 +9,7 @@ hitl: false
 risk: low
 tracker_id: "104"
 remote: "https://github.com/mgd43b/plotroom/issues/104"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # The budget_ratio trigger leaf

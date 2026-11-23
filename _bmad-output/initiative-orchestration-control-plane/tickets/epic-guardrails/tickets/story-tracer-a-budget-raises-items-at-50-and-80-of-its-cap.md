@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "101"
 remote: "https://github.com/mgd43b/plotroom/issues/101"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Tracer: a budget raises items at 50% and 80% of its cap
