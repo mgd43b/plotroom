@@ -55,6 +55,7 @@ covers = ["R1"]
 after = [1, "1.11"]
 hitl = true
 risk = "low"
+notes = ["Making the chart package public is a publishing step that stays with mgd43b when its time comes."]
 
 [[entry]]
 id = 6

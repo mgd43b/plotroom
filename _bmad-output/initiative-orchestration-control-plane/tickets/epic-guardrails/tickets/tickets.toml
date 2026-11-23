@@ -22,7 +22,7 @@ after = [1, "1.10", "2.2"]
 hitl = true
 risk = "high"
 plan_checkpoint = true
-notes = ["Check beyond its criteria: a reporting delay or a gap in the provider's data never lowers a budget's recorded spend.", "Decision: 2026-11-22, Anthropic is the first provider (the lanes are Claude sessions); others are later adapters behind the same port."]
+notes = ["Paid run: the capped test run needs the coordinator's go-ahead when this is built, with a provider-enforced cap, a trial first and a projection from the trial's actual spend.", "Check beyond its criteria: a reporting delay or a gap in the provider's data never lowers a budget's recorded spend.", "Decision: 2026-11-22, Anthropic is the first provider (the lanes are Claude sessions); others are later adapters behind the same port."]
 
 [[entry]]
 id = 2
