@@ -66,3 +66,4 @@ Given fixture check histories, when a clerk or orchestrator queries a PR, then p
 ## Verification
 
 - `uv run python -m pytest -q tests/test_merge_gate_rule1.py tests/test_github_details.py tests/test_transport_contract.py` — 42 passed.
+- Built: https://github.com/mgd43b/plotroom/pull/152

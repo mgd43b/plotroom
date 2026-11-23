@@ -69,3 +69,4 @@ Given startup failures, failed jobs, cancellations, unreadable jobs, unrelated w
 - `uv run python -m pytest tests/test_merge_gate_main.py tests/test_merge_flakes.py tests/test_github_details.py` — scoped fixture contracts pass.
 - The combined Rule 1, Rule 2, Rule 3, flake and GitHub detail fixtures passed 76 tests. Scoped Ruff lint, Ruff format and Pyright passed.
 - After review corrections, the Rule 3 and GitHub detail suites passed 39 tests, and scoped Pyright was clean.
+- Built: https://github.com/mgd43b/plotroom/pull/152

@@ -73,3 +73,4 @@ Given a fixture for each supported pattern, when evidence is polled again or rep
 - Ruff and Pyright passed for the changed flake implementation and tests.
 - Flake and claims fixtures passed for the file-binding follow-up. They cover a base ref retarget, base SHA advancement, a same-version PR update before the writer commits, and a changed test file hidden after a full page without a next link.
 - Main proof requires exact workflow and check identities plus a complete SHA comparison. Each poll considers at most 12 recent workflow runs and starts at most four comparisons. Each comparison inspects at most 10 commits and refuses an ambiguous file count at the provider cap. Completed comparison evidence persists across restart.
+- Built: https://github.com/mgd43b/plotroom/pull/152

@@ -78,3 +78,4 @@ Given two overlapping-file observations for the same head, including across rest
 - `uv run python -m pytest tests/test_branch_updates.py tests/test_github_details.py tests/test_actions.py` — scoped fixture contracts pass.
 - All 27 scoped tests passed after those corrections. The deterministic transport verifies SHA-pinned comparisons, the 300-file cap, ref movement, temporary refusals, restart-safe conflict reporting, and progress of unrelated queued actions during a freeze.
 - Owner verification of real write acceptance remains pending.
+- Built: https://github.com/mgd43b/plotroom/pull/152

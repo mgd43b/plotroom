@@ -56,3 +56,4 @@ Given a fully paginated fixture with more than 100 resolved threads, when rule 2
 
 - `uv run python -m pytest tests/test_merge_gate_rule2.py tests/test_github_details.py` — 19 passed. Fixtures cover a 101-thread observation and refresh, missing or malformed pagination, a moved head, a same-SHA reopen, retained incomplete observations, and Rule 1 precedence.
 - Ruff lint, Ruff format check, and Pyright (Python 3.14) passed on the touched Python files.
+- Built: https://github.com/mgd43b/plotroom/pull/152

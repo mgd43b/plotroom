@@ -59,3 +59,4 @@ Given two PRs with different pre-freeze verdicts, when the orchestrator freezes 
 
 - `uv run python -m pytest tests/test_merge_freeze.py tests/test_branch_updates.py tests/test_transport_contract.py tests/test_migrations.py` — scoped fixture contracts pass.
 - Deploy-window, board snapshot, transport and migration tests passed together (30). A fresh SQLite reader preserves the freeze; unfreeze restores a fixture MERGE and a check refusal. The transport contract exercises HTTP and stdio across both supported protocol eras.
+- Built: https://github.com/mgd43b/plotroom/pull/152
