@@ -22,6 +22,7 @@ from plotroom.adapters.work_items_bmad import BmadTicketTree
 from plotroom.app.config import load_config
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import IssuedToken, TokenRegistry
+from plotroom.core.events import NewEvent
 from plotroom.core.github import ObservedPull, apply_pull_poll
 from plotroom.core.github_projection import CHECKS, GitHubRecord, GitHubResource, apply_resource
 from plotroom.core.snapshot import estimate_tokens
@@ -35,6 +36,7 @@ CHECK_TIME = "2026-11-23T11:59:59.000000Z"
 TOOL_NAMES = {
     "next",
     "snapshot",
+    "search",
     "brief",
     "merge_gate",
     "freeze",
@@ -101,14 +103,23 @@ class Endpoint:
     body_reads: list[str] = field(default_factory=lambda: [])
 
 
+@dataclass(frozen=True, kw_only=True)
+class SearchEndpoint(Endpoint):
+    other: IssuedToken
+    search_hit: str
+    other_search_hit: str
+
+
 @pytest.fixture
 async def endpoint(
     tmp_path: Path, token_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> AsyncGenerator[Endpoint]:
+) -> AsyncGenerator[SearchEndpoint]:
     config = write_config(tmp_path)
     tree, installation = make_brief_ticket(tmp_path)
     config.write_text(
-        config.read_text() + f'ticket_tree = "{tree}"\nbmad_installation = "{installation}"\n'
+        "search_budget = 256\n"
+        + config.read_text()
+        + f'ticket_tree = "{tree}"\nbmad_installation = "{installation}"\n'
         'drain_session = "fixture-drain"\n[projects.demo.workers.fixture]\n'
         'claude_session = "fixture-session"\n[projects.demo.github]\n'
         'repository = "fixture/project"\nmin_checks = 1\n'
@@ -119,7 +130,8 @@ async def endpoint(
         'template = """\n'
         "Brief {worker} for {work_item}\n\n{source_text}\n"
         "Paths\n{paths}\n\nDon't touch\n{dont_touch}\n\n"
-        'Plan\n{plan}\n\nRESULT\n{result}\n\nRules\n{standing_rules}\n"""\n',
+        'Plan\n{plan}\n\nRESULT\n{result}\n\nRules\n{standing_rules}\n"""\n'
+        "[projects.other]\n",
         encoding="utf-8",
     )
     options = load_config(config, {})
@@ -127,6 +139,7 @@ async def endpoint(
     token = registry.issue("demo", "orchestrator", local=True)
     drain_token = registry.issue("demo", "drain", local=True)
     worker_token = registry.issue("demo", "worker:fixture", local=True)
+    other_token = registry.issue("other", "orchestrator", local=True)
     daemon = Daemon(options, clock=FixedClock(datetime.fromisoformat(FIXTURE_TIME)))
     departed: asyncio.Queue[str] = asyncio.Queue()
     body_reads: list[str] = []
@@ -183,7 +196,30 @@ async def endpoint(
             ),
         )
         ledger.github_error = None
-        yield Endpoint(
+        search_hit = await ledger.append(
+            "system",
+            NewEvent(
+                "switchboard", "switchboard.message", "fixture", {"sender": "test"}, "needle demo"
+            ),
+        )
+        other_search_hit = await daemon.ledgers["other"].append(
+            "system",
+            NewEvent(
+                "switchboard", "switchboard.message", "fixture", {"sender": "test"}, "needle other"
+            ),
+        )
+        for index in range(4):
+            await ledger.append(
+                "system",
+                NewEvent(
+                    "switchboard",
+                    "switchboard.message",
+                    f"budget-{index}",
+                    {"sender": "test"},
+                    "budgetword " + "界" * 260,
+                ),
+            )
+        yield SearchEndpoint(
             f"http://127.0.0.1:{port}/mcp",
             config,
             token,
@@ -191,6 +227,9 @@ async def endpoint(
             worker_token,
             departed,
             body_reads,
+            other=other_token,
+            search_hit=search_hit.event.id,
+            other_search_hit=other_search_hit.event.id,
         )
     finally:
         daemon.stop()
@@ -284,7 +323,7 @@ async def connection(endpoint: Endpoint, transport: str, era: str) -> AsyncGener
 
 @pytest.mark.parametrize("transport", ["http", "stdio"])
 @pytest.mark.parametrize("era", ERAS)
-async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: str) -> None:
+async def test_every_registered_tool(endpoint: SearchEndpoint, transport: str, era: str) -> None:
     async with asyncio.timeout(15), connection(endpoint, transport, era) as send:
         if era == "modern":
             discovered = await send(message(era, 20, "server/discover"))
@@ -299,6 +338,10 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
                 assert set(tool["inputSchema"]["required"]) == {"work_item", "worker"}
                 assert tool["inputSchema"]["properties"]["work_item"]["type"] == "string"
                 assert tool["inputSchema"]["properties"]["worker"]["type"] == "string"
+            if tool["name"] == "search":
+                assert tool["inputSchema"]["required"] == ["text"]
+                assert tool["inputSchema"]["properties"]["text"]["type"] == "string"
+                assert tool["inputSchema"]["properties"]["limit"]["type"] == "integer"
             if tool["name"] in REPORT_ARGUMENTS:
                 assert set(tool["inputSchema"]["required"]) == {
                     "request_id",
@@ -315,7 +358,10 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             reply = await send(message(era, number, "tools/call", name=name, arguments=args))
             assert "result" in reply, reply
             assert not reply["result"].get("isError", False), reply
-            payload = json.loads(reply["result"]["content"][0]["text"])
+            content = reply["result"]["content"][0]["text"]
+            if name == "search":
+                assert estimate_tokens(content) <= 256
+            payload = json.loads(content)
             if error is not None:
                 assert payload["error"]["code"] == error, payload
                 return {}
@@ -323,6 +369,31 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             return payload["data"]
 
         assert (await call("snapshot"))["lanes"] == {}
+        assert await call("search", text="needle") == {
+            "hits": [
+                {"id": endpoint.search_hit, "kind": "switchboard.message", "excerpt": "needle demo"}
+            ],
+            "omitted": 0,
+        }
+        assert await call("search", text="needle", limit=0, error="invalid") == {}
+        capped = await call("search", text="budgetword", limit=2)
+        assert len(capped["hits"]) == 1
+        assert capped["omitted"] == 3
+        limited = await call("search", text="budgetword", limit=1)
+        assert limited == capped
+        query = message(era, 80, "tools/call", name="search", arguments={"text": "needle"})
+        async with connection(replace(endpoint, token=endpoint.other), transport, era) as other:
+            reply = await other(query)
+            assert json.loads(reply["result"]["content"][0]["text"])["data"] == {
+                "hits": [
+                    {
+                        "id": endpoint.other_search_hit,
+                        "kind": "switchboard.message",
+                        "excerpt": "needle other",
+                    }
+                ],
+                "omitted": 0,
+            }
         assert (
             BRIEF_TICKET_BODY
             in (await call("brief", work_item=BRIEF_TICKET_REF, worker="fixture"))["brief"]
@@ -435,6 +506,7 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             **REPORT_ARGUMENTS,
             "ack": {"item": "fixture"},
             "brief": {"work_item": BRIEF_TICKET_REF, "worker": "fixture"},
+            "search": {"text": "needle"},
             "merge_gate": {"pr": 1},
             "freeze": {"reason": "fixture"},
             "claim": {"lane": "fixture", "globs": ["src/**"], "reason": "fixture"},

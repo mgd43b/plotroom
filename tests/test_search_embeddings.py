@@ -1,0 +1,505 @@
+"""Fixture-only HTTP, writer and SQLite coverage for message embeddings."""
+
+import asyncio
+import json
+import sqlite3
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, cast
+
+import aiosqlite
+import httpx
+import pytest
+from sqlalchemy.exc import IntegrityError
+
+from plotroom.adapters import embedding_http
+from plotroom.adapters.embedding_http import HttpEmbedder
+from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.app.config import ConfigError, EmbedderConfig, load_config
+from plotroom.app.serve import Daemon
+from plotroom.core import search
+from plotroom.core.events import LedgerError, NewEvent
+from plotroom.core.ledger import Ledger
+from plotroom.core.search import follow_message_embeddings, pack_vector
+from plotroom.core.unit_of_work import UnitOfWork
+from plotroom.ports.search import (
+    EmbeddedMessage,
+    EmbeddingError,
+    EmbeddingIndex,
+    EmbeddingModel,
+    SearchHit,
+    SearchPage,
+)
+from test_daemon import run_daemon, stop
+from test_search import message, opened_search
+
+MODEL = EmbeddingModel("fixture-model", 2)
+
+
+@dataclass
+class Request:
+    body: dict[str, Any]
+    response: asyncio.Future[tuple[int, object]]
+
+    def send(self, body: object, *, status: int = 200) -> None:
+        self.response.set_result((status, body))
+
+    def vectors(self, *vectors: list[float]) -> None:
+        # Simulate a provider returning results out of order.
+        self.send(
+            {
+                "data": [
+                    {"index": index, "embedding": vectors[index]}
+                    for index in reversed(range(len(vectors)))
+                ],
+            }
+        )
+
+
+@dataclass
+class Endpoint:
+    url: str
+    requests: asyncio.Queue[Request]
+
+    async def next_request(self, model: EmbeddingModel, *messages: str) -> Request:
+        request = await asyncio.wait_for(self.requests.get(), 5)
+        assert request.body == {
+            "model": model.name,
+            "dimensions": model.dimension,
+            "input": list(messages),
+        }
+        return request
+
+
+@pytest.fixture
+async def endpoint() -> AsyncGenerator[Endpoint]:
+    requests: asyncio.Queue[Request] = asyncio.Queue()
+    tasks: set[asyncio.Task[None]] = set()
+
+    async def respond(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        tasks.add(task)
+        try:
+            request = (await reader.readuntil(b"\r\n\r\n")).splitlines()
+            assert request[0] == b"POST /embeddings HTTP/1.1"
+            headers = dict(line.lower().split(b":", 1) for line in request[1:] if line)
+            content = await reader.readexactly(int(headers[b"content-length"]))
+            body = cast("dict[str, Any]", json.loads(content))
+            response = asyncio.get_running_loop().create_future()
+            requests.put_nowait(Request(body, response))
+            status, data = await response
+            payload = data if isinstance(data, bytes) else json.dumps(data).encode()
+            writer.write(
+                f"HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\n"
+                f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
+                + payload
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            tasks.discard(task)
+
+    async with await asyncio.start_server(respond, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        try:
+            yield Endpoint(f"http://127.0.0.1:{port}/embeddings", requests)
+        finally:
+            pending = list(tasks)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+@asynccontextmanager
+async def following(
+    ledger: Ledger, index: EmbeddingIndex, endpoint: Endpoint
+) -> AsyncGenerator[None]:
+    async with httpx.AsyncClient(trust_env=False) as client:
+        task = asyncio.create_task(
+            follow_message_embeddings(
+                ledger, index, HttpEmbedder(client, endpoint.url, index.model), retry_seconds=0.01
+            )
+        )
+        try:
+            yield
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+async def await_cursor(ledger: Ledger, index: EmbeddingIndex, through: int) -> None:
+    async with asyncio.timeout(5):
+        while True:
+            committed = ledger.commit_signal
+            if await index.cursor() == through:
+                return
+            await committed.wait()
+
+
+async def test_stalled_or_failing_embedder_leaves_ledger_writable_and_catches_up(
+    tmp_path: Path, endpoint: Endpoint
+) -> None:
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        index = store.embedding_index(MODEL)
+        first = (await ledger.append("system", message("a", "seal the hatch"))).event
+        async with following(ledger, index, endpoint):
+            stalled = await endpoint.next_request(MODEL, "seal the hatch")
+            async with asyncio.timeout(3):
+                second = (await ledger.append("system", message("b", "prepare supper"))).event
+                skipped = await ledger.append(
+                    "system", NewEvent("core", "core.tick", "tick", {}, "excluded")
+                )
+            assert await index.cursor() == 0
+            stalled.send({}, status=503)
+            retry = await endpoint.next_request(MODEL, "seal the hatch", "prepare supper")
+            assert await index.cursor() == 0
+            retry.vectors([1, 0], [0, 1])
+            await await_cursor(ledger, index, skipped.event.seq)
+            # The fake vector for "secure doorway" finds a record with no shared words.
+            assert await ledger.search("secure doorway", None, 20) == SearchPage((), 0)
+            paraphrase = (0.9, 0.1)
+            assert await index.query_vector("demo", paraphrase, 1) == SearchPage(
+                (SearchHit(first.id, first.kind, first.body),), 2
+            )
+            assert [hit.id for hit in (await index.query_vector("demo", paraphrase, 2)).hits] == [
+                first.id,
+                second.id,
+            ]
+            with pytest.raises(LedgerError, match="current project"):
+                await index.query_vector("other", paraphrase, 20)
+
+
+async def test_restart_resumes_and_model_or_dimension_change_revisits_history(
+    tmp_path: Path, endpoint: Endpoint
+) -> None:
+    first_body = "one synthetic message"
+    second_body = "another synthetic message"
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        first = (await ledger.append("system", message("a", first_body))).event
+        index = store.embedding_index(MODEL)
+        async with following(ledger, index, endpoint):
+            request = await endpoint.next_request(MODEL, first_body)
+            request.vectors([1, 0])
+            await await_cursor(ledger, index, first.seq)
+
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        second = (await ledger.append("system", message("b", second_body))).event
+        index = store.embedding_index(MODEL)
+        assert await index.cursor() == first.seq
+        async with following(ledger, index, endpoint):
+            request = await endpoint.next_request(MODEL, second_body)
+            request.vectors([0, 1])
+            await await_cursor(ledger, index, second.seq)
+
+        for changed in (EmbeddingModel("another-model", 2), EmbeddingModel(MODEL.name, 3)):
+            new_index = store.embedding_index(changed)
+            assert await new_index.cursor() == 0
+            async with following(ledger, new_index, endpoint):
+                request = await endpoint.next_request(changed, first_body, second_body)
+                request.vectors([0.0] * changed.dimension, [1.0] + [0.0] * (changed.dimension - 1))
+                await await_cursor(ledger, new_index, second.seq)
+            result = await new_index.query_vector("demo", (0.0,) * changed.dimension, 20)
+            assert result.total == 2
+            assert [hit.id for hit in result.hits] == [first.id, second.id]
+
+        result = await index.query_vector("demo", (0, 1), 20)
+        assert result.total == 2
+        assert [hit.id for hit in result.hits] == [second.id, first.id]
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        None,
+        [1],
+        [float("nan"), 0],
+        [1e100, 0],
+        [True, 0],
+        b'{"malformed":',
+        b"[" * 2000 + b"]" * 2000,
+        b'{"data":[{"index":0,"embedding":[1,0]},{"index":0,"embedding":[0,1]}]}',
+    ],
+)
+async def test_invalid_http_batch_is_retried_without_writing_any_part(
+    tmp_path: Path, endpoint: Endpoint, invalid: list[float] | bytes | None
+) -> None:
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        await ledger.append("system", message("a", "first"))
+        last = await ledger.append("system", message("b", "second"))
+        index = store.embedding_index(MODEL)
+        async with following(ledger, index, endpoint):
+            request = await endpoint.next_request(MODEL, "first", "second")
+            if invalid is None:
+                request.vectors([0, 1])
+            elif isinstance(invalid, bytes):
+                request.send(invalid)
+            else:
+                request.vectors([0, 1], invalid)
+            retry = await endpoint.next_request(MODEL, "first", "second")
+            assert await index.cursor() == 0
+            assert await index.query_vector("demo", (0, 1), 20) == SearchPage((), 0)
+            retry.vectors([0, 1], [1, 0])
+            await await_cursor(ledger, index, last.event.seq)
+            assert (await index.query_vector("demo", (0, 1), 20)).total == 2
+
+
+async def test_oversized_loopback_response_is_retried(
+    tmp_path: Path, endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(embedding_http, "MAX_RESPONSE_BYTES", 128)
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        last = await ledger.append("system", message("a", "too much response"))
+        index = store.embedding_index(MODEL)
+        async with following(ledger, index, endpoint):
+            request = await endpoint.next_request(MODEL, "too much response")
+            request.send({"data": [{"index": 0, "embedding": [1, 0]}], "extra": " " * 200})
+            retry = await endpoint.next_request(MODEL, "too much response")
+            assert await index.cursor() == 0
+            retry.vectors([1, 0])
+            await await_cursor(ledger, index, last.event.seq)
+
+
+@pytest.mark.parametrize("too_large_status", [200, 413])
+async def test_oversized_loopback_batch_splits_without_partial_index_commit(
+    tmp_path: Path, endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch, too_large_status: int
+) -> None:
+    monkeypatch.setattr(embedding_http, "MAX_RESPONSE_BYTES", 128)
+    first_body, second_body = "  first original\n", "second original"
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        first = (await ledger.append("system", message("a", first_body))).event
+        second = (await ledger.append("system", message("b", second_body))).event
+        index = store.embedding_index(MODEL)
+        async with following(ledger, index, endpoint):
+            combined = await endpoint.next_request(MODEL, first_body, second_body)
+            combined.send(
+                {
+                    "data": [{"index": 0, "embedding": [1, 0]}, {"index": 1, "embedding": [0, 1]}],
+                    "extra": " " * 200,
+                },
+                status=too_large_status,
+            )
+            left = await endpoint.next_request(MODEL, first_body)
+            left.vectors([1, 0])
+            right = await endpoint.next_request(MODEL, second_body)
+            assert await index.cursor() == 0
+            assert await index.query_vector("demo", (1, 0), 20) == SearchPage((), 0)
+            right.vectors([0, 1])
+            await await_cursor(ledger, index, second.seq)
+            assert await index.query_vector("demo", (1, 0), 20) == SearchPage(
+                (
+                    SearchHit(first.id, first.kind, first_body),
+                    SearchHit(second.id, second.kind, second_body),
+                ),
+                2,
+            )
+
+
+async def test_invalid_url_from_embedding_client_is_a_typed_error() -> None:
+    async with httpx.AsyncClient(trust_env=False) as client:
+        with pytest.raises(EmbeddingError, match="endpoint request failed"):
+            await HttpEmbedder(client, "http://☃.test/embeddings", MODEL).embed(("synthetic",))
+
+
+def test_vector_converts_large_integer_overflow_to_a_typed_error() -> None:
+    with pytest.raises(EmbeddingError, match="outside float32 range"):
+        pack_vector((10**1000, 0), MODEL.dimension)
+
+
+async def test_cursor_passes_an_ineligible_page_before_requesting_messages(
+    tmp_path: Path, endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(search, "EMBEDDING_BATCH_SIZE", 2)
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        await ledger.append("system", message("blank", " "))
+        skipped = await ledger.append("system", NewEvent("core", "core.tick", "tick"))
+        last = await ledger.append("system", message("a", "only eligible message"))
+        index = store.embedding_index(MODEL)
+        async with following(ledger, index, endpoint):
+            request = await endpoint.next_request(MODEL, "only eligible message")
+            assert await index.cursor() == skipped.event.seq
+            request.vectors([1, 0])
+            await await_cursor(ledger, index, last.event.seq)
+
+
+async def test_retry_log_omits_provider_error_details(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    retrying = asyncio.Event()
+
+    class FixtureEmbedder:
+        async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+            retrying.set()
+            raise EmbeddingError("synthetic provider response text")
+
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        await ledger.append("system", message("a", "first"))
+        task = asyncio.create_task(
+            follow_message_embeddings(ledger, store.embedding_index(MODEL), FixtureEmbedder())
+        )
+        try:
+            await asyncio.wait_for(retrying.wait(), 5)
+            (record,) = [r for r in caplog.records if r.message == "embedding batch will retry"]
+            assert "synthetic provider response text" not in str(record.__dict__)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+async def test_vector_writes_rollback_together_and_reject_stale_or_foreign_attempts(
+    tmp_path: Path,
+) -> None:
+    async with (
+        opened_search(tmp_path, "demo") as (store, ledger),
+        opened_search(tmp_path, "other") as (other, other_ledger),
+    ):
+        first = (await ledger.append("system", message("a", "first"))).event
+        nonmessage = (await ledger.append("system", NewEvent("core", "core.tick", "tick"))).event
+        last = (await ledger.append("system", message("b", "last"))).event
+        foreign = (await other_ledger.append("system", message("a", "other"))).event
+        index = store.embedding_index(MODEL)
+        blob = pack_vector((1, 0), MODEL.dimension)
+        record = EmbeddedMessage(first.id, blob)
+        foreign_record = EmbeddedMessage(foreign.id, blob)
+
+        async def invalid_batch(uow: UnitOfWork) -> bool:
+            return await uow.save_embedding_batch(index, 0, first.seq, (record, foreign_record))
+
+        with pytest.raises(ValueError, match="messages within the batch interval"):
+            await ledger.run("system", invalid_batch)
+        assert await index.cursor() == 0
+        assert await index.query_vector("demo", (1, 0), 20) == SearchPage((), 0)
+        with pytest.raises(RuntimeError, match="another project's transaction"):
+            await other_ledger.run("system", invalid_batch)
+
+        async def save(expected: int, through: int, records: tuple[EmbeddedMessage, ...]) -> bool:
+            return await ledger.run(
+                "system", lambda uow: uow.save_embedding_batch(index, expected, through, records)
+            )
+
+        with pytest.raises(ValueError, match="end at a committed event"):
+            await save(0, last.seq + 1, (record,))
+        with pytest.raises(ValueError, match="messages within the batch interval"):
+            await save(0, last.seq, (record, EmbeddedMessage(nonmessage.id, blob)))
+        with pytest.raises(ValueError, match="messages within the batch interval"):
+            await save(0, first.seq, (record, EmbeddedMessage(last.id, blob)))
+        with pytest.raises(IntegrityError, match="ck_message_vector_length"):
+            await save(0, last.seq, (record, EmbeddedMessage(last.id, b"short")))
+        assert await index.cursor() == 0
+        assert await index.query_vector("demo", (1, 0), 20) == SearchPage((), 0)
+
+        async def valid_batch(uow: UnitOfWork) -> bool:
+            return await uow.save_embedding_batch(index, 0, first.seq, (record,))
+
+        async def aborted_batch(uow: UnitOfWork) -> None:
+            assert await valid_batch(uow)
+            raise ValueError("fixture rollback after cursor write")
+
+        with pytest.raises(ValueError, match="fixture rollback"):
+            await ledger.run("system", aborted_batch)
+        assert await index.cursor() == 0
+        assert await index.query_vector("demo", (1, 0), 20) == SearchPage((), 0)
+        assert await ledger.run("system", valid_batch)
+        assert not await ledger.run("system", invalid_batch)
+        with pytest.raises(ValueError, match="messages within the batch interval"):
+            await save(first.seq, last.seq, (record,))
+        assert await index.cursor() == first.seq
+        assert (await index.query_vector("demo", (1, 0), 20)).total == 1
+        assert await other.embedding_index(MODEL).query_vector("other", (1, 0), 20) == SearchPage(
+            (), 0
+        )
+
+
+async def test_vector_excerpt_keeps_nul_and_caps_unicode_characters(tmp_path: Path) -> None:
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        body = "é\x00" + "😀" * 300
+        event = (await ledger.append("system", message("a", body))).event
+        index = store.embedding_index(MODEL)
+        vector = (1.0, 0.0)
+        record = EmbeddedMessage(event.id, pack_vector(vector, MODEL.dimension))
+        await ledger.run(
+            "system", lambda uow: uow.save_embedding_batch(index, 0, event.seq, (record,))
+        )
+        assert await index.query_vector("demo", vector, 1) == SearchPage(
+            (SearchHit(event.id, event.kind, body[:240]),), 1
+        )
+
+
+async def test_unavailable_vector_extension_preserves_lexical_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def unavailable(_connection: aiosqlite.Connection, _path: str) -> None:
+        raise sqlite3.OperationalError("fixture extension not installed")
+
+    monkeypatch.setattr(aiosqlite.Connection, "load_extension", unavailable)
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        await ledger.append("system", message("a", "fixture needle"))
+        with pytest.raises(LedgerError, match="requires sqlite-vec") as error:
+            await store.embedding_index(MODEL).query_vector("demo", (1, 0), 1)
+        assert error.value.code == "unavailable"
+        assert (await ledger.search("needle", None, 20)).total == 1
+
+
+async def test_daemon_starts_embedding_only_for_configured_project(
+    tmp_path: Path, endpoint: Endpoint
+) -> None:
+    path = tmp_path / "plotroom.toml"
+    path.write_text(
+        f"""
+        data_dir = "data"
+        port = 0
+        [projects.disabled]
+        [projects.enabled.embedder]
+        url = "{endpoint.url}"
+        model = "{MODEL.name}"
+        dimension = {MODEL.dimension}
+    """,
+        encoding="utf-8",
+    )
+    config = load_config(path, {})
+    assert config.embedders == {"enabled": EmbedderConfig(endpoint.url, MODEL)}
+    daemon = Daemon(config)
+    task, _ = await run_daemon(daemon)
+    try:
+        disabled = daemon.ledgers["disabled"]
+        enabled = daemon.ledgers["enabled"]
+        await disabled.append("system", message("a", "disabled needle"))
+        first = (await enabled.append("system", message("a", "enabled fixture"))).event
+        request = await endpoint.next_request(MODEL, "enabled fixture")
+        request.vectors([1, 0])
+        reader = SqliteStore("enabled", config.data_dir)
+        try:
+            await await_cursor(enabled, reader.embedding_index(MODEL), first.seq)
+        finally:
+            await reader.close()
+        assert (await disabled.search("needle", None, 20)).total == 1
+    finally:
+        await stop(daemon, task)
+    async with opened_search(config.data_dir, "disabled") as (store, _):
+        assert await store.embedding_index(MODEL).cursor() == 0
+        assert endpoint.requests.empty()
+
+
+@pytest.mark.parametrize(
+    ("settings", "field"),
+    [
+        ('model = "m"\ndimension = 2', "url"),
+        ('url = "file:///tmp/embedding"\nmodel = "m"\ndimension = 2', "url"),
+        ('url = "http://☃.test/embeddings"\nmodel = "m"\ndimension = 2', "url"),
+        ('url = "http://xn--a.test/embeddings"\nmodel = "m"\ndimension = 2', "url"),
+        ('url = "http://127.0.0.1/embedding"\ndimension = 2', "model"),
+        ('url = "http://127.0.0.1/embedding"\nmodel = "m"\ndimension = false', "dimension"),
+    ],
+)
+def test_config_requires_a_complete_embedder_table(
+    tmp_path: Path, settings: str, field: str
+) -> None:
+    path = tmp_path / "plotroom.toml"
+    path.write_text(f"[projects.demo.embedder]\n{settings}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match=rf"projects\.demo\.embedder\.{field}"):
+        load_config(path, {})

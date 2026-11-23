@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
 
+import httpx
+
 from plotroom.adapters.claude_desktop import SESSION_ID
 from plotroom.adapters.github import RECONCILE_EVERY, github_secret_name
 from plotroom.adapters.github.ticket_tree import validate_tree_path
@@ -23,6 +25,7 @@ from plotroom.core.merge_gate import GatePolicy
 from plotroom.core.roles import role_family
 from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, MIN_BOARD_BUDGET
 from plotroom.core.trigger_actions import DeliveryRoute
+from plotroom.ports.search import EmbeddingModel
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -46,6 +49,7 @@ _TOP_LEVEL_KEYS = {
     "log_backups",
     "snapshot_budget",
     "next_budget",
+    "search_budget",
     "tick_seconds",
     "lane_idle_minutes",
     "action_attempts",
@@ -90,6 +94,12 @@ class GitHubIssuesConfig:
 
 
 @dataclass(frozen=True)
+class EmbedderConfig:
+    url: str
+    model: EmbeddingModel
+
+
+@dataclass(frozen=True)
 class Config:
     """The validated settings a plotroom process runs with."""
 
@@ -106,6 +116,7 @@ class Config:
     ticket_trees: Mapping[str, tuple[Path, Path]] = field(default_factory=lambda: {})
     snapshot_budget: int = DEFAULT_SNAPSHOT_BUDGET
     next_budget: int = DEFAULT_SNAPSHOT_BUDGET
+    search_budget: int = DEFAULT_SNAPSHOT_BUDGET
     tick_seconds: int = 60
     lane_idle_minutes: int = 15
     action_attempts: int = 3
@@ -119,6 +130,7 @@ class Config:
     github_issue_sources: Mapping[str, GitHubIssuesConfig] = field(default_factory=lambda: {})
     delivery_routes: Mapping[str, Mapping[str, DeliveryRoute]] = field(default_factory=lambda: {})
     briefs: Mapping[str, BriefSettings] = field(default_factory=lambda: {})
+    embedders: Mapping[str, EmbedderConfig] = field(default_factory=lambda: {})
 
     @property
     def url(self) -> str:
@@ -215,6 +227,7 @@ def load_config(
         github_ticket_trees=github_trees,
         github_issue_sources=github_issues,
         briefs=_brief_settings(projects, raw.get("projects")),
+        embedders=_embedders(projects, raw.get("projects")),
         delivery_routes=_delivery_routes(projects, switchboards, worker_sessions, drain_sessions),
         wait_cap=_integer("wait_cap", raw.get("wait_cap", 240), minimum=1),
         snapshot_budget=_integer(
@@ -224,6 +237,11 @@ def load_config(
         ),
         next_budget=_integer(
             "next_budget", raw.get("next_budget", DEFAULT_SNAPSHOT_BUDGET), minimum=MIN_BOARD_BUDGET
+        ),
+        search_budget=_integer(
+            "search_budget",
+            raw.get("search_budget", DEFAULT_SNAPSHOT_BUDGET),
+            minimum=MIN_BOARD_BUDGET,
         ),
         tick_seconds=_integer("tick_seconds", raw.get("tick_seconds", 60), minimum=1),
         lane_idle_minutes=_integer(
@@ -380,6 +398,45 @@ def _switchboards(projects: tuple[str, ...], table: Any) -> dict[str, Switchboar
                     raise ConfigError(f"{label} worker addresses must be unique")
                 senders[address] = worker
         configured[project_id] = SwitchboardConfig(board, command, senders)
+    return configured
+
+
+def _embedders(projects: tuple[str, ...], table: Any) -> dict[str, EmbedderConfig]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, EmbedderConfig] = {}
+    for project_id in projects:
+        project = entries.get(project_id, {})
+        if "embedder" not in project:
+            continue
+        label = f"projects.{project_id}.embedder"
+        raw_settings = project["embedder"]
+        if not isinstance(raw_settings, dict):
+            raise ConfigError(f"{label} must be a table")
+        settings = cast("dict[str, Any]", raw_settings)
+        if set(settings) - {"url", "model", "dimension"}:
+            raise ConfigError(f"{label} supports url, model and dimension")
+        url = _string(f"{label}.url", settings.get("url"))
+        message = f"{label}.url must be an HTTP or HTTPS endpoint without credentials or fragment"
+        try:
+            endpoint = httpx.URL(url)
+            host = endpoint.host
+            port = endpoint.port
+        except (httpx.InvalidURL, UnicodeError) as exc:
+            raise ConfigError(message) from exc
+        if (
+            endpoint.scheme not in ("http", "https")
+            or not host
+            or endpoint.userinfo
+            or "#" in url
+            or (port is not None and not 1 <= port <= 65535)
+            or any(char.isspace() for char in host)
+        ):
+            raise ConfigError(message)
+        model = _string(f"{label}.model", settings.get("model"))
+        dimension = _integer(f"{label}.dimension", settings.get("dimension"), minimum=1)
+        if dimension > 2**63 - 1:
+            raise ConfigError(f"{label}.dimension exceeds the SQLite integer range")
+        configured[project_id] = EmbedderConfig(url, EmbeddingModel(model, dimension))
     return configured
 
 
