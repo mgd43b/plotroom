@@ -10,6 +10,7 @@ risk: low
 tracker_id: "90"
 remote: "https://github.com/mgd43b/plotroom/issues/90"
 tracker_status: backlog
+status: built
 ---
 
 # Bounded server log
@@ -25,3 +26,8 @@ Verify: With a small size limit configured, writing past it rotates the log, kee
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md
+
+## Notes
+
+- Decision: the on-demand daemon rotates its own log (`serve --log-file`); `log_max_bytes` (10 MiB) and `log_backups` (5) are config keys with `PLOTROOM_LOG_MAX_BYTES` and `PLOTROOM_LOG_BACKUPS` overrides.
+- Built: https://github.com/mgd43b/plotroom/pull/132

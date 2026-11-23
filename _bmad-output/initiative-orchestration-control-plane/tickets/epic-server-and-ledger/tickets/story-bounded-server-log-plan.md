@@ -3,7 +3,7 @@ title: 'Bounded server log'
 type: feature
 ticket: 17
 created: '2026-11-22'
-status: in-review
+status: built
 baseline_revision: '3841996709b5384242c2b85aa00e220d72916343'
 route: full
 route_source: auto
@@ -59,7 +59,7 @@ context:
 - [ ] `src/plotroom/app/config.py` -- `log_max_bytes`, `log_backups` with defaults, env overrides and validation -- configured size and count.
 - [ ] `src/plotroom/app/cli.py`, `src/plotroom/app/daemon_start.py` -- `--log-file`, the on-demand start passes it, the reason read survives a roll -- wiring.
 - [ ] `tests/` -- unit: rotation keeps exactly `backups` old files, every line in every file is JSON, the newest line is in the active file; config defaults, overrides and rejections; integration: a real `plotroom serve --log-file` with a tiny limit and one backup rotates during startup, keeps only the active file and `.1`, and its last log line (uvicorn's shutdown line after SIGTERM) lands in the active file; a daemon started on demand with the settings in its config logs to the data directory's `plotroom-serve.log`; `logged_reason` after a roll.
-- [ ] Ticket file -- `status`, `Built: <PR>` after the PR exists.
+- [x] Ticket file -- `status`, `Built: <PR>` after the PR exists.
 
 **Acceptance Criteria:**
 - Given a small limit and one backup, when the daemon writes past the limit three times, then only `plotroom-serve.log` and `plotroom-serve.log.1` exist and the daemon's later lines are in the active file.
