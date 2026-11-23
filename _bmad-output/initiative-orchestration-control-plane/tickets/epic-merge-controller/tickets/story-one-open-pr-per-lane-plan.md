@@ -61,6 +61,8 @@ Preserve guard order, the deploy freeze, exact head and main evidence, and durab
 
 - Migration 0016 follows 0015 from merged PR #154. A populated predecessor upgrade preserves the lane and PR, and a separate upgrade preserves persisted trigger state.
 
+- Opening review found repeated lane and full PR scans. One branch and earliest-PR index is now shared across the reconciliation turn.
+
 ## Verification
 
 - `uv run python -m pytest -q tests` — acceptance and regression suite passes

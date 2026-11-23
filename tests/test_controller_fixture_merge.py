@@ -17,7 +17,7 @@ from plotroom.core.merge_controller import MERGE_OBSERVED, MERGE_READY, MERGE_ST
 from plotroom.core.merge_gate import GateSnapshot
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.ports.github_write import BranchUpdateReceipt, FixtureMergeEvidence
-from test_branch_updates import HEAD, POLICY, REPO, TIP, FixtureWrite, observe
+from test_branch_updates import HEAD, NEXT, POLICY, REPO, TIP, FixtureWrite, observe
 
 MERGED = "8" * 40
 ACTION_KEY = f"controller_merge:7:{HEAD}:{TIP}"
@@ -361,6 +361,32 @@ async def test_merge_sha_backfill_is_quiet_for_populated_projection(tmp_path: Pa
             lambda uow: uow.save_pull_request(replace(historical, merge_commit_sha=MERGED)),
         )
         assert not [e for e in await ledger.events_after(0) if e.kind == MERGE_OBSERVED]
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+async def test_main_pin_replaces_offer_without_duplicate_verdict(tmp_path: Path) -> None:
+    store, ledger, _ = await runtime_for(tmp_path, FixedClock(), None, on=False)
+    try:
+        await observe(ledger, overlap=False)
+        _, [offered] = await store.read_next("orchestrator", 0, 50)
+        assert offered.context["main_sha"] == TIP
+        await observe(ledger, overlap=False, main=NEXT)
+        _, [repinned] = await store.read_next("orchestrator", 0, 50)
+        assert repinned.id != offered.id
+        assert repinned.context["head_sha"] == offered.context["head_sha"] == HEAD
+        assert repinned.context["main_sha"] == NEXT
+        _, retired = await store.first_item_change("orchestrator", offered.seq)
+        assert retired is not None
+        assert retired["id"] == offered.id
+        assert (retired["state"], retired["context"]["main_sha"]) == ("closed", TIP)
+        _, replacement = await store.first_item_change("orchestrator", retired["seq"])
+        assert replacement is not None
+        assert replacement["id"] == repinned.id
+        assert replacement["context"]["main_sha"] == NEXT
+        verdicts = [e for e in await ledger.events_after(0) if e.kind == "core.merge_verdict"]
+        assert [e.fields["verdict"] for e in verdicts] == ["MERGE"]
     finally:
         await ledger.stop()
         await store.close()

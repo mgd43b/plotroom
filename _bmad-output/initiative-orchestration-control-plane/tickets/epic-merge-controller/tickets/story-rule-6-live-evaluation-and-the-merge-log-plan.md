@@ -54,6 +54,8 @@ Preserve guard order, the deploy freeze, exact head and main evidence, and durab
 - Initial pull discovery could produce refusal items before the first health or check observation. Initial unobserved check evidence is quiet while the dry gate continues to refuse.
 - Unreadable configured skip labels initially changed earlier refusal precedence. The gate now preserves early check refusals and handles unreadable skip evidence before allowing a merge.
 
+- Opening review asked for a new verdict entry when main alone moves. The ticket keeps the verdict journal deduplicated on head, kind and reasons. Item history durably records retirement and replacement at the two main pins. A regression asserts both records.
+
 ## Verification
 
 - `uv run python -m pytest -q tests` — acceptance and regression suite passes

@@ -11,7 +11,13 @@ from typing import Any
 import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable, LocalGitHubCredential
-from plotroom.adapters.github.ci import fetch_checks, fetch_comparison, fetch_main, fetch_main_ci
+from plotroom.adapters.github.ci import (
+    fetch_checks,
+    fetch_comparison,
+    fetch_default_branch_head,
+    fetch_main,
+    fetch_main_ci,
+)
 from plotroom.adapters.github.deployments import poll_deployments
 from plotroom.adapters.github.issue_details import (
     fetch_comment_backfill,
@@ -167,6 +173,8 @@ class GitHubDetailPoller:
             or string(obj(identity["repo"])["full_name"]).lower() != pull.head_repository
             or format_time(datetime.fromisoformat(string(current["updated_at"]))) != pull.updated_at
         ):
+            return None
+        if await fetch_default_branch_head(api, client, token) != (branch, head):
             return None
         return replace(
             snapshot,

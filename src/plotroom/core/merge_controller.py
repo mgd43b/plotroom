@@ -20,6 +20,7 @@ from plotroom.core.merge_gate import (
     evaluate_gate,
     load_gate_snapshot,
 )
+from plotroom.core.merge_lane import MergeLaneIndex
 from plotroom.core.next_items import ItemKind
 from plotroom.core.unit_of_work import UnitOfWork
 
@@ -64,7 +65,10 @@ MERGE_ITEMS = (
         MERGE_READY,
         15,
         True,
-        ("Call merge_gate with both SHA pins. Run the merge command only on MERGE.",),
+        (
+            "Call merge_gate with both SHA pins. Run the merge command only on MERGE.",
+            "The GitHub command enforces the PR head pin.",
+        ),
     ),
     ItemKind(MERGE_REFUSAL, 10, True, ("Address the merge gate refusal",)),
     ItemKind(DUPLICATE_PR, 10, True, ("Resolve the overlapping open pull requests",)),
@@ -185,6 +189,7 @@ async def _merge_item(
         "method": policy.merge_method,
         "merge_gate": args,
         "command": command,
+        "command_pin": "head_sha",
     }
     subject = str(pull.number)
     item = await uow.active_item(MERGE_READY, subject)
@@ -264,19 +269,24 @@ async def reconcile_merge_controller(
     branch_updates: bool,
 ) -> None:
     numbers = set(uow.merge_pull_numbers)
-    if uow.all_merge_pulls or uow.merge_check_heads:
+    pulls = None
+    if uow.all_merge_pulls or uow.merge_check_heads or len(numbers) > 1:
+        pulls = await uow.open_pulls(repository)
         numbers.update(
             pull.number
-            for pull in await uow.open_pulls(repository)
+            for pull in pulls
             if uow.all_merge_pulls or pull.head_sha in uow.merge_check_heads
         )
+    lane_index = (
+        MergeLaneIndex(await uow.active_lanes(), pulls) if pulls is not None and numbers else None
+    )
     for number in sorted(uow.merge_observations):
         pull, transition = uow.merge_observations[number]
         if pull.repository == repository:
             await observe_merge(uow, pull, transition=transition)
     for number in sorted(numbers):
         snapshot = replace(
-            await load_gate_snapshot(uow, repository, number),
+            await load_gate_snapshot(uow, repository, number, lane_index=lane_index),
             github_unavailable=github_unavailable,
         )
         now = uow.now()

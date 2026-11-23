@@ -59,6 +59,8 @@ Preserve guard order, the deploy freeze, exact head and main evidence, and durab
 
 - The authoritative read now records provider backoff on rate limits and refuses overflowing provider timestamps.
 
+- Opening review found a final-read race on main. The fresh recheck now confirms the default branch and tip after the other provider reads. The item identifies the head-only enforcement of the printed GitHub command. The injected fixture verifies both pins at dispatch.
+
 ## Verification
 
 - `uv run python -m pytest -q tests` — acceptance and regression suite passes

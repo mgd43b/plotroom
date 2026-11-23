@@ -25,7 +25,7 @@ from plotroom.core.github_projection import (
 )
 from plotroom.core.merge_flakes import FAILURES as MAIN_FAILURES
 from plotroom.core.merge_flakes import EventLookup, main_check_is_flake
-from plotroom.core.merge_lane import merge_lane_evidence
+from plotroom.core.merge_lane import MergeLaneIndex, merge_lane_evidence
 from plotroom.core.merge_overlap import (
     ALLOW_OVERLAP,
     PULL_COMPARISON,
@@ -281,7 +281,11 @@ async def read_main_flakes(
 
 
 async def load_gate_snapshot(
-    reader: Transaction | UnitOfWork, repository: str | None, number: int
+    reader: Transaction | UnitOfWork,
+    repository: str | None,
+    number: int,
+    *,
+    lane_index: MergeLaneIndex | None = None,
 ) -> GateSnapshot:
     """Read all gate inputs from one consistent transaction."""
     freeze_reason = await reader.deploy_freeze()
@@ -296,7 +300,11 @@ async def load_gate_snapshot(
         else None
     )
     main_ci = await reader.github_resource(repository, MAIN_CI, "")
-    lane, earlier_pull, ambiguous_lane = await merge_lane_evidence(reader, pull)
+    lane, earlier_pull, ambiguous_lane = (
+        lane_index.evidence(pull)
+        if lane_index is not None
+        else await merge_lane_evidence(reader, pull)
+    )
     return GateSnapshot(
         pull,
         checks,

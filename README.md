@@ -71,7 +71,8 @@ with `lane_start`. The exact lane branch is the default.
 The live controller logs verdict changes and creates a `merge_ready` item
 for the clerk, or for the orchestrator when the project has no clerk token.
 The item includes SHA pins for a fresh `merge_gate` call and the full command
-using the configured merge method. Controller-run merges default to off.
+using the configured merge method. GitHub enforces the PR head pin on the
+printed command. The fixture controller checks both refs at dispatch. Controller-run merges default to off.
 The opt-in requires an injected loopback test fixture.
 
 The orchestrator can set the deploy window with `freeze(reason, request_id)` and

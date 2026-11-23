@@ -149,6 +149,8 @@ class Repository:
     pulls: dict[int, Pull] = field(default_factory=dict[int, Pull])
     runs: list[Run] = field(default_factory=lambda: [Run(20, "success", MAIN, NOW)])
     main_paths: tuple[str, ...] = ("shared.py",)
+    main_head: str = MAIN
+    main_reads: list[str] = field(default_factory=list[str])
     cycles: asyncio.Queue[asyncio.Future[None]] = field(
         default_factory=asyncio.Queue[asyncio.Future[None]]
     )
@@ -172,6 +174,8 @@ class Repository:
             raise ValueError("unsupported fixture merge command")
         if verdict["verdict"] != "MERGE" or verdict["head_sha"] != head:
             raise ValueError("fixture merge requires a matching gate approval")
+        if pins["expected_main_sha"] != self.main_head:
+            raise ValueError("fixture main moved")
         pull = self.pulls[number]
         if pull.head != head or pull.merge_commit is not None:
             raise ValueError("fixture PR moved or is no longer open")
@@ -222,6 +226,9 @@ class Repository:
         assert request.url.path.startswith(prefix)
         path = request.url.path.removeprefix(prefix)
         assert request.url.params.get("page", "1") == "1"
+        if path == "/branches/main":
+            tip = self.main_reads.pop(0) if self.main_reads else self.main_head
+            return httpx.Response(200, json={"commit": {"sha": tip}})
         if path.startswith("/commits/") and path.endswith("/check-runs"):
             sha = path.split("/")[2]
             if pull := next((row for row in self.pulls.values() if row.head == sha), None):
@@ -239,7 +246,6 @@ class Repository:
         rows: dict[str, object] = {
             "/deployments": [],
             "": {"default_branch": "main"},
-            "/branches/main": {"commit": {"sha": MAIN}},
             "/actions/runs": counted("workflow_runs", [run.row() for run in self.runs]),
             f"/actions/workflows/{WORKFLOW}/runs": counted(
                 "workflow_runs",
@@ -726,6 +732,15 @@ async def test_clerk_next_and_observed_merges(
         assert pinned["verdict"] == "MERGE"
         assert await daemon.ledgers["epic4"].pending_action() is None
         command = restored["context"]["command"]
+        assert restored["context"]["command_pin"] == "head_sha"
+        repository.main_reads = [MAIN, MAIN, OTHER]
+        moved_during_read = await call(clerk, "merge_gate", **args)
+        assert moved_during_read["verdict"] == "REFUSE"
+        assert repository.main_reads == []
+        repository.main_head = OTHER
+        with pytest.raises(ValueError, match="fixture main moved"):
+            repository.execute_clerk_merge(command, args, pinned)
+        repository.main_head = MAIN
         with pytest.raises(ValueError, match="unsupported fixture merge command"):
             repository.execute_clerk_merge("gh pr merge", args, pinned)
         ready.head_version += 1
