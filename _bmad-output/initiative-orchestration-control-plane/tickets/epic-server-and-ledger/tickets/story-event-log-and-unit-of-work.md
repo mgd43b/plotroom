@@ -32,3 +32,4 @@ Verify: With a fixture command registered in the test suite, replaying a recorde
 ## Notes
 
 - Check beyond its criteria: killing the server mid-transaction leaves no partial input in the file.
+- Built: https://github.com/mgd43b/plotroom/pull/50

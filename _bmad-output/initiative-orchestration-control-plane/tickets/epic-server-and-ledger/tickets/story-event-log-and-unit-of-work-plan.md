@@ -78,7 +78,7 @@ context:
 - [x] `0002_event_log.py`, `store.py`, `ledger_sql.py` -- schema and the SQLite transaction
 - [x] `app/clock.py`, `app/serve.py` -- start and stop one `Ledger` per project
 - [x] `tests/` -- every matrix row; the replay test compares a dump of all tables plus the counter; the kill test is deterministic (see Design Notes)
-- [ ] story file: `status`, `Built: <PR>` note; this plan's status
+- [x] story file: `status`, `Built: <PR>` note; this plan's status
 
 **Acceptance Criteria:**
 - Given a fixture command registered in the suite, when a recorded input set is replayed twice, then the second pass leaves every table and the `seq` counter unchanged.
