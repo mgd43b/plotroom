@@ -18,12 +18,13 @@ import pytest
 from mcp.client.client import Client
 from mcp.client.stdio import StdioServerParameters
 
-from conftest import child_env, start_plotroom, tool_json
+from conftest import child_env, start_plotroom, tool_json, write_config
 from plotroom.app.cli import main
 from plotroom.app.config import load_config
 from plotroom.app.daemon_start import (
     LOG_FILE_NAME,
     answers_ping,
+    current_url,
     daemon_env,
     ensure_daemon,
     logged_reason,
@@ -32,6 +33,7 @@ from plotroom.app.daemon_start import (
     start_daemon,
 )
 from plotroom.app.lock import LOCK_FILE_NAME, DataDirLock, LockError
+from plotroom.app.portfile import PORT_FILE_NAME, read_port, write_port
 from rawproxy import ERAS, RawProxy, first_request, spawn_proxy
 
 MODES = ["legacy", "auto"]
@@ -44,24 +46,6 @@ EMPTY_BOARD_DATA: dict[str, Any] = {
     "items": [],
     "left_out": 0,
 }
-
-
-def free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
-def write_fixed_config(
-    directory: Path, port: int, *, projects: tuple[str, ...] = ("demo",)
-) -> Path:
-    path = directory / f"config-{port}.toml"
-    tables = "\n".join(f"[projects.{name}]" for name in projects)
-    path.write_text(
-        f'data_dir = "{directory / "data"}"\nhost = "127.0.0.1"\nport = {port}\n\n{tables}\n',
-        encoding="utf-8",
-    )
-    return path
 
 
 def owner_pid(data_dir: Path) -> int:
@@ -275,7 +259,7 @@ async def test_the_probe_is_bounded_in_total_not_per_read() -> None:
 async def test_a_client_gets_snapshot_with_the_daemon_started_on_demand(
     tmp_path: Path, data_dir: Path, mode: str
 ) -> None:
-    config = write_fixed_config(tmp_path, free_port())
+    config = write_config(tmp_path)
     assert not (data_dir / LOCK_FILE_NAME).exists(), "no daemon before the client connects"
     async with Client(proxy_params(config), mode=mode) as client:
         result = await client.call_tool("snapshot", {})
@@ -289,7 +273,7 @@ async def test_a_package_in_the_data_directory_cannot_shadow_plotroom(
 ) -> None:
     (data_dir / "plotroom").mkdir(parents=True)
     (data_dir / "plotroom" / "__init__.py").write_text("raise SystemExit(99)\n", encoding="utf-8")
-    config = write_fixed_config(tmp_path, free_port())
+    config = write_config(tmp_path)
     async with Client(proxy_params(config), mode="auto") as client:
         assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
 
@@ -298,7 +282,7 @@ async def test_a_package_in_the_data_directory_cannot_shadow_plotroom(
 async def test_a_running_daemon_is_used_and_none_is_started(
     tmp_path: Path, data_dir: Path, mode: str
 ) -> None:
-    config = write_fixed_config(tmp_path, free_port())
+    config = write_config(tmp_path)
     server = start_plotroom("serve", "--config", str(config))
     try:
         server.wait_for_log("serving")
@@ -315,7 +299,7 @@ async def test_a_running_daemon_is_used_and_none_is_started(
 async def test_two_clients_starting_at_once_share_one_daemon(
     tmp_path: Path, data_dir: Path
 ) -> None:
-    config = write_fixed_config(tmp_path, free_port())
+    config = write_config(tmp_path)
 
     async def one_call(mode: str) -> dict[str, Any]:
         async with Client(proxy_params(config), mode=mode) as client:
@@ -330,7 +314,7 @@ async def test_two_clients_starting_at_once_share_one_daemon(
 async def test_a_daemon_that_died_mid_session_is_started_again(
     tmp_path: Path, data_dir: Path, mode: str
 ) -> None:
-    config = write_fixed_config(tmp_path, free_port())
+    config = write_config(tmp_path)
     async with Client(proxy_params(config), mode=mode) as client:
         assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
         first = owner_pid(data_dir)
@@ -340,18 +324,159 @@ async def test_a_daemon_that_died_mid_session_is_started_again(
     assert len(serving_lines(data_dir)) == 2
 
 
+# --- the published port ---------------------------------------------------------------------
+
+
+def published(data_dir: Path) -> tuple[int, int]:
+    found = read_port(data_dir)
+    assert found is not None, "the daemon published no port"
+    return found
+
+
+def dead_pid() -> int:
+    """The pid of a process that has exited."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait(timeout=WAIT)
+    return child.pid
+
+
+def leave_stale_file(data_dir: Path, pid: int, port: int) -> None:
+    data_dir.mkdir(parents=True)
+    (data_dir / PORT_FILE_NAME).write_text(json.dumps({"pid": pid, "port": port}), encoding="utf-8")
+
+
+async def test_a_daemon_started_on_demand_publishes_the_port_it_serves_on(
+    tmp_path: Path, data_dir: Path
+) -> None:
+    config = write_config(tmp_path)
+    async with Client(proxy_params(config), mode="auto") as client:
+        assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
+    pid, port = published(data_dir)
+    assert pid == owner_pid(data_dir)
+    [announced] = serving_lines(data_dir)
+    assert announced["port"] == port
+    assert await speaks_mcp(f"http://127.0.0.1:{port}/mcp")
+
+
+async def test_a_killed_daemons_file_is_not_trusted_and_a_new_client_reaches_the_new_daemon(
+    tmp_path: Path, data_dir: Path
+) -> None:
+    config = write_config(tmp_path)
+    async with Client(proxy_params(config), mode="auto") as client:
+        assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
+    first, first_port = published(data_dir)
+    os.kill(first, signal.SIGKILL)
+    await asyncio.to_thread(wait_until_unlocked, data_dir)
+    assert published(data_dir) == (first, first_port), "a killed daemon leaves its file behind"
+    async with Client(proxy_params(config), mode="auto") as client:
+        assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
+    second, second_port = published(data_dir)
+    assert second == owner_pid(data_dir) != first
+    assert len(serving_lines(data_dir)) == 2
+    assert await speaks_mcp(f"http://127.0.0.1:{second_port}/mcp")
+
+
+@pytest.mark.parametrize("owner", ["a dead pid", "a live pid that holds no lock"])
+async def test_a_stale_file_naming_a_foreign_mcp_listener_is_never_used(
+    tmp_path: Path, data_dir: Path, owner: str
+) -> None:
+    requests: list[int] = []
+
+    async def foreign_mcp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        requests.append(1)
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(http_reply("200 OK", PING_RESULT))  # it would pass for the daemon
+        await writer.drain()
+        writer.close()
+
+    foreign = await asyncio.start_server(foreign_mcp, "127.0.0.1", 0)
+    try:
+        foreign_port = int(foreign.sockets[0].getsockname()[1])
+        stale_pid = dead_pid() if owner == "a dead pid" else os.getpid()
+        await asyncio.to_thread(leave_stale_file, data_dir, stale_pid, foreign_port)
+        config = write_config(tmp_path)
+        async with Client(proxy_params(config), mode="auto") as client:
+            assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
+        pid, port = published(data_dir)
+        assert pid == owner_pid(data_dir)
+        assert port != foreign_port
+        assert requests == [], "the foreign listener received nothing"
+    finally:
+        foreign.close()
+
+
+async def test_two_data_directories_each_reach_their_own_daemon(tmp_path: Path) -> None:
+    names = ("alpha", "beta")
+    configs: dict[str, Path] = {}
+    for name in names:
+        (tmp_path / name).mkdir()
+        configs[name] = write_config(tmp_path / name, projects=(name,))
+
+    async def snapshot_project(name: str) -> str:
+        async with Client(proxy_params(configs[name]), mode="auto") as client:
+            data: dict[str, Any] = tool_json(await client.call_tool("snapshot", {}))["data"]
+        return str(data["project"])
+
+    try:
+        seen = await asyncio.gather(*(snapshot_project(name) for name in names))
+        assert seen == list(names)
+        alpha, beta = (published(tmp_path / name / "data") for name in names)
+        assert alpha[0] != beta[0], "two daemons"
+        assert alpha[1] != beta[1], "on two ports"
+    finally:
+        for name in names:
+            await asyncio.to_thread(stop_owner, tmp_path / name / "data")
+
+
+# --- reading the port back ------------------------------------------------------------------
+
+
+async def test_a_fixed_port_is_the_configs_own_url_whatever_the_directory_holds(
+    tmp_path: Path, held_port: int
+) -> None:
+    config = load_config(write_config(tmp_path, port=held_port), {})
+    assert await current_url(config) == f"http://127.0.0.1:{held_port}/mcp"
+    write_port(config.data_dir, held_port + 1)  # a file nobody owns
+    assert await current_url(config) == f"http://127.0.0.1:{held_port}/mcp"
+
+
+async def test_a_port_of_zero_is_the_published_port_only_while_its_pid_owns_the_lock(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path), {})
+    assert await current_url(config) is None, "nothing published"
+    write_port(config.data_dir, 41000)  # names this process
+    assert await current_url(config) is None, "this process does not hold the lock yet"
+    with DataDirLock(config.data_dir):
+        assert await current_url(config) == "http://127.0.0.1:41000/mcp"
+        (config.data_dir / PORT_FILE_NAME).write_text('{"pid": 1, "port": 41000}', "utf-8")
+        assert await current_url(config) is None, "the file names a pid that is not the owner"
+    write_port(config.data_dir, 41000)
+    assert await current_url(config) is None, "the lock is free again"
+
+
+@pytest.mark.parametrize("pid", [10**12, 2**63, 2**200])
+async def test_a_port_file_with_an_impossible_pid_is_ignored_not_fatal(
+    tmp_path: Path, pid: int
+) -> None:
+    config = load_config(write_config(tmp_path), {})
+    (config.data_dir).mkdir(parents=True)
+    (config.data_dir / PORT_FILE_NAME).write_text(f'{{"pid": {pid}, "port": 41000}}', "utf-8")
+    assert await current_url(config) is None
+
+
 # --- refusals ------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("era", ERAS)
 async def test_a_lock_held_by_a_server_at_another_address_is_reported(
-    tmp_path: Path, data_dir: Path, era: str
+    tmp_path: Path, data_dir: Path, held_port: int, era: str
 ) -> None:
-    owner = write_fixed_config(tmp_path, free_port())
+    owner = write_config(tmp_path)
     server = start_plotroom("serve", "--config", str(owner))
     try:
         server.wait_for_log("serving")
-        other = write_fixed_config(tmp_path, free_port())
+        other = write_config(tmp_path, port=held_port, name="other")  # a fixed, dead address
         proxy = await spawn_proxy("--config", str(other), "--start-timeout", "3")
         try:
             proxy.send(first_request(era))
@@ -381,7 +506,7 @@ async def test_a_daemon_that_cannot_start_is_reported_with_its_reason(
     tmp_path: Path, data_dir: Path, era: str
 ) -> None:
     path = tmp_path / "noprojects.toml"
-    path.write_text(f'data_dir = "{data_dir}"\nport = {free_port()}\n', encoding="utf-8")
+    path.write_text(f'data_dir = "{data_dir}"\nport = 0\n', encoding="utf-8")
     message = await first_error(await spawn_proxy("--config", str(path)), era)
     assert "no projects configured" in message
 
@@ -393,27 +518,19 @@ async def test_something_else_on_the_port_is_reported_and_not_proxied_to(
     with socket.socket() as foreign:
         foreign.bind(("127.0.0.1", 0))
         foreign.listen()
-        config = write_fixed_config(tmp_path, int(foreign.getsockname()[1]))
+        config = write_config(tmp_path, port=int(foreign.getsockname()[1]))
         message = await first_error(await spawn_proxy("--config", str(config)), era)
     assert "could not start" in message
     assert "address" in message.lower() or "bind" in message.lower()
 
 
 @pytest.mark.parametrize("era", ERAS)
-async def test_a_port_of_zero_names_nothing_to_start(tmp_path: Path, era: str) -> None:
-    config = tmp_path / "zero.toml"
-    config.write_text(f'data_dir = "{tmp_path / "data"}"\nport = 0\n[projects.demo]\n', "utf-8")
-    message = await first_error(await spawn_proxy("--config", str(config)), era)
-    assert "port is 0" in message
-
-
-@pytest.mark.parametrize("era", ERAS)
 @pytest.mark.parametrize("how", ["flag", "environment"])
 async def test_an_explicit_url_never_starts_a_daemon(
-    tmp_path: Path, data_dir: Path, era: str, how: str
+    tmp_path: Path, data_dir: Path, held_port: int, era: str, how: str
 ) -> None:
-    url = f"http://127.0.0.1:{free_port()}/mcp"
-    config = write_fixed_config(tmp_path, free_port())
+    url = f"http://127.0.0.1:{held_port}/mcp"
+    config = write_config(tmp_path)
     if how == "flag":
         proxy = await spawn_proxy("--url", url, "--config", str(config))
     else:
@@ -426,7 +543,7 @@ async def test_a_start_that_lost_the_lock_to_a_daemon_still_shutting_down_starts
     tmp_path: Path, data_dir: Path
 ) -> None:
     """The lock outlives the listener during shutdown; once it is free, the start must retry."""
-    path = write_fixed_config(tmp_path, free_port())
+    path = write_config(tmp_path)
     config = load_config(path, {})
     old_owner = DataDirLock(data_dir)
     old_owner.acquire()

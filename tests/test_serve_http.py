@@ -14,6 +14,8 @@ from mcp.client.stdio import StdioServerParameters
 
 from conftest import Child, start_plotroom, tool_json
 from plotroom.app.cli import EXIT_CONFIG, EXIT_FAILURE, EXIT_LOCKED, main
+from plotroom.app.daemon_start import speaks_mcp
+from plotroom.app.portfile import PORT_FILE_NAME, read_port
 
 EMPTY_BOARD: dict[str, Any] = {
     "ok": True,
@@ -57,6 +59,27 @@ async def test_only_snapshot_is_registered(server: tuple[Child, str]) -> None:
     async with Client(url, mode="legacy") as client:
         tools = await client.list_tools()
     assert [tool.name for tool in tools.tools] == ["snapshot"]
+
+
+async def test_the_published_port_is_the_serving_port_and_answers(
+    server: tuple[Child, str], config_path: Path
+) -> None:
+    child, url = server
+    announced: dict[str, Any] = next(e for e in child.seen if e["msg"] == "serving")
+    assert announced["port"] != 0
+    assert read_port(config_path.parent / "data") == (child.process.pid, announced["port"])
+    assert url == f"http://127.0.0.1:{announced['port']}/mcp"
+    assert await speaks_mcp(url)
+
+
+def test_the_port_file_is_gone_after_the_server_is_stopped(
+    server: tuple[Child, str], config_path: Path
+) -> None:
+    child, _ = server
+    port_file = config_path.parent / "data" / PORT_FILE_NAME
+    assert port_file.exists()
+    child.stop()  # SIGTERM: uvicorn shuts down, then re-raises the signal, so the code is -15
+    assert not port_file.exists()
 
 
 def test_a_second_serve_on_the_same_directory_exits_with_the_lock_error(

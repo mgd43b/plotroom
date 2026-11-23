@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from conftest import tool_json
 from plotroom.adapters.store_sqlite import SqliteStore, head_revision
 from plotroom.app.config import Config
 from plotroom.app.lock import LockError
+from plotroom.app.portfile import PORT_FILE_NAME, read_port
 from plotroom.app.serve import Daemon
 
 
@@ -161,3 +163,57 @@ async def test_cancelling_during_uvicorns_own_shutdown_waits_for_it_and_keeps_th
     again = Daemon(config)  # and it is free once the shutdown has completed
     task2, _ = await run_daemon(again)
     await stop(again, task2)
+
+
+async def test_the_bound_port_is_published_with_the_pid_and_answers(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    daemon = Daemon(config)
+    task, port = await run_daemon(daemon)
+    try:
+        assert port != 0, "the config's port of 0 became the port that was bound"
+        assert read_port(config.data_dir) == (os.getpid(), port)
+        async with Client(f"http://127.0.0.1:{port}/mcp", mode="legacy") as client:
+            assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
+    finally:
+        await stop(daemon, task)
+
+
+async def test_the_port_file_is_gone_after_a_stop_and_after_a_cancel(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    port_file = config.data_dir / PORT_FILE_NAME
+    daemon = Daemon(config)
+    task, _ = await run_daemon(daemon)
+    assert port_file.exists()
+    await stop(daemon, task)
+    assert not port_file.exists()
+    again = Daemon(config)
+    task, _ = await run_daemon(again)
+    assert port_file.exists()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not port_file.exists()
+
+
+async def test_a_leftover_port_file_is_replaced_once_the_lock_is_taken(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    config.data_dir.mkdir()
+    (config.data_dir / PORT_FILE_NAME).write_text('{"pid": 1, "port": 9}', encoding="utf-8")
+    daemon = Daemon(config)
+    task, port = await run_daemon(daemon)
+    try:
+        assert read_port(config.data_dir) == (os.getpid(), port)
+    finally:
+        await stop(daemon, task)
+
+
+async def test_a_refused_second_daemon_leaves_the_owners_port_file_alone(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    first = Daemon(config)
+    task, port = await run_daemon(first)
+    try:
+        with pytest.raises(LockError):
+            await Daemon(config).run()
+        assert read_port(config.data_dir) == (os.getpid(), port)
+    finally:
+        await stop(first, task)

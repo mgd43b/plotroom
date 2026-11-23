@@ -7,6 +7,7 @@ import contextlib
 import logging
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import uvicorn
@@ -16,6 +17,7 @@ from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.app.clock import SystemClock
 from plotroom.app.config import Config
 from plotroom.app.lock import DataDirLock
+from plotroom.app.portfile import remove_port, write_port
 from plotroom.app.sqlite_floor import floor_problem
 from plotroom.core.catalog import build_catalog
 from plotroom.core.ledger import Ledger
@@ -25,19 +27,30 @@ log = logging.getLogger("plotroom.serve")
 
 
 class _Server(uvicorn.Server):
-    """uvicorn's server that reports the port it actually bound."""
+    """uvicorn's server that publishes the port it actually bound."""
 
-    def __init__(self, config: uvicorn.Config, started: asyncio.Future[int]) -> None:
+    def __init__(
+        self, config: uvicorn.Config, started: asyncio.Future[int], data_dir: Path
+    ) -> None:
         super().__init__(config)
         self._started_future = started
+        self._data_dir = data_dir
 
     _shutdown_task: asyncio.Task[None] | None = None
 
     def shutdown_task(self, sockets: Any = None) -> asyncio.Task[None]:
         """The one task that shuts uvicorn down, started on first use by whoever needs it."""
         if self._shutdown_task is None:
-            self._shutdown_task = asyncio.ensure_future(uvicorn.Server.shutdown(self, sockets))
+            self._shutdown_task = asyncio.ensure_future(self._shut_down(sockets))
         return self._shutdown_task
+
+    async def _shut_down(self, sockets: Any) -> None:
+        # The port is no longer ours to publish. Done here, not only in ``Daemon.run``: after a
+        # SIGTERM uvicorn re-raises the signal as soon as it has shut down, which ends the process
+        # before ``Daemon.run`` gets to clean up.
+        with contextlib.suppress(OSError):
+            remove_port(self._data_dir)
+        await uvicorn.Server.shutdown(self, sockets)
 
     async def shutdown(self, sockets: Any = None) -> None:
         # Shielded: a cancel must not abort a shutdown that is draining requests and lifespan
@@ -47,7 +60,11 @@ class _Server(uvicorn.Server):
         await super().startup(sockets=sockets)
         if self.started and not self._started_future.done():
             bound: Any = self.servers[0].sockets[0].getsockname()
-            self._started_future.set_result(int(bound[1]))
+            port = int(bound[1])
+            # Published before anyone is told the server is up: a client that sees "serving" in
+            # the log, or reads the file, finds the same port.
+            write_port(self._data_dir, port)
+            self._started_future.set_result(port)
 
 
 async def _finish(task: asyncio.Task[None]) -> None:
@@ -110,6 +127,8 @@ class Daemon:
         if self._started is None:
             self._started = asyncio.get_running_loop().create_future()
         with DataDirLock(config.data_dir):
+            # Whatever an earlier daemon left behind is not this one's: gone before it binds.
+            remove_port(config.data_dir)
             try:
                 problem = floor_problem(self._sqlite_version)
                 if problem is not None:
@@ -124,7 +143,7 @@ class Daemon:
                     log_config=None,
                     access_log=False,
                 )
-                self._server = _Server(uvicorn_config, self._started)
+                self._server = _Server(uvicorn_config, self._started, config.data_dir)
                 serving = asyncio.ensure_future(self._announce())
                 try:
                     await self._server.serve()
@@ -137,8 +156,12 @@ class Daemon:
                 finally:
                     serving.cancel()
             finally:
-                # Whatever ended the server (stop, cancel, a failed start), every writer stops and
-                # every store closes before the data-directory lock is released.
+                # Whatever ended the server (stop, cancel, a failed start), the port file goes, then
+                # every writer stops and every store closes, all before the lock is released.
+                with contextlib.suppress(
+                    OSError
+                ):  # a leftover file is never trusted without the lock
+                    remove_port(config.data_dir)
                 await _finish(asyncio.ensure_future(self._close_projects()))
                 current = asyncio.current_task()
                 if current is not None and current.cancelling():

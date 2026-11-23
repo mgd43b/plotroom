@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
@@ -19,12 +20,22 @@ from mcp_types import TextContent
 CHILD_TIMEOUT = 60.0
 
 
-def write_config(directory: Path, *, projects: tuple[str, ...] = ("demo",)) -> Path:
-    """A config file with its own data directory, an ephemeral port and the given projects."""
-    path = directory / "config.toml"
-    tables = "\n".join(f"[projects.{name}]" for name in projects)
+def write_config(
+    directory: Path,
+    *,
+    projects: tuple[str, ...] = ("demo",),
+    port: int = 0,
+    name: str = "config",
+) -> Path:
+    """A config file with its own data directory and the given projects.
+
+    Port 0 (the default) lets the daemon take any free port and publish it; a test that needs a
+    fixed port passes one it holds (``held_port`` or a listening socket), never one it picked.
+    """
+    path = directory / f"{name}.toml"
+    tables = "\n".join(f"[projects.{project}]" for project in projects)
     path.write_text(
-        f'data_dir = "{directory / "data"}"\nhost = "127.0.0.1"\nport = 0\n\n{tables}\n',
+        f'data_dir = "{directory / "data"}"\nhost = "127.0.0.1"\nport = {port}\n\n{tables}\n',
         encoding="utf-8",
     )
     return path
@@ -85,6 +96,18 @@ def start_plotroom(*args: str) -> Child:
         env=child_env(),
     )
     return Child(process)
+
+
+@pytest.fixture
+def held_port() -> Iterator[int]:
+    """A port that refuses connections and that no one else can take while the test runs.
+
+    The socket is bound and never listens: a connect to it is refused, and the kernel will not
+    hand the port to another program until the test ends.
+    """
+    with socket.socket() as holder:
+        holder.bind(("127.0.0.1", 0))
+        yield int(holder.getsockname()[1])
 
 
 @pytest.fixture

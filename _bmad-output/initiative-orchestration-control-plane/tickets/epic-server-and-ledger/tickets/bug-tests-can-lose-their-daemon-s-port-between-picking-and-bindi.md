@@ -26,3 +26,7 @@ Verify: The daemon started with port 0 reports the port it bound and serves on i
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md
+
+## Notes
+
+- Decision: a port of 0 means "discover"; the port file is `plotroom.port` in the data directory (see the epic's notes).
