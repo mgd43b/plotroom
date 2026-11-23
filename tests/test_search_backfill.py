@@ -93,7 +93,7 @@ async def _seed_snapshots(uow: UnitOfWork) -> None:
         uow, replace(fallback, updated_at=LATER, state="closed", body="needle closed body")
     )
     await project_pull(
-        uow, replace(fallback, updated_at=LATEST, state="closed", body="unretained list body")
+        uow, replace(fallback, updated_at=LATER, state="closed", body="unretained list body")
     )
     await uow.save_github_resource(
         REPO,

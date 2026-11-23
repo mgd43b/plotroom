@@ -36,8 +36,7 @@ _PULLS = text("""
 """)
 # Keep the predicate identical to the partial index in revision 0022.
 _LATEST_PULL = text("""
-    SELECT body, json_extract(fields, '$.updated_at') AS updated_at,
-           json_extract(fields, '$.head_sha') AS head_sha
+    SELECT body, json_extract(fields, '$.updated_at') AS updated_at
     FROM events
     WHERE source = 'github' AND kind IN (
         'github.pr_opened', 'github.pr_merged', 'github.pr_closed',
@@ -135,10 +134,5 @@ async def _retained_pull_text(
             return record
     if latest is None:
         return None
-    return pull_body_record(
-        pull.repository,
-        pull.number,
-        latest.body,
-        provisional=not pull.complete
-        or (latest.head_sha, latest.updated_at) != (pull.head_sha, pull.updated_at),
-    )
+    # Lifecycle metadata can match even when a body-only edit was never recorded.
+    return pull_body_record(pull.repository, pull.number, latest.body, provisional=True)

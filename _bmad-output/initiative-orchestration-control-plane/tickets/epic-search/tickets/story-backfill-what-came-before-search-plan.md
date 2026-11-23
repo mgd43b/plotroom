@@ -61,6 +61,7 @@ Given a project upgraded from a populated prior schema, when lexical backfill st
 
 - A failed PR detail refresh can retain usable body provenance. Historical scanning accepts still-provenance-matched retained attributes and keeps its lifecycle fallback.
 - Automatic opening review found that a historical PR body could block a later detail refresh. Older or unproven lifecycle bodies and retained detail bodies stay provisional. A verified current detail replaces provisional text or confirms identical text without changing its vector revision. Accepted live list bodies keep precedence.
+- Lifecycle metadata alone cannot confirm the text. The populated fixture proves that a verified detail can replace the retained body after a same-timestamp edit.
 
 ## Verification
 
