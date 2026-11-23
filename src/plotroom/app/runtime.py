@@ -205,7 +205,7 @@ class ProjectRuntime:
             branch = action.payload.get("branch")
             if branch is None and pull is not None and pull.head_sha == head_sha:
                 branch = pull.branch
-            await complete_branch_update(uow, action, receipt, branch)
+            await complete_branch_update(uow, action, receipt, branch, recovery_only=recovery_only)
 
         await self.ledger.run("system", dispatch)
 

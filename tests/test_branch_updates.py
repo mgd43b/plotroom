@@ -285,6 +285,8 @@ async def test_conflict_survives_lost_response_and_restart(tmp_path: Path, after
         assert items[0].context["lane"] == "lane1"
         assert items[0].context["main_sha"] == TIP
         events = await ledger.events_after(0)
+        [completed] = [event for event in events if event.kind == "core.action_done"]
+        assert completed.fields["attempt"] == (2 if after == "unchanged" else 1)
         assert [event.upstream_id for event in events if event.kind == BRANCH_UPDATE_STAGED] == [
             KEY
         ]

@@ -79,9 +79,15 @@ async def stage_branch_update(uow: UnitOfWork, update: BranchUpdate) -> bool:
 
 
 async def complete_branch_update(
-    uow: UnitOfWork, action: Action, receipt: BranchUpdateReceipt, branch: str | None
+    uow: UnitOfWork,
+    action: Action,
+    receipt: BranchUpdateReceipt,
+    branch: str | None,
+    *,
+    recovery_only: bool,
 ) -> None:
-    attempted = await record_attempt(uow, action)
+    # After a crash, a fixture receipt can be the first durable indication of a write.
+    attempted = action if recovery_only and action.attempts else await record_attempt(uow, action)
     if receipt.outcome == "conflict":
         lane = await uow.branch_lane(branch) if branch is not None else None
         role = f"worker:{lane.worker}" if lane is not None else "orchestrator"
