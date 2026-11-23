@@ -21,7 +21,8 @@ def test_file_values_and_registry(tmp_path: Path) -> None:
     path = write(
         tmp_path,
         'data_dir = "state"\nhost = "0.0.0.0"\nport = 9000\n'
-        'allowed_hosts = ["plotroom.example.org"]\n[projects.alpha]\n[projects.beta-2]\n',
+        'allowed_hosts = ["plotroom.example.org"]\n'
+        '[projects.alpha]\nhuman_login = "Fixture-Human"\nask_stale_days = 0\n[projects.beta-2]\n',
     )
     config = load_config(path, {})
     assert config.data_dir == tmp_path / "state"
@@ -29,6 +30,8 @@ def test_file_values_and_registry(tmp_path: Path) -> None:
     assert config.port == 9000
     assert config.allowed_hosts == ("plotroom.example.org",)
     assert config.projects == ("alpha", "beta-2")
+    assert config.human_logins == {"alpha": "Fixture-Human"}
+    assert config.ask_stale_days == {"alpha": 0}
 
 
 def test_defaults_are_loopback(tmp_path: Path) -> None:
@@ -97,6 +100,10 @@ def test_no_file_at_the_default_location_leaves_environment_and_defaults(
         ('[projects.a.brief]\ntemplate = "{source_text}"\n', "missing brief template fields"),
         ('[projects.a.brief]\ntemplate = "{"\n', "projects.a.brief.template"),
         ("[projects.a.brief]\nstanding_rules = [1]\n", "standing_rules must be a non-empty string"),
+        ("[projects.a]\nhuman_login = 123\n", r"projects\.a\.human_login"),
+        ("[projects.a]\nhuman_login = ' '\n", r"projects\.a\.human_login"),
+        ("[projects.a]\nask_stale_days = -1\n", r"projects\.a\.ask_stale_days"),
+        ("[projects.a]\nask_stale_days = true\n", r"projects\.a\.ask_stale_days"),
         ("this is = not toml\n", "cannot read config"),
     ],
 )

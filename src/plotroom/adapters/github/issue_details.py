@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from plotroom.adapters.github import GitHubUnavailable
 from plotroom.adapters.github.read import GitHubReadClient, Row, number, obj, rows, string
 from plotroom.core.events import format_time
 from plotroom.core.github_projection import GitHubRecord, GitHubResource
@@ -39,6 +40,9 @@ def _issue(row: Row) -> tuple[GitHubRecord, ...]:
         "labels": sorted({string(label["name"]) for label in rows(row["labels"])}),
         "updated_at": string(row["updated_at"]),
     }
+    count = row.get("comments")
+    if type(count) is int and count >= 0:
+        issue["comment_count"] = count
     records = [
         GitHubRecord(
             f"issue/{n}",
@@ -126,6 +130,43 @@ def _comments(
         if key not in records or records[key].fields["updated_at"] <= updated:
             records[key] = GitHubRecord(key, "issue_comment", fields, _body(row))
     return tuple(records.values()), latest
+
+
+async def fetch_issue_comments(
+    api: GitHubReadClient,
+    client: httpx.AsyncClient,
+    token: str,
+    issue: int,
+    version: str,
+    expected_count: int,
+) -> tuple[GitHubRecord, ...]:
+    observed = [
+        row
+        async for row in api.pages(client, token, f"/issues/{issue}/comments", verify_terminal=True)
+    ]
+    if len(observed) != expected_count:
+        raise GitHubUnavailable("GitHub issue comment count changed during history fetch")
+    issue_path = f"/repos/{api.repository}/issues/{issue}".casefold()
+    if any(
+        not urlsplit(string(row["issue_url"])).path.casefold().endswith(issue_path)
+        for row in observed
+    ):
+        raise GitHubUnavailable("GitHub returned a comment for a different issue")
+    comments, _ = _comments(observed, frozenset({issue}))
+    if len(comments) != len(observed):
+        raise GitHubUnavailable("GitHub returned duplicate comments in issue history")
+    # A replacement during offset pagination can preserve the count while shifting a page.
+    current = obj(await api.get(client, token, f"/issues/{issue}"))
+    count = current.get("comments")
+    if (
+        "pull_request" in current
+        or number(current["number"]) != issue
+        or _state(current) != "closed"
+        or type(count) is not int
+        or f"{string(current['updated_at'])}/{count}" != version
+    ):
+        raise GitHubUnavailable("GitHub issue changed during comment history verification")
+    return comments
 
 
 async def fetch_comment_backfill(

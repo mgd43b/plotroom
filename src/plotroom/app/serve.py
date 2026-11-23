@@ -55,6 +55,7 @@ from plotroom.app.session_intake import SessionIntake
 from plotroom.app.sqlite_floor import floor_problem
 from plotroom.app.tokens import TokenRegistry
 from plotroom.core.actions import SWITCHBOARD_SEND
+from plotroom.core.ask_checks import DEFAULT_ASK_STALE_DAYS
 from plotroom.core.catalog import build_catalog
 from plotroom.core.ledger import Ledger
 from plotroom.ports import Clock
@@ -386,6 +387,7 @@ class Daemon:
             fixture_write = self._fixture_github_writes.get(project_id)
             policy = github.merge_gate_policy if github is not None else None
             live_merge = policy is not None and policy.ci_workflow is not None
+            human_login = self._config.human_logins.get(project_id)
             project.ledger = Ledger(
                 project.store,
                 build_catalog(
@@ -394,6 +396,7 @@ class Daemon:
                     delivery_routes=routes,
                     image_jobs=github.image_jobs if github is not None else (),
                     lane_idle_minutes=self._config.lane_idle_minutes,
+                    human_login=human_login,
                 ),
                 self._clock,
                 watcher_roles=self._config.watchers.get(project_id, ()),
@@ -408,6 +411,8 @@ class Daemon:
                 merge_clerk=partial(tokens.has_role, project_id, "clerk") if live_merge else None,
                 fixture_merge_enabled=fixture_write is not None,
                 fixture_branch_updates=fixture_write is not None,
+                human_login=human_login,
+                ask_stale_days=self._config.ask_stale_days.get(project_id, DEFAULT_ASK_STALE_DAYS),
             )
             project.ledger.start()
             await project.ledger.initialize_overlaps()

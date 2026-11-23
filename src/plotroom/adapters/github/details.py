@@ -22,6 +22,7 @@ from plotroom.adapters.github.deployments import poll_deployments
 from plotroom.adapters.github.issue_details import (
     fetch_comment_backfill,
     fetch_comments,
+    fetch_issue_comments,
     fetch_issue_tree,
     fetch_issues,
 )
@@ -43,6 +44,7 @@ from plotroom.core.github import (
     apply_comments,
 )
 from plotroom.core.github_projection import (
+    ASK_COMMENT_HISTORY,
     CHECKS,
     COMMENT_BACKFILL,
     COMMENTS,
@@ -58,6 +60,7 @@ from plotroom.core.github_projection import (
     GitHubRecord,
     GitHubResource,
     apply_resource,
+    ask_history_version,
     main_verdict,
 )
 from plotroom.core.ledger import Ledger
@@ -77,6 +80,7 @@ from plotroom.ports.clock import Clock
 
 log = logging.getLogger("plotroom.github")
 MAX_NEW_COMPARISONS = 4
+MAX_ASK_HISTORIES = 4
 _READ_ERRORS = (
     GitHubUnavailable,
     httpx.RequestError,
@@ -109,6 +113,7 @@ class GitHubDetailPoller:
         self.ci_workflow = ci_workflow
         self.on_merge_evidence = on_merge_evidence
         self._comparison_cursor = 0
+        self._ask_history_offset = 0
 
     async def confirm_gate(self, snapshot: GateSnapshot) -> GateSnapshot | None:
         """Read authoritative evidence on demand for a pinned clerk recheck."""
@@ -250,6 +255,7 @@ class GitHubDetailPoller:
                 if row.kind in ("issue_opened", "issue_closed")
             )
             await self._poll_comments(client, token, numbers)
+            await self._poll_ask_histories(client, token, issues)
         targets: dict[str, list[int]] = {}
         history = tuple(
             sorted(
@@ -436,6 +442,57 @@ class GitHubDetailPoller:
                     watermark=watermark,
                     as_of=format_time(self.clock.now()),
                     cursor_resource=resource,
+                ),
+            )
+
+    async def _poll_ask_histories(
+        self, client: httpx.AsyncClient, token: str, issues: GitHubResource
+    ) -> None:
+        if not issues.complete:
+            return
+        repository = self.api.repository
+        pending = await self.ledger.pending_ask_issues(repository)
+        targets: list[tuple[int, str, int, str, FetchCursor | None]] = []
+        for row in issues.records:
+            if row.kind != "issue_closed" or (number := row.fields["number"]) not in pending:
+                continue
+            coverage = ask_history_version(row)
+            if coverage is None:
+                continue
+            version, count = coverage
+            key = f"{ASK_COMMENT_HISTORY}{number}"
+            prior = await self.ledger.fetch_cursor(repository, key)
+            if prior is None or prior.watermark != version:
+                targets.append((number, version, count, key, prior))
+        if not targets:
+            return
+        targets.sort()
+        offset = self._ask_history_offset % len(targets)
+        self._ask_history_offset = offset + MAX_ASK_HISTORIES
+        for number, version, count, key, prior in (targets[offset:] + targets[:offset])[
+            :MAX_ASK_HISTORIES
+        ]:
+            try:
+                comments = await fetch_issue_comments(
+                    self.api, client, token, number, version, count
+                )
+            except GitHubRateLimited:
+                raise
+            except _READ_ERRORS:
+                log.warning("GitHub ask comment history refresh failed", extra={"issue": number})
+                continue
+            # Merge the records into the existing comment projection before marking this
+            # particular issue version covered. The writer sees the facts and proof together.
+            await self.ledger.run(
+                "system",
+                partial(
+                    apply_comments,
+                    repository=repository,
+                    baseline=prior,
+                    comments=comments,
+                    watermark=version,
+                    as_of=format_time(self.clock.now()),
+                    cursor_resource=key,
                 ),
             )
 

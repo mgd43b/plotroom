@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.requests import Request
@@ -41,6 +41,27 @@ class ReadyChecklistEntry(BaseModel):
     step: str
     owner: str
     ref: str
+
+
+class GitHubDecisionCitation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    kind: Literal["github_comment"]
+    repository: str
+    issue: int
+    comment_id: int
+
+
+class ChatDecisionCitation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    kind: Literal["chat"]
+    ref: str
+
+
+DecisionCitation = Annotated[
+    GitHubDecisionCitation | ChatDecisionCitation, Field(discriminator="kind")
+]
 
 
 @dataclass(frozen=True)
@@ -517,6 +538,79 @@ def build_app(
         return await execute_command(
             ctx, "run_report", request_id, {"lane": lane, "run_id": run_id, "state": state}
         )
+
+    @server.tool()
+    async def decide(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        who: str,
+        exact_words: str,
+        where_ref: DecisionCitation,
+        governs: list[str],
+        settles: list[str],
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Record the human's verbatim decision and the tickets and asks it applies to.
+
+        Cite a projected comment with kind github_comment, repository, issue, and comment_id.
+        Cite a chat source with kind chat and its opaque ref.
+        """
+        return await execute_command(
+            ctx,
+            "decide",
+            request_id,
+            {
+                "who": who,
+                "exact_words": exact_words,
+                "where_ref": where_ref.model_dump(),
+                "governs": governs,
+                "settles": settles,
+            },
+        )
+
+    @server.tool()
+    async def decisions(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], governs: str | None = None
+    ) -> dict[str, Any]:
+        """List recorded decisions, optionally filtered by one exact governed ticket reference."""
+        try:
+            caller = board_access(ctx)
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            return ok(
+                {"decisions": await caller.ledger.list_decisions(caller.identity.role, governs)}
+            )
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
+
+    @server.tool()
+    async def ask(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        issue: StrictInt,
+        text: str,
+        options: list[str],
+        comment_id: StrictInt,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Record an ask citing an existing projected comment on a GitHub issue."""
+        return await execute_command(
+            ctx,
+            "ask",
+            request_id,
+            {"issue": issue, "text": text, "options": options, "comment_id": comment_id},
+        )
+
+    @server.tool()
+    async def asks(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], stale_only: bool = False
+    ) -> dict[str, Any]:
+        """List recorded asks, optionally limiting results to active stale conditions."""
+        try:
+            caller = board_access(ctx)
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            return ok({"asks": await caller.ledger.list_asks(caller.identity.role, stale_only)})
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
 
     @server.tool()
     async def trigger(  # pyright: ignore[reportUnusedFunction]

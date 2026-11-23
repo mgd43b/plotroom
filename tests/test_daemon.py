@@ -176,6 +176,7 @@ async def test_a_mutating_tool_uses_the_authenticated_role_and_project_ledger(
         delivery_routes: Mapping[str, DeliveryRoute] | None = None,
         image_jobs: tuple[str, ...] = (),
         lane_idle_minutes: int = 15,
+        human_login: str | None = None,
     ) -> Catalog:
         return catalog
 

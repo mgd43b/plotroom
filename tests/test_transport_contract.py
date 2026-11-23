@@ -22,9 +22,16 @@ from plotroom.adapters.work_items_bmad import BmadTicketTree
 from plotroom.app.config import load_config
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import IssuedToken, TokenRegistry
-from plotroom.core.github import ObservedPull, apply_pull_poll
-from plotroom.core.github_projection import CHECKS, GitHubRecord, GitHubResource, apply_resource
+from plotroom.core.github import ObservedPull, apply_comments, apply_pull_poll
+from plotroom.core.github_projection import (
+    CHECKS,
+    ISSUES,
+    GitHubRecord,
+    GitHubResource,
+    apply_resource,
+)
 from plotroom.core.snapshot import estimate_tokens
+from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.watchers import Watchers
 from rawproxy import ERAS, MODERN, initialize_request, modern_call, spawn_proxy
 
@@ -58,6 +65,10 @@ TOOL_NAMES = {
     "cancel",
     "outbox_lease",
     "outbox_done",
+    "decide",
+    "decisions",
+    "ask",
+    "asks",
 }
 WRITER_TOOLS = {
     "ack",
@@ -76,6 +87,8 @@ WRITER_TOOLS = {
     "cancel",
     "outbox_lease",
     "outbox_done",
+    "decide",
+    "ask",
 }
 REPORT_ARGUMENTS = {
     "deploy_report": {
@@ -109,7 +122,7 @@ async def endpoint(
     tree, installation = make_brief_ticket(tmp_path)
     config.write_text(
         config.read_text() + f'ticket_tree = "{tree}"\nbmad_installation = "{installation}"\n'
-        'drain_session = "fixture-drain"\n[projects.demo.workers.fixture]\n'
+        'drain_session = "fixture-drain"\nhuman_login = "fixture-human"\n[projects.demo.workers.fixture]\n'
         'claude_session = "fixture-session"\n[projects.demo.github]\n'
         'repository = "fixture/project"\nmin_checks = 1\n'
         "[projects.demo.workers.first]\n[projects.demo.workers.second]\n"
@@ -183,6 +196,42 @@ async def endpoint(
             ),
         )
         ledger.github_error = None
+        issue = GitHubRecord(
+            "issue/3",
+            "issue_opened",
+            {"number": 3, "state": "open"},
+            details={
+                "resource": "issue",
+                "title": "Fixture issue",
+                "labels": [],
+                "milestone": 1,
+                "updated_at": FIXTURE_TIME,
+            },
+        )
+        comment = GitHubRecord(
+            "345",
+            "issue_comment",
+            {
+                "id": 345,
+                "number": 3,
+                "created_at": FIXTURE_TIME,
+                "updated_at": FIXTURE_TIME,
+                "author": "fixture-orchestrator",
+            },
+            "  Choose option A?\r\n",
+        )
+
+        coercion_trap = replace(comment, key="1", fields={**comment.fields, "id": 1, "number": 1})
+
+        async def fixture_facts(uow: UnitOfWork) -> None:
+            await apply_resource(
+                uow, FIXTURE_REPO, ISSUES, "", GitHubResource((issue,)), FIXTURE_TIME
+            )
+            await apply_comments(
+                uow, FIXTURE_REPO, None, (comment, coercion_trap), FIXTURE_TIME, FIXTURE_TIME
+            )
+
+        await daemon.ledgers["demo"].run("system", fixture_facts)
         yield Endpoint(
             f"http://127.0.0.1:{port}/mcp",
             config,
@@ -401,6 +450,43 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         assert (await call("triggers"))["triggers"][0]["id"] == trigger["id"]
         assert (await call("cancel", trigger_id=trigger["id"]))["state"] == "canceled"
         assert (await call("snapshot"))["triggers"]["canceled"] == 1
+        for malformed in (True, "1", 1.0):
+            for field in ("issue", "comment_id"):
+                malformed_args: dict[str, Any] = {
+                    "issue": 1,
+                    "comment_id": 1,
+                    "text": "  Choose option A?\r\n",
+                    "options": [],
+                    "request_id": f"bad-ask-{field}-{malformed!r}",
+                    field: malformed,
+                }
+                rejected = await send(
+                    message(
+                        era, next(request_ids), "tools/call", name="ask", arguments=malformed_args
+                    )
+                )
+                assert rejected["result"]["isError"]
+        assert (await call("asks"))["asks"] == []
+        ask_id = (
+            await call(
+                "ask", issue=3, text="  Choose option A?\r\n", options=["A", "B"], comment_id=345
+            )
+        )["ask_id"]
+        assert (await call("asks"))["asks"][0]["ask_id"] == ask_id
+        decision_id = (
+            await call(
+                "decide",
+                who="Fixture-Human",
+                exact_words="  Café\r\n",
+                where_ref={"kind": "chat", "ref": "fixture-turn"},
+                governs=[f"{FIXTURE_REPO}#3"],
+                settles=[ask_id],
+            )
+        )["decision_id"]
+        [decision] = (await call("decisions", governs=f"{FIXTURE_REPO}#3"))["decisions"]
+        assert decision["exact_words"] == "  Café\r\n"
+        assert decision["decision_id"] == decision_id
+        assert (await call("asks"))["asks"][0]["settled_by"] == decision_id
         fired = await call(
             "trigger",
             predicate={"pr_merged": {"number": 2}},
@@ -459,6 +545,14 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             "wait": {"timeout": 0},
             "outbox_lease": {"consumer_id": stand_in.consumer_id},
             "outbox_done": {"act_id": "fixture"},
+            "ask": {"issue": 3, "text": "fixture", "options": [], "comment_id": 345},
+            "decide": {
+                "who": "fixture-human",
+                "exact_words": "fixture",
+                "where_ref": {"kind": "chat", "ref": "fixture"},
+                "governs": [],
+                "settles": [],
+            },
         }
         for number, name in enumerate(sorted(names), start=1):
             args = arguments.get(name, {})
@@ -494,6 +588,8 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             (
                 ("freeze", {"request_id": "freeze", "reason": "fixture"}),
                 ("unfreeze", {"request_id": "unfreeze"}),
+                ("decide", {**arguments["decide"], "request_id": "worker-decide"}),
+                ("ask", {**arguments["ask"], "request_id": "worker-ask"}),
             ),
             start=3,
         ):
