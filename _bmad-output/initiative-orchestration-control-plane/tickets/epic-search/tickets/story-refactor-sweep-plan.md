@@ -3,7 +3,7 @@ title: 'Address verified local search cleanup'
 type: refactor
 ticket: 6
 created: '2026-11-23'
-status: in-progress
+status: in-review
 baseline_revision: 'e59d434dc9d476b581eb51ab6ecd9f88f8ed38ba'
 route: full
 route_source: pinned

@@ -3,7 +3,7 @@ title: 'Rank local search by meaning'
 type: feature
 ticket: 5
 created: '2026-11-23'
-status: in-progress
+status: in-review
 baseline_revision: '86cc0c3a2aa0cdd46837df20504bd9ff2232b48e'
 route: full
 route_source: pinned

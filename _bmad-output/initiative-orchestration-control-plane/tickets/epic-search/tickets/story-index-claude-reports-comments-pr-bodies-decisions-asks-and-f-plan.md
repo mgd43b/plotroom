@@ -3,7 +3,7 @@ title: 'Index every local search source'
 type: feature
 ticket: 2
 created: '2026-11-23'
-status: in-progress
+status: in-review
 baseline_revision: 'fd50ef15eb92f354918c262d77cc5a0acd161894'
 route: full
 route_source: pinned

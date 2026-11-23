@@ -3,7 +3,7 @@ title: 'Resume historical records into local search'
 type: feature
 ticket: 3
 created: '2026-11-23'
-status: in-progress
+status: in-review
 baseline_revision: 'e5026784290ab18daf434f88e28828932bebf489'
 route: full
 route_source: pinned
