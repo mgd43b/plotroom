@@ -33,7 +33,7 @@ async def test_a_new_file_is_migrated_to_head(tmp_path: Path) -> None:
     with sqlite3.connect(store.path) as db:
         assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"project_meta", "alembic_version"} <= tables
+    assert {"project_meta", "alembic_version", "events", "project_seq"} <= tables
 
 
 async def test_migrating_twice_changes_nothing(tmp_path: Path) -> None:
@@ -63,14 +63,15 @@ def test_two_revisions_with_the_same_parent_are_detected(tmp_path: Path) -> None
     """The check CI relies on: a parallel entry that forgot to re-parent makes a second head."""
     copy = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_DIR, copy, ignore=shutil.ignore_patterns("__pycache__"))
-    (copy / "versions" / "0002_parallel.py").write_text(
-        'revision = "0002"\ndown_revision = None\nbranch_labels = None\ndepends_on = None\n\n'
+    head = head_revision()
+    (copy / "versions" / "9998_parallel.py").write_text(
+        'revision = "parallel"\ndown_revision = None\nbranch_labels = None\ndepends_on = None\n\n'
         "def upgrade() -> None:\n    pass\n",
         encoding="utf-8",
     )
     cfg = alembic_config()
     cfg.set_main_option("script_location", str(copy))
-    assert sorted(script_heads(cfg)) == ["0001", "0002"]
+    assert sorted(script_heads(cfg)) == sorted([head, "parallel"])
     with pytest.raises(RuntimeError, match="exactly one head"):
         head_revision(cfg)
 
@@ -99,10 +100,11 @@ async def test_a_migration_that_fails_after_its_first_ddl_leaves_nothing_behind(
     """DDL and the revision commit together, so the next startup does not trip on a half migration."""
     copy = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_DIR, copy, ignore=shutil.ignore_patterns("__pycache__"))
-    broken = copy / "versions" / "0002_half.py"
+    head = head_revision()
+    broken = copy / "versions" / "9999_half.py"
     broken.write_text(
-        'import sqlalchemy as sa\nfrom alembic import op\n\nrevision = "0002"\n'
-        'down_revision = "0001"\nbranch_labels = None\ndepends_on = None\n\n\n'
+        'import sqlalchemy as sa\nfrom alembic import op\n\nrevision = "half"\n'
+        f'down_revision = "{head}"\nbranch_labels = None\ndepends_on = None\n\n\n'
         "def upgrade() -> None:\n"
         '    op.create_table("half", sa.Column("id", sa.Integer(), primary_key=True))\n'
         '    raise RuntimeError("stopped after the first DDL statement")\n',
@@ -112,10 +114,10 @@ async def test_a_migration_that_fails_after_its_first_ddl_leaves_nothing_behind(
     cfg.set_main_option("script_location", str(copy))
     store = SqliteStore("demo", tmp_path)
     try:
-        await store.migrate()  # real history: at 0001
+        await store.migrate()  # real history: at its head
         with pytest.raises(RuntimeError, match="first DDL"):
             await upgrade_to_head(store._engine, cfg)  # pyright: ignore[reportPrivateUsage]
-        assert await store.revision() == "0001"
+        assert await store.revision() == head
     finally:
         await store.close()
     with sqlite3.connect(tmp_path / "demo.db") as db:
@@ -123,8 +125,8 @@ async def test_a_migration_that_fails_after_its_first_ddl_leaves_nothing_behind(
     assert "half" not in tables
     # the same revision, repaired, runs from the state the failure left
     broken.write_text(
-        'import sqlalchemy as sa\nfrom alembic import op\n\nrevision = "0002"\n'
-        'down_revision = "0001"\nbranch_labels = None\ndepends_on = None\n\n\n'
+        'import sqlalchemy as sa\nfrom alembic import op\n\nrevision = "half"\n'
+        f'down_revision = "{head}"\nbranch_labels = None\ndepends_on = None\n\n\n'
         "def upgrade() -> None:\n"
         '    op.create_table("half", sa.Column("id", sa.Integer(), primary_key=True))\n',
         encoding="utf-8",
@@ -132,9 +134,32 @@ async def test_a_migration_that_fails_after_its_first_ddl_leaves_nothing_behind(
     again = SqliteStore("demo", tmp_path)
     try:
         await upgrade_to_head(again._engine, cfg)  # pyright: ignore[reportPrivateUsage]
-        assert await again.revision() == "0002"
+        assert await again.revision() == "half"
     finally:
         await again.close()
     with sqlite3.connect(tmp_path / "demo.db") as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "half" in tables
+
+
+async def test_a_file_at_the_first_revision_is_upgraded_in_place(tmp_path: Path) -> None:
+    """The event log arrives by migration: an existing 0001 file gains its tables and counter."""
+    first = tmp_path / "migrations"
+    shutil.copytree(MIGRATIONS_DIR, first, ignore=shutil.ignore_patterns("__pycache__"))
+    for later in (first / "versions").glob("*.py"):
+        if not later.name.startswith("0001_"):
+            later.unlink()
+    cfg = alembic_config()
+    cfg.set_main_option("script_location", str(first))
+    store = SqliteStore("demo", tmp_path)
+    try:
+        await upgrade_to_head(store._engine, cfg)  # pyright: ignore[reportPrivateUsage]
+        assert await store.revision() == "0001"
+        await store.migrate()
+        assert await store.revision() == head_revision()
+        assert await store.head_seq() == 0
+        assert await store.events_after(0) == []
+    finally:
+        await store.close()
+    with sqlite3.connect(tmp_path / "demo.db") as db:
+        assert db.execute("SELECT id, value FROM project_seq").fetchall() == [(1, 0)]
