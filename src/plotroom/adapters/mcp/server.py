@@ -20,6 +20,8 @@ from plotroom.core.ledger import Ledger
 from plotroom.core.roles import Identity
 from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, render_next, render_snapshot
 
+_NEXT_PAGE_SIZE = 64
+
 type Authenticate = Callable[[str], Awaitable[Identity | None]]
 
 
@@ -170,19 +172,26 @@ def build_app(
         """Page through visible next items in rank order, or read one open item in full."""
         try:
             caller = board_access(ctx)
-            if offset < 0:
-                return err("invalid", "offset must be nonnegative")
-            cursor, items, _, _ = (
-                (0, [], {}, [])
-                if caller.ledger is None
-                else await caller.ledger.read_board(caller.identity.role)
-            )
+            if not 0 <= offset <= 2**63 - 1:
+                return err("invalid", "offset must be a nonnegative SQLite integer")
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            role = caller.identity.role
             if item is not None:
-                for entry in items:
-                    if entry.id == item:
-                        return ok(asdict(entry))
-                return err("not_found", "open next item not found")
-            return ok(render_next(cursor, items, offset, next_budget))
+                entry = await caller.ledger.read_open_item(role, item)
+                if entry is None:
+                    return err("not_found", "open next item not found")
+                return ok(asdict(entry))
+            cursor, items = await caller.ledger.read_next(role, offset, _NEXT_PAGE_SIZE + 1)
+            return ok(
+                render_next(
+                    cursor,
+                    items[:_NEXT_PAGE_SIZE],
+                    offset,
+                    next_budget,
+                    has_more=len(items) > _NEXT_PAGE_SIZE,
+                )
+            )
         except LedgerError as exc:
             return err(exc.code, exc.message)
 

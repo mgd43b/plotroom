@@ -77,10 +77,17 @@ def render_snapshot(
     return board
 
 
-def render_next(cursor: int, items: list[Item], offset: int, budget: int) -> dict[str, Any]:
+def render_next(
+    cursor: int,
+    items: list[Item],
+    offset: int,
+    budget: int,
+    *,
+    has_more: bool = False,
+) -> dict[str, Any]:
     page: list[dict[str, Any]] = []
     data: dict[str, Any] = {"cursor": cursor, "items": page}
-    for index, item in enumerate(items[offset:], start=offset):
+    for index, item in enumerate(items, start=offset):
         data["next_offset"] = index + 1
         if not _add(data, page, asdict(item), budget) and not _add(
             data, page, {"id": item.id, "kind": item.kind, "details_omitted": True}, budget
@@ -88,5 +95,6 @@ def render_next(cursor: int, items: list[Item], offset: int, budget: int) -> dic
             data["next_offset"] = index
             break
     else:
-        data.pop("next_offset", None)
+        if not has_more:
+            data.pop("next_offset", None)
     return data

@@ -50,6 +50,8 @@ Given ranked fixture items of both kinds, when read, acknowledged twice and rend
 - Native Codex review. The ack receipt is preserved even when a second acknowledgment has no board effect. The regression reopens the item and confirms that the old request ID still replays its no-op.
 - Native Codex review. Next pages preserve rank and expose full open-item detail by ID. Snapshot and next budgets are measured against the indented MCP text envelope.
 
+- Opening Kodus review. Next pages fetch bounded rows from the ranked SQLite view. Item detail uses a separate role-scoped lookup.
+
 ## Verification
 
 - `uv run --locked --python 3.14 python -m pytest tests/test_next_items.py`

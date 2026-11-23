@@ -49,6 +49,8 @@ Given one fixture worker and an orchestrator, when both transports call lane too
 
 - Native Codex review. Snapshot includes role-scoped current lane records and can page or fetch a named lane. The smoke verifies an active record after restart and a ready record after the waiting item clears. Mutating tools require caller-generated request IDs.
 
+- Opening Kodus review. A lane start checks work-item assignment inside the writer transaction, including when an older idle suggestion is used.
+
 ## Verification
 
 - `uv run --locked --python 3.14 python -m pytest tests/test_lanes.py`

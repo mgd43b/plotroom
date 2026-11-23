@@ -43,7 +43,7 @@ def test_next_pages_include_ids_for_oversize_items() -> None:
     offset = 0
     ids: list[str] = []
     while offset < len(items):
-        page = render_next(len(items), items, offset, 256)
+        page = render_next(len(items), items[offset:], offset, 256)
         assert estimate_tokens(json.dumps(ok(page), indent=2)) <= 256
         assert all(row["details_omitted"] for row in page["items"])
         ids.extend(row["id"] for row in page["items"])

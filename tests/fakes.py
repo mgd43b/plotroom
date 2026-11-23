@@ -238,6 +238,16 @@ class MemoryStore:
     async def ready_work_items(self) -> tuple[WorkItem, ...]:
         return self._work_items
 
+    async def read_next(self, role: str, offset: int, limit: int) -> tuple[int, list[Item]]:
+        _, items, _, _ = await self.read_board(role)
+        return self._seq, items[offset : offset + limit]
+
+    async def read_open_item(self, role: str, item_id: str) -> Item | None:
+        item = self._items.get(item_id)
+        if item is None or item.state != "open" or not visible(item, role):
+            return None
+        return copy.deepcopy(item)
+
     async def first_item_change(self, role: str, cursor: int) -> tuple[int, dict[str, Any] | None]:
         found = next((i for i in self._changes if i.seq > cursor and visible(i, role)), None)
         return self._seq, asdict(found) if found is not None else None

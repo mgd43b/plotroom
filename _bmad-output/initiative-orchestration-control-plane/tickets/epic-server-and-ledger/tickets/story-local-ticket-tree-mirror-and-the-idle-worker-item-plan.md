@@ -49,6 +49,8 @@ Given a BMad repo fixture and an idle worker, when a tick reads ready entries an
 
 - Native Codex review. A tick closes idle items for workers removed from configuration. The reconfiguration regression also verifies that disabling the source clears its stale mirror.
 
+- Opening Kodus review. The BMad reader writes output to a private temporary file, so a killed reader cannot strand a paused pipe. The timeout regression uses a child that writes two megabytes before waiting.
+
 ## Verification
 
 - `uv run --locked --python 3.14 python -m pytest tests/test_work_items.py`

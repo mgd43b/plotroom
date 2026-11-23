@@ -32,6 +32,9 @@ async def test_rank_dedup_ack_and_snapshot_budget(tmp_path: Path) -> None:
         cursor, items, lanes, _ = await ledger.read_board("orchestrator")
         assert cursor == 2
         assert items == [event, state]
+        assert await ledger.read_next("orchestrator", 1, 1) == (cursor, [state])
+        assert await ledger.read_open_item("worker:fixture", event.id) is None
+        assert await ledger.read_open_item("orchestrator", event.id) == event
         board = render_snapshot("demo", cursor, items, lanes, 100)
         assert board["left_out"] == 2
         assert board["open_items"] == {"fixture_event": 1, "fixture_state": 1}

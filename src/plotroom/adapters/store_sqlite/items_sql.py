@@ -16,7 +16,11 @@ _BY_ID = text("SELECT * FROM next_items WHERE id = :id")
 _ACTIVE = text("SELECT * FROM next_items WHERE dedup_key = :key AND state != 'closed'")
 _OPEN = text(
     "SELECT * FROM next_items WHERE state = 'open' AND (:role = 'orchestrator' OR role = :role) "
-    "ORDER BY rank_class, opened_seq"
+    "ORDER BY rank_class, opened_seq LIMIT :limit OFFSET :offset"
+)
+_OPEN_BY_ID = text(
+    "SELECT * FROM next_items WHERE id = :id AND state = 'open' "
+    "AND (:role = 'orchestrator' OR role = :role)"
 )
 _SAVE = text(
     "INSERT INTO next_items "
@@ -30,18 +34,17 @@ _SAVE = text(
 
 
 _INSERT_CHANGE = text("INSERT INTO item_changes (seq, role, item) VALUES (:seq, :role, :item)")
-_NEXT_CHANGE = text(
-    "SELECT item FROM item_changes WHERE seq > :cursor "
-    "AND (:role = 'orchestrator' OR role = :role) ORDER BY seq LIMIT 1"
+_NEXT_CHANGE = text("SELECT item FROM item_changes WHERE seq > :cursor ORDER BY seq LIMIT 1")
+_NEXT_ROLE_CHANGE = text(
+    "SELECT item FROM item_changes WHERE role = :role AND seq > :cursor ORDER BY seq LIMIT 1"
 )
 
 
 async def first_change(
     connection: AsyncConnection, role: str, cursor: int
 ) -> dict[str, Any] | None:
-    value = (
-        await connection.execute(_NEXT_CHANGE, {"role": role, "cursor": cursor})
-    ).scalar_one_or_none()
+    query = _NEXT_CHANGE if role == "orchestrator" else _NEXT_ROLE_CHANGE
+    value = (await connection.execute(query, {"role": role, "cursor": cursor})).scalar_one_or_none()
     item: dict[str, Any] | None = None if value is None else json.loads(value)
     return item
 
@@ -69,8 +72,20 @@ async def active_item(connection: AsyncConnection, key: str) -> Item | None:
     return None if row is None else _item(row)
 
 
-async def open_items(connection: AsyncConnection, role: str) -> list[Item]:
-    return [_item(row) for row in await connection.execute(_OPEN, {"role": role})]
+async def open_items(
+    connection: AsyncConnection,
+    role: str,
+    *,
+    offset: int = 0,
+    limit: int = -1,
+) -> list[Item]:
+    rows = await connection.execute(_OPEN, {"role": role, "offset": offset, "limit": limit})
+    return [_item(row) for row in rows]
+
+
+async def open_item(connection: AsyncConnection, role: str, item_id: str) -> Item | None:
+    row = (await connection.execute(_OPEN_BY_ID, {"role": role, "id": item_id})).first()
+    return None if row is None else _item(row)
 
 
 async def save_item(connection: AsyncConnection, item: Item) -> None:

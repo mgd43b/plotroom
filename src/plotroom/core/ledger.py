@@ -241,5 +241,11 @@ class Ledger:
     async def ready_work_items(self) -> tuple[WorkItem, ...]:
         return await self._store.ready_work_items()
 
+    async def read_next(self, role: str, offset: int, limit: int) -> tuple[int, list[Item]]:
+        return await self._store.read_next(role, offset, limit)
+
+    async def read_open_item(self, role: str, item_id: str) -> Item | None:
+        return await self._store.read_open_item(role, item_id)
+
     async def read_board(self, role: str) -> tuple[int, list[Item], dict[str, int], list[Lane]]:
         return await self._store.read_board(role)

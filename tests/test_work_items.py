@@ -1,13 +1,16 @@
+import asyncio
 import shutil
 from pathlib import Path
 
 import pytest
 
 from fakes import FixedClock
+from plotroom.adapters import work_items_bmad
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.adapters.work_items_bmad import BmadTicketTree, TicketTreeError
 from plotroom.app.runtime import ProjectRuntime
 from plotroom.core.catalog import build_catalog
+from plotroom.core.events import LedgerError
 from plotroom.core.ledger import Ledger
 from plotroom.ports.work_items import WorkItem
 
@@ -62,7 +65,7 @@ title = "In progress"
     await store.migrate()
     clock = FixedClock()
     workers = frozenset({"fixture"})
-    ledger = Ledger(store, build_catalog(workers), clock)
+    ledger = Ledger(store, build_catalog(workers | {"other"}), clock)
     ledger.start()
     runtime = ProjectRuntime(
         ledger,
@@ -91,6 +94,18 @@ title = "In progress"
             {"lane": "lane", "worker": "fixture", "branch": "demo", "work_items": [mirror[0].ref]},
         )
         assert not (await ledger.read_board("orchestrator"))[1]
+        with pytest.raises(LedgerError, match="already assigned"):
+            await ledger.execute(
+                "orchestrator",
+                "lane_start",
+                "duplicate",
+                {
+                    "lane": "duplicate",
+                    "worker": "other",
+                    "branch": "duplicate",
+                    "work_items": [mirror[0].ref],
+                },
+            )
         assert {file: file.read_bytes() for file in tree.rglob("*") if file.is_file()} == original
     finally:
         await ledger.stop()
@@ -140,3 +155,20 @@ async def test_slow_tick_skips_elapsed_intervals_and_removed_conditions_close(
     finally:
         await ledger.stop()
         await store.close()
+
+
+async def test_reader_timeout_cleans_up_after_large_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installation = tmp_path / "trusted"
+    script = installation / "_bmad" / "method" / "scripts" / "tickets.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import time\nprint(chr(120) * 2_000_000, flush=True)\ntime.sleep(60)\n", encoding="utf-8"
+    )
+    tree = tmp_path / "mirror"
+    tree.mkdir()
+    monkeypatch.setattr(work_items_bmad, "_READER_TIMEOUT", 0.5)
+    async with asyncio.timeout(3):
+        with pytest.raises(TicketTreeError, match="timed out"):
+            await BmadTicketTree(tree, installation).ready_items()

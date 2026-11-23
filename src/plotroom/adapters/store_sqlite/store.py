@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from sqlalchemy.pool import ConnectionPoolEntry
 
 from plotroom.adapters.store_sqlite.actions_sql import pending_action
-from plotroom.adapters.store_sqlite.items_sql import first_change, open_items
+from plotroom.adapters.store_sqlite.items_sql import first_change, open_item, open_items
 from plotroom.adapters.store_sqlite.lanes_sql import board_lanes, lane_counts
 from plotroom.adapters.store_sqlite.ledger_sql import (
     EVENTS_AFTER,
@@ -173,6 +173,15 @@ class SqliteStore:
                 await lane_counts(connection, role),
                 await board_lanes(connection, role),
             )
+
+    async def read_next(self, role: str, offset: int, limit: int) -> tuple[int, list[Item]]:
+        async with self._engine.connect() as connection:
+            cursor = int((await connection.execute(HEAD_SEQ)).scalar_one())
+            return cursor, await open_items(connection, role, offset=offset, limit=limit)
+
+    async def read_open_item(self, role: str, item_id: str) -> Item | None:
+        async with self._engine.connect() as connection:
+            return await open_item(connection, role, item_id)
 
     async def first_item_change(self, role: str, cursor: int) -> tuple[int, dict[str, Any] | None]:
         async with self._engine.connect() as connection:

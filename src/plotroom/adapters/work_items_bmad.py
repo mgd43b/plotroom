@@ -4,10 +4,13 @@ import asyncio
 import contextlib
 import json
 import sys
+import tempfile
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 
 from plotroom.ports.work_items import WorkItem
+
+_READER_TIMEOUT = 15.0
 
 
 class TicketTreeError(ValueError):
@@ -35,6 +38,12 @@ class BmadTicketTree:
         reader = self.reader.resolve()
         if reader.is_relative_to(root) or not reader.is_file():
             raise TicketTreeError("configure a trusted BMad reader outside the mirrored checkout")
+        with tempfile.TemporaryFile() as stdout:
+            await self._read(reader, root, stdout)
+            stdout.seek(0)
+            return self._parse(stdout)
+
+    async def _read(self, reader: Path, root: Path, stdout: BinaryIO) -> None:
         try:
             process = await asyncio.create_subprocess_exec(
                 sys.executable,
@@ -45,14 +54,15 @@ class BmadTicketTree:
                 str(root),
                 "next",
                 str(self.tree),
-                stdout=asyncio.subprocess.PIPE,
+                stdout=stdout,
                 stderr=asyncio.subprocess.DEVNULL,
                 cwd=self.installation,
             )
         except OSError as exc:
             raise TicketTreeError("cannot start the installed BMad reader") from exc
         try:
-            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=15)
+            async with asyncio.timeout(_READER_TIMEOUT):
+                await process.wait()
         except TimeoutError as exc:
             raise TicketTreeError("the BMad reader timed out") from exc
         finally:
@@ -64,8 +74,10 @@ class BmadTicketTree:
             if process.returncode == 2:
                 raise TicketTreeError("the ticket tree must use BMad's repo store")
             raise TicketTreeError("the BMad reader could not read the ticket tree")
+
+    def _parse(self, stdout: BinaryIO) -> tuple[WorkItem, ...]:
         try:
-            view: dict[str, Any] = json.loads(stdout)
+            view: dict[str, Any] = json.load(stdout)
             if view["store"] != "repo":
                 raise TicketTreeError("the ticket tree must use BMad's repo store")
             items: dict[str, WorkItem] = {}

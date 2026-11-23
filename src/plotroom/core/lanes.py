@@ -50,6 +50,8 @@ async def start_lane(
         raise LedgerError("conflict", "lane id already exists")
     if await uow.worker_lane(worker) is not None:
         raise LedgerError("conflict", "worker already has a lane")
+    if work_items and not set(work_items).isdisjoint(await uow.claimed_work_items()):
+        raise LedgerError("conflict", "one or more work items are already assigned")
     lane = Lane(lane_id, worker, tuple(work_items), branch)
     await uow.save_lane(lane)
     await refresh_idle_workers(uow, workers)
