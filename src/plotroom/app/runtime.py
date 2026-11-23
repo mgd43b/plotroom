@@ -118,7 +118,7 @@ class ProjectRuntime:
                 skipped.append(action.key)
 
     async def _run_action(self, action: Action) -> bool:
-        if action.attempts >= self.action_attempts:
+        if action.attempts >= self.action_attempts and action.kind != BRANCH_UPDATE:
             await self.ledger.run("system", lambda uow: finish_action(uow, action, "failed"))
             return True
         failed = False
@@ -136,7 +136,10 @@ class ProjectRuntime:
             completed = await record_attempt(uow, action)
             if not failed:
                 await finish_action(uow, completed, "done")
-            elif completed.attempts >= self.action_attempts:
+            # A fixture response may have been lost on the last allowed attempt.
+            elif completed.attempts >= self.action_attempts and (
+                action.kind != BRANCH_UPDATE or action.attempts >= self.action_attempts
+            ):
                 await finish_action(uow, completed, "failed")
 
         await self.ledger.run("system", commit_attempt)
@@ -161,43 +164,50 @@ class ProjectRuntime:
 
     async def _dispatch_branch_update(self, action: Action) -> None:
         port = self.fixture_github_write
-        if port is None:
+        repository = action.payload["repository"]
+        number = action.payload["number"]
+        head_sha = action.payload["head_sha"]
+        if port is None or repository != self.ledger.github_repository:
             raise _BranchUpdateDeferred
 
         async def dispatch(uow: UnitOfWork) -> None:
-            snapshot = await load_gate_snapshot(
-                uow, self.ledger.github_repository, action.payload["number"]
-            )
+            snapshot = await load_gate_snapshot(uow, repository, number)
             pull = snapshot.pull
-            if (
+            identity_changed = (
                 pull is not None
                 and pull.complete
-                and (pull.state != "open" or pull.head_sha != action.payload["head_sha"])
-            ):
-                await finish_action(uow, action, "done")
-                return
+                and (
+                    pull.state != "open"
+                    or pull.head_sha != head_sha
+                    or pull.head_repository != repository
+                )
+            )
             update = self._eligible_update(uow, snapshot)
-            if (
-                update is None
-                or update.key != action.key
-                or update.repository != action.payload["repository"]
-                or update.head_sha != action.payload["head_sha"]
-            ):
+            eligible = update is not None and update.key == action.key
+            if not eligible and not identity_changed:
                 raise _BranchUpdateDeferred
+            exhausted = action.attempts >= self.action_attempts
+            recovery_only = not eligible or exhausted
+            main_sha = update.main_sha if update is not None and not recovery_only else None
             # The fixture call and final guard share the writer turn. A freeze or
             # projection change cannot commit between the guard and this effect.
-            outcome = await port.update_branch(
-                repository=update.repository,
-                number=update.number,
+            receipt = await port.update_branch(
+                repository=repository,
+                number=number,
                 action_key=action.key,
-                expected_head_sha=update.head_sha,
-                expected_main_sha=update.main_sha,
+                expected_head_sha=head_sha,
+                expected_main_sha=main_sha,
+                recovery_only=recovery_only,
             )
-            if outcome == "moved":
+            if receipt is None:
+                if exhausted and eligible:
+                    await finish_action(uow, action, "failed")
+                    return
                 raise _BranchUpdateDeferred
-            if outcome not in {"updated", "conflict"}:
-                raise ValueError("invalid fixture branch update outcome")
-            await complete_branch_update(uow, action, update, conflict=outcome == "conflict")
+            branch = action.payload.get("branch")
+            if branch is None and pull is not None and pull.head_sha == head_sha:
+                branch = pull.branch
+            await complete_branch_update(uow, action, receipt, branch)
 
         await self.ledger.run("system", dispatch)
 

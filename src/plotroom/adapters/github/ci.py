@@ -62,6 +62,7 @@ async def fetch_checks(
         f"/commits/{quote(sha, safe='')}/check-runs",
         key="check_runs",
         params={"filter": "all"},
+        verify_total=True,
     ):
         fields: Row = {**_status(row), "head_sha": sha}
         if row.get("head_sha", sha) != sha:

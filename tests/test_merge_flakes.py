@@ -101,10 +101,17 @@ class FlakeFixture(Fixture):
             "created_at": NOW,
         }
         responses = {
-            f"/commits/{FIRST}/check-runs": {"check_runs": pr_checks},
-            f"/commits/{FAILED_MAIN}/check-runs": {"check_runs": [failed_main_check]},
+            f"/commits/{FIRST}/check-runs": {
+                "check_runs": pr_checks,
+                "total_count": len(pr_checks),
+            },
+            f"/commits/{FAILED_MAIN}/check-runs": {
+                "check_runs": [failed_main_check],
+                "total_count": 1,
+            },
             f"/commits/{MAIN_SHA}/check-runs": {
-                "check_runs": [check(105, "test", "success", MAIN_SHA, len(main_passed))]
+                "check_runs": [check(105, "test", "success", MAIN_SHA, len(main_passed))],
+                "total_count": 1,
             },
             "/actions/runs": {"workflow_runs": [main_run, older_run]},
             "/actions/runs/200/attempts/1/jobs": {"jobs": [self.job(2000, 104, "failure")]},

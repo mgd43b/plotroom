@@ -93,7 +93,7 @@ class Repository:
                 return httpx.Response(503)
             return httpx.Response(200, json=self.files[number])
         if path.startswith("/commits/") and path.endswith("/check-runs"):
-            return httpx.Response(200, json={"check_runs": []})
+            return httpx.Response(200, json={"check_runs": [], "total_count": 0})
         if path == "":
             return httpx.Response(200, json={"default_branch": "main"})
         if path == "/branches/main":

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import create_autospec
 
 import httpx
 import pytest
@@ -39,6 +40,7 @@ from plotroom.core.github_projection import (
 )
 from plotroom.core.ledger import Ledger
 from plotroom.core.merge_gate import GatePolicy
+from plotroom.ports.github_write import BranchUpdateReceipt, FixtureGitHubWrite
 
 REPO = "fixture/repo"
 API = "https://api.github.com"
@@ -222,10 +224,17 @@ class Fixture:
             "/issues/9/sub_issues": [],
             "/issues/9/dependencies/blocked_by": [],
             f"/commits/{FIRST}/check-runs": {
-                "check_runs": [check, rerun] if self.step > 0 else [check]
+                "check_runs": [check, rerun] if self.step > 0 else [check],
+                "total_count": 2 if self.step > 0 else 1,
             },
-            f"/commits/{SECOND}/check-runs": {"check_runs": [status(17, "lint", "success")]},
-            f"/commits/{MAIN_SHA}/check-runs": {"check_runs": [status(72, "image", "success")]},
+            f"/commits/{SECOND}/check-runs": {
+                "check_runs": [status(17, "lint", "success")],
+                "total_count": 1,
+            },
+            f"/commits/{MAIN_SHA}/check-runs": {
+                "check_runs": [status(72, "image", "success")],
+                "total_count": 1,
+            },
         }
         assert path in result, path
         if path == "/actions/runs":
@@ -417,7 +426,7 @@ def test_remote_work_item_config_requires_one_source(tmp_path: Path) -> None:
     assert config.github_issue_sources["demo"].store_config == tmp_path / "store.toml"
 
 
-async def test_details_publish_pinned_overlap_before_fixture_callback(tmp_path: Path) -> None:
+async def test_details_stage_and_dispatch_pinned_fixture_update(tmp_path: Path) -> None:
     provider = Fixture()
     provider.step = 1
     provider.resolve_last_thread = True
@@ -434,12 +443,12 @@ async def test_details_publish_pinned_overlap_before_fixture_callback(tmp_path: 
     )
     ledger.start()
     credential = LocalGitHubCredential("TOKEN", {"TOKEN": "fixture"}, None)
-    observations: list[str] = []
+    port = create_autospec(FixtureGitHubWrite, instance=True)
+    port.update_branch.return_value = BranchUpdateReceipt("updated", MAIN_SHA)
+    runtime = ProjectRuntime(
+        ledger, clock, tick_seconds=5, action_attempts=3, fixture_github_write=port
+    )
     comparisons: list[str] = []
-
-    async def observe(number: int) -> None:
-        verdict = await ledger.merge_gate("clerk", number)
-        observations.append(verdict.reasons[0].code)
 
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix(f"/repos/{REPO}")
@@ -461,7 +470,9 @@ async def test_details_publish_pinned_overlap_before_fixture_callback(tmp_path: 
             jobs = [status(70, "image", "success")]
             return httpx.Response(200, json={"total_count": 1, "jobs": jobs})
         if path == f"/commits/{FIRST}/check-runs":
-            return httpx.Response(200, json={"check_runs": [status(15, "lint", "success")]})
+            return httpx.Response(
+                200, json={"total_count": 1, "check_runs": [status(15, "lint", "success")]}
+            )
         if path.startswith("/compare/"):
             comparisons.append(path)
             left, _, right = path.removeprefix("/compare/").partition("...")
@@ -485,14 +496,29 @@ async def test_details_publish_pinned_overlap_before_fixture_callback(tmp_path: 
             GitHubReadClient(API, REPO),
             credential,
             ci_workflow="ci.yml",
-            on_merge_evidence=observe,
+            on_merge_evidence=runtime.stage_branch_update,
         )
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             await pulls.poll(client)
             await details.poll(client)
             await details.poll(client)
-        assert observations == ["stale_ci", "stale_ci"]
         assert len(comparisons) == 3
+        assert (await ledger.merge_gate("clerk", 4)).reasons[0].code == "stale_ci"
+        action_key = f"branch_update:4:{FIRST}"
+        assert (action := await ledger.pending_action()) is not None
+        assert action.key == action_key
+        port.update_branch.assert_not_awaited()
+        assert await runtime.run_one_action()
+        assert not await runtime.run_one_action()
+        port.update_branch.assert_awaited_once_with(
+            repository=REPO,
+            number=4,
+            action_key=action_key,
+            expected_head_sha=FIRST,
+            expected_main_sha=MAIN_SHA,
+            recovery_only=False,
+        )
+        port.merge.assert_not_awaited()
     finally:
         await ledger.stop()
         await store.close()

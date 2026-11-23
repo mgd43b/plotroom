@@ -15,6 +15,7 @@ from plotroom.core.merge_gate import (
 )
 from plotroom.core.merge_overlap import ALLOW_OVERLAP
 from plotroom.core.unit_of_work import UnitOfWork
+from plotroom.ports.github_write import BranchUpdateReceipt
 
 BRANCH_UPDATE_STAGED = "core.branch_update_staged"
 BRANCH_UPDATE_CONFLICT = "branch_update_conflict"
@@ -71,24 +72,26 @@ async def stage_branch_update(uow: UnitOfWork, update: BranchUpdate) -> bool:
     cause = await uow.append(NewEvent("core", BRANCH_UPDATE_STAGED, update.key, payload))
     if not cause.created:
         return False
-    await uow.enqueue_action(cause.event, BRANCH_UPDATE, payload, stable_key=update.key)
+    await uow.enqueue_action(
+        cause.event, BRANCH_UPDATE, {**payload, "branch": update.branch}, stable_key=update.key
+    )
     return True
 
 
 async def complete_branch_update(
-    uow: UnitOfWork, action: Action, update: BranchUpdate, *, conflict: bool
+    uow: UnitOfWork, action: Action, receipt: BranchUpdateReceipt, branch: str | None
 ) -> None:
     attempted = await record_attempt(uow, action)
-    if conflict:
-        lane = await uow.branch_lane(update.branch)
+    if receipt.outcome == "conflict":
+        lane = await uow.branch_lane(branch) if branch is not None else None
         role = f"worker:{lane.worker}" if lane is not None else "orchestrator"
         await uow.raise_item(
             BRANCH_UPDATE_CONFLICT,
-            update.key,
+            action.key,
             role,
             {
                 **action.payload,
-                "main_sha": update.main_sha,
+                "main_sha": receipt.main_sha,
                 "lane": lane.id if lane is not None else None,
             },
         )

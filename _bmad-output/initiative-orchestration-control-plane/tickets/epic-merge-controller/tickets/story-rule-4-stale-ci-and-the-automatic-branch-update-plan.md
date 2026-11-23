@@ -3,7 +3,7 @@ title: "Detect stale CI and stage a fixture branch update"
 type: feature
 ticket: 3
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: 331a79b360c289137c42e71ee5ccd2890cd89c72
 route: full
 route_source: auto
@@ -60,11 +60,17 @@ Given two overlapping-file observations for the same head, including across rest
 
 - 2026-11-23: Reuse the current projection schema and existing action queue. The detail poller can supply evidence to a runner with an explicitly injected fixture port. A queued action rechecks both refs, retires on a complete moved or closed PR, and keeps temporary refusals pending.
 - 2026-11-23: Label events seen at the first poll of a head establish its baseline. A waiver requires a new event observed against an existing baseline of that head and version, with attribution to a configured human login.
+- 2026-11-23: Keep the key pending when the PR closes or moves before any effect. Recover an already recorded outcome through the fixture port in lookup-only mode. A same-head reopen can update once it is eligible again.
 
 ## Review Triage Log
+
+- Medium, fixed. Compare provider repository names case-insensitively.
+- High, fixed. Recover a known fixture conflict after PR identity changes without applying another update. Keep the originally checked main SHA and routing information.
+- High, fixed. Preserve an unexecuted head key through closure or movement and resume after a matching eligible observation.
+- Medium, fixed. Two polls stage one real fixture action and dispatch one successful expected-head update through the project runtime.
 
 ## Verification
 
 - `uv run python -m pytest tests/test_branch_updates.py tests/test_github_details.py tests/test_actions.py` — scoped fixture contracts pass.
-- The deterministic transport verifies SHA-pinned comparisons, the 300-file cap, ref movement, temporary refusals, restart-safe conflict reporting, and progress of unrelated queued actions during a freeze.
+- All 27 scoped tests passed after those corrections. The deterministic transport verifies SHA-pinned comparisons, the 300-file cap, ref movement, temporary refusals, restart-safe conflict reporting, and progress of unrelated queued actions during a freeze.
 - Owner verification of real write acceptance remains pending.

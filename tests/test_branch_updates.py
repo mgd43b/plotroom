@@ -29,7 +29,7 @@ from plotroom.core.ledger import Ledger
 from plotroom.core.merge_gate import GatePolicy
 from plotroom.core.merge_overlap import PULL_COMPARISON, bind_overlap_labels
 from plotroom.core.unit_of_work import UnitOfWork
-from plotroom.ports.github_write import BranchUpdateOutcome, FixtureGitHubWrite
+from plotroom.ports.github_write import BranchUpdateReceipt, FixtureGitHubWrite
 
 REPO = "example/demo"
 API = "https://api.github.test"
@@ -47,7 +47,8 @@ class FixtureWrite(FixtureGitHubWrite):
         self.current_head = HEAD
         self.current_main = TIP
         self.calls: list[str] = []
-        self.effects: dict[str, BranchUpdateOutcome] = {}
+        self.lookups: list[str] = []
+        self.effects: dict[str, BranchUpdateReceipt] = {}
 
     async def update_branch(
         self,
@@ -56,15 +57,20 @@ class FixtureWrite(FixtureGitHubWrite):
         number: int,
         action_key: str,
         expected_head_sha: str,
-        expected_main_sha: str,
-    ) -> BranchUpdateOutcome:
+        expected_main_sha: str | None,
+        recovery_only: bool = False,
+    ) -> BranchUpdateReceipt | None:
         assert (repository, number) == (REPO, 7)
+        if recovery_only:
+            assert expected_main_sha is None
+            self.lookups.append(action_key)
+            return self.effects.get(action_key)
         self.calls.append(action_key)
         if action_key in self.effects:
             return self.effects[action_key]
         if (expected_head_sha, expected_main_sha) != (self.current_head, self.current_main):
-            return "moved"
-        self.effects[action_key] = "conflict"
+            return None
+        self.effects[action_key] = BranchUpdateReceipt("conflict", self.current_main)
         if self.lose_response:
             self.lose_response = False
             raise TimeoutError("response lost after fixture effect")
@@ -77,7 +83,12 @@ class FixtureWrite(FixtureGitHubWrite):
 
 
 async def setup(
-    tmp_path: Path, clock: FixedClock, port: FixtureWrite | None, *, lane: bool = True
+    tmp_path: Path,
+    clock: FixedClock,
+    port: FixtureWrite | None,
+    *,
+    lane: bool = True,
+    attempts: int = 3,
 ) -> tuple[SqliteStore, Ledger, ProjectRuntime]:
     store = SqliteStore("demo", tmp_path)
     await store.migrate()
@@ -88,7 +99,7 @@ async def setup(
     if lane:
         await ledger.run("system", lambda uow: uow.save_lane(Lane("lane1", "worker1", (), "work")))
     runtime = ProjectRuntime(
-        ledger, clock, tick_seconds=5, action_attempts=3, fixture_github_write=port
+        ledger, clock, tick_seconds=5, action_attempts=attempts, fixture_github_write=port
     )
     return store, ledger, runtime
 
@@ -97,6 +108,7 @@ async def observe(
     ledger: Ledger,
     *,
     head: str = HEAD,
+    branch: str = "work",
     main: str = TIP,
     version: int = 1,
     state: str = "open",
@@ -113,7 +125,7 @@ async def observe(
     async def write(uow: UnitOfWork) -> None:
         now = format_time(uow.now())
         pull = PullRequest(
-            REPO, 7, "work", head, "fork/demo" if fork else REPO, state, now, now, True, version
+            REPO, 7, branch, head, "fork/demo" if fork else REPO, state, now, now, True, version
         )
         await uow.save_pull_request(pull)
         await uow.save_fetch_cursor(REPO, PULL_REQUESTS, FetchCursor(now, now, 1))
@@ -205,9 +217,11 @@ async def observe(
     await ledger.run("system", write)
 
 
-async def test_same_head_attempt_and_conflict_survive_restart(tmp_path: Path) -> None:
+@pytest.mark.parametrize("after", ["unchanged", "moved", "closed"])
+async def test_conflict_survives_lost_response_and_restart(tmp_path: Path, after: str) -> None:
     clock, port = FixedClock(), FixtureWrite(lose_response=True)
-    store, ledger, runtime = await setup(tmp_path, clock, port)
+    attempts = 1 if after == "moved" else 3
+    store, ledger, runtime = await setup(tmp_path, clock, port, attempts=attempts)
     try:
         await observe(ledger)
         view = await ledger.merge_gate("clerk", 7)
@@ -222,23 +236,30 @@ async def test_same_head_attempt_and_conflict_survive_restart(tmp_path: Path) ->
         assert action.key == KEY
         assert action.attempts == 0
         assert await runtime.run_one_action()
-        assert port.effects == {KEY: "conflict"}
+        assert port.effects == {KEY: BranchUpdateReceipt("conflict", TIP)}
         assert not (await ledger.read_board("worker:worker1"))[1]
     finally:
         await ledger.stop()
         await store.close()
 
-    store, ledger, runtime = await setup(tmp_path, clock, port, lane=False)
+    store, ledger, runtime = await setup(tmp_path, clock, port, lane=False, attempts=attempts)
     try:
-        await observe(ledger)
-        assert not await runtime.stage_branch_update(7)
+        if after == "moved":
+            await observe(ledger, head=NEXT, branch="other", main=NEXT, version=2)
+        elif after == "closed":
+            await observe(ledger, state="closed", main=NEXT, version=2)
+        else:
+            await observe(ledger)
+            assert not await runtime.stage_branch_update(7)
         assert await runtime.run_one_action()
         assert not await runtime.run_one_action()
-        assert port.calls == [KEY, KEY]
-        assert port.effects == {KEY: "conflict"}
+        assert port.calls == ([KEY, KEY] if after == "unchanged" else [KEY])
+        assert port.lookups == ([] if after == "unchanged" else [KEY])
+        assert port.effects == {KEY: BranchUpdateReceipt("conflict", TIP)}
         items = (await ledger.read_board("worker:worker1"))[1]
         assert [(item.kind, item.subject_ref) for item in items] == [(BRANCH_UPDATE_CONFLICT, KEY)]
         assert items[0].context["lane"] == "lane1"
+        assert items[0].context["main_sha"] == TIP
         events = await ledger.events_after(0)
         assert [event.upstream_id for event in events if event.kind == BRANCH_UPDATE_STAGED] == [
             KEY
@@ -299,9 +320,7 @@ async def test_live_runtime_skips_fixture_queue_and_frozen_action_resumes(tmp_pa
 
 
 @pytest.mark.parametrize("movement", ["base", "head", "closed"])
-async def test_defer_until_current_evidence_or_retire_moved_head(
-    tmp_path: Path, movement: str
-) -> None:
+async def test_defer_until_refs_return_to_eligibility(tmp_path: Path, movement: str) -> None:
     clock, port = FixedClock(), FixtureWrite()
     store, ledger, runtime = await setup(tmp_path, clock, port, lane=False)
     try:
@@ -329,10 +348,19 @@ async def test_defer_until_current_evidence_or_retire_moved_head(
             await observe(ledger, head=NEXT, main=NEXT, version=2)
         else:
             await observe(ledger, state="closed", version=2)
+        if movement != "base":
+            assert not await runtime.run_one_action()
+            assert (pending := await ledger.pending_action()) is not None
+            assert pending.key == KEY
+            assert port.calls == [KEY]
+            assert port.lookups == [KEY]
+            assert not port.effects
+            await observe(ledger, main=NEXT, version=3)
+            assert not await runtime.stage_branch_update(7)
         assert await runtime.run_one_action()
         assert await ledger.pending_action() is None
-        assert port.calls == ([KEY, KEY] if movement == "base" else [KEY])
-        assert port.effects == ({KEY: "conflict"} if movement == "base" else {})
+        assert port.calls == [KEY, KEY]
+        assert port.effects == {KEY: BranchUpdateReceipt("conflict", NEXT)}
     finally:
         await ledger.stop()
         await store.close()
@@ -408,12 +436,12 @@ async def test_compare_uses_full_immutable_shas_and_refuses_incomplete_evidence(
                     "updated_at": now,
                     "head": {
                         "sha": NEXT if problem == "pr_moved" else HEAD,
-                        "repo": {"full_name": REPO},
+                        "repo": {"full_name": "Example/DEMO"},
                         "ref": "work",
                     },
                     "base": {
                         "ref": "next" if problem == "retarget" else "main",
-                        "repo": {"full_name": REPO},
+                        "repo": {"full_name": "EXAMPLE/Demo"},
                     },
                 },
             )

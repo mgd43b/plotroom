@@ -5,10 +5,14 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fakes import FixedClock
+from plotroom.adapters.github import GitHubUnavailable
+from plotroom.adapters.github.ci import fetch_checks
+from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.store_sqlite import SqliteStore, github_sql
 from plotroom.app.config import ConfigError, load_config
 from plotroom.core import merge_gate
@@ -145,6 +149,19 @@ def test_clerk_rule_1(
 def test_projection_fails_closed(snapshot: GateSnapshot, code: str) -> None:
     result = evaluate_gate(snapshot, GatePolicy(1), NOW)
     assert result.reasons[0].code == code
+
+
+async def test_provider_check_count_requires_a_complete_list() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/check-runs")
+        return httpx.Response(
+            200, json={"total_count": 2, "check_runs": [check(1, "test", "success").fields]}
+        )
+
+    api = GitHubReadClient("https://api.github.com", REPOSITORY)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(GitHubUnavailable, match="incomplete result count"):
+            await fetch_checks(api, client, "fixture", HEAD)
 
 
 def test_fresh_incremental_poll_can_cover_an_unchanged_pull() -> None:

@@ -61,6 +61,7 @@ Given fixture check histories, when a clerk or orchestrator queries a PR, then p
 - Medium, fixed. A detail-poll rate limit marks GitHub unavailable immediately while preserving previously observed check facts.
 - Medium, fixed. The result includes the PR row timestamp in the watermark even when a more recent polling cursor exists.
 - Medium, fixed. Both supported protocols and transports now exercise a configured pending-check verdict with a check-derived watermark.
+- High, fixed. The Check Runs reader validates provider totals, so a missing page cannot leave a partial projection eligible.
 
 ## Verification
 

@@ -64,10 +64,10 @@ async def fetch_pull_comparison(
         current["state"] != "open"
         or head["sha"] != pr.head_sha
         or head["ref"] != pr.branch
-        or obj(head["repo"])["full_name"] != pr.head_repository
+        or string(obj(head["repo"])["full_name"]).lower() != pr.head_repository.lower()
         or format_time(datetime.fromisoformat(string(current["updated_at"]))) != pr.updated_at
         or base["ref"] != main_branch
-        or obj(base["repo"])["full_name"] != api.repository
+        or string(obj(base["repo"])["full_name"]).lower() != api.repository.lower()
         or obj(branch["commit"])["sha"] != main_tip
     ):
         return GitHubResource((), complete=False)
