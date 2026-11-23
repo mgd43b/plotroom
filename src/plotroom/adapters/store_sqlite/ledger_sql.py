@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from plotroom.adapters.store_sqlite import (
     actions_sql,
     asks_sql,
+    backfill_sql,
     budgets_sql,
     checklists_sql,
     claims_sql,
@@ -36,7 +37,14 @@ from plotroom.core.github_projection import GitHubResource
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.core.search_sources import event_record
-from plotroom.ports.search import EmbeddedMessage, EmbeddingModel, SearchRecord
+from plotroom.ports.search import (
+    BackfillPage,
+    BackfillPosition,
+    BackfillSource,
+    EmbeddedMessage,
+    EmbeddingModel,
+    SearchRecord,
+)
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
@@ -247,6 +255,18 @@ class SqliteTransaction:
         if connection.engine is not engine:
             raise RuntimeError("cannot index a record through another project's transaction")
         await search_sql.index_record(connection, record, only_if_absent=only_if_absent)
+
+    async def commit_search_backfill(
+        self,
+        engine: AsyncEngine,
+        source: BackfillSource,
+        expected: BackfillPosition,
+        page: BackfillPage,
+    ) -> bool:
+        connection = self._live()
+        if connection.engine is not engine:
+            raise RuntimeError("cannot backfill search through another project's transaction")
+        return await backfill_sql.commit(connection, source, expected, page)
 
     async def commit_embedding_batch(
         self,

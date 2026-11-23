@@ -21,6 +21,7 @@ from sqlalchemy.pool import ConnectionPoolEntry
 
 from plotroom.adapters.store_sqlite import (
     asks_sql,
+    backfill_sql,
     budgets_sql,
     checklists_sql,
     embedding_sql,
@@ -59,6 +60,9 @@ from plotroom.core.search import pack_vector
 from plotroom.core.search_sources import EVENT_KINDS
 from plotroom.ports.search import (
     MAX_SEARCH_LIMIT,
+    BackfillPage,
+    BackfillPosition,
+    BackfillSource,
     EmbeddedMessage,
     EmbeddingError,
     EmbeddingModel,
@@ -272,6 +276,29 @@ class SqliteStore:
         if not isinstance(tx, SqliteTransaction):
             raise TypeError("the SQLite index requires a SQLite writer transaction")
         await tx.index_record(self._engine, record, only_if_absent=only_if_absent)
+
+    async def backfill_position(self, source: BackfillSource) -> BackfillPosition:
+        async with self._engine.connect() as connection:
+            return await backfill_sql.position(connection, source)
+
+    async def backfill_page(
+        self, source: BackfillSource, after: tuple[str | int, ...], limit: int
+    ) -> BackfillPage:
+        if limit < 1:
+            raise ValueError("search backfill requires a positive page size")
+        async with self._engine.connect() as connection:
+            return await backfill_sql.read_page(connection, source, after, limit)
+
+    async def commit_backfill(
+        self,
+        tx: Transaction,
+        source: BackfillSource,
+        expected: BackfillPosition,
+        page: BackfillPage,
+    ) -> bool:
+        if not isinstance(tx, SqliteTransaction):
+            raise TypeError("search backfill requires a SQLite writer transaction")
+        return await tx.commit_search_backfill(self._engine, source, expected, page)
 
     async def query(
         self, project: str, text: str, kinds: tuple[str, ...] | None, limit: int

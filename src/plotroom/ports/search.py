@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 from plotroom.core.events import Event
@@ -56,6 +57,45 @@ class Search(Protocol):
         self, project: str, text: str, kinds: tuple[str, ...] | None, limit: int
     ) -> SearchPage:
         """Find a literal phrase and count all matches in the selected project and kinds."""
+        ...
+
+
+class BackfillSource(StrEnum):
+    EVENTS = "events"
+    DECISIONS = "decisions"
+    ASKS = "asks"
+    COMMENTS = "comments"
+    PULLS = "pulls"
+
+
+# An empty position starts a source. None marks it complete.
+type BackfillPosition = tuple[str | int, ...] | None
+
+
+@dataclass(frozen=True)
+class BackfillPage:
+    through: BackfillPosition
+    records: tuple[SearchRecord, ...] = ()
+
+
+class SearchBackfill(Protocol):
+    @property
+    def project_id(self) -> str: ...
+
+    async def backfill_position(self, source: BackfillSource) -> BackfillPosition: ...
+
+    async def backfill_page(
+        self, source: BackfillSource, after: tuple[str | int, ...], limit: int
+    ) -> BackfillPage: ...
+
+    async def commit_backfill(
+        self,
+        tx: Transaction,
+        source: BackfillSource,
+        expected: BackfillPosition,
+        page: BackfillPage,
+    ) -> bool:
+        """Insert missing records and advance the checkpoint from the expected position."""
         ...
 
 

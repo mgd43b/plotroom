@@ -61,7 +61,7 @@ from plotroom.core.ask_checks import DEFAULT_ASK_STALE_DAYS
 from plotroom.core.catalog import build_catalog
 from plotroom.core.ledger import Ledger
 from plotroom.core.routing import seed_routes
-from plotroom.core.search import follow_message_embeddings
+from plotroom.core.search import backfill_search, follow_message_embeddings
 from plotroom.ports import Clock
 from plotroom.ports.github_write import FixtureGitHubMerge
 from plotroom.ports.search import EmbeddingIndex
@@ -443,6 +443,7 @@ class Daemon:
                 else None
             )
             inputs = [switchboard.run] if switchboard is not None else []
+            inputs.append(partial(backfill_search, project.ledger, project.store))
             if (embedder := self._config.embedders.get(project_id)) is not None:
                 index = project.store.embedding_index(embedder.model)
                 inputs.append(partial(_run_embeddings, project.ledger, index, embedder))

@@ -25,3 +25,16 @@ def upgrade() -> None:
         FROM message_fts JOIN events ON events.seq = message_fts.rowid
         WHERE events.kind = 'switchboard.message'
     """)
+    op.execute("""
+        CREATE INDEX search_backfill_comments ON github_resources (repository, scope)
+        WHERE resource = 'issue_comments'
+    """)
+    op.execute("""
+        CREATE INDEX search_backfill_pull_events ON events (
+            json_extract(fields, '$.repository'), json_extract(fields, '$.number'), seq
+        )
+        WHERE source = 'github' AND kind IN (
+            'github.pr_opened', 'github.pr_merged', 'github.pr_closed',
+            'github.pr_reopened', 'github.pr_head_changed'
+        )
+    """)

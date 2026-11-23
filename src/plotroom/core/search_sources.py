@@ -62,16 +62,22 @@ def pull_body_record(repository: str, number: int, body: str) -> SearchRecord:
     return SearchRecord(PR_BODY_KIND, f"{repository}#{number}", body)
 
 
-def pull_text_record(pull: PullRequest, resource: GitHubResource) -> SearchRecord | None:
+def pull_text_record(
+    pull: PullRequest, resource: GitHubResource, *, updated_since: str | None = None
+) -> SearchRecord | None:
     attributes = resource.attributes
     body = attributes.get("body")
+    updated_at = attributes.get("pull_updated_at")
     if (
         resource.complete
         and isinstance(body, str)
+        and isinstance(updated_at, str)
         and attributes.get("head_sha") == pull.head_sha
         and type(attributes.get("pull_version")) is int
         and attributes["pull_version"] == pull.version
-        and attributes.get("pull_updated_at") == pull.updated_at
+        and (updated_since if updated_since is not None else pull.updated_at)
+        <= updated_at
+        <= pull.updated_at
     ):
         return pull_body_record(pull.repository, pull.number, body)
     return None

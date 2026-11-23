@@ -1,4 +1,4 @@
-"""Follow committed ledger sequences and embed eligible search records off the writer."""
+"""Backfill retained search records and follow committed messages for embedding."""
 
 import asyncio
 import logging
@@ -9,31 +9,100 @@ from functools import partial
 
 from plotroom.core.events import Event
 from plotroom.core.ledger import Ledger
+from plotroom.core.search_sources import EVENT_KINDS, event_record
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.ports.search import (
     MESSAGE_KIND,
+    BackfillPage,
+    BackfillPosition,
+    BackfillSource,
     EmbeddedMessage,
     Embedder,
     EmbeddingError,
     EmbeddingIndex,
+    SearchBackfill,
 )
 
 log = logging.getLogger("plotroom.search")
 EMBEDDING_BATCH_SIZE = 32
+BACKFILL_BATCH_SIZE = 32
 
 
 async def committed_batches(
-    ledger: Ledger, read_cursor: Callable[[], Awaitable[int]], *, limit: int
+    ledger: Ledger,
+    read_cursor: Callable[[], Awaitable[int | None]],
+    *,
+    limit: int,
+    through: int | None = None,
 ) -> AsyncIterator[tuple[int, list[Event]]]:
-    """Yield batches above the caller's durable checkpoint until canceled."""
+    """Follow commits, or yield one final empty page at a finite historical boundary."""
     while True:
         committed = ledger.commit_signal
         after = await read_cursor()
+        if after is None:
+            return
         events = await ledger.events_after(after, limit)
+        if through is not None:
+            events = [event for event in events if event.seq <= through]
         if events:
             yield after, events
+        elif through is not None:
+            yield after, []
+            return
         else:
             await committed.wait()
+
+
+async def backfill_search(
+    ledger: Ledger, index: SearchBackfill, *, limit: int = BACKFILL_BATCH_SIZE
+) -> None:
+    """Backfill one project's retained sources in small, independently committed pages."""
+    if index.project_id != ledger.project_id:
+        raise ValueError("search backfill must belong to the current project")
+    if limit < 1:
+        raise ValueError("search backfill requires a positive page size")
+
+    async def commit(
+        source: BackfillSource, expected: BackfillPosition, page: BackfillPage
+    ) -> None:
+        await ledger.run(
+            "system",
+            partial(
+                UnitOfWork.save_search_backfill,
+                index=index,
+                source=source,
+                expected=expected,
+                page=page,
+            ),
+        )
+
+    async def event_cursor() -> int | None:
+        position = await index.backfill_position(BackfillSource.EVENTS)
+        if position is None:
+            return None
+        return int(position[0]) if position else 0
+
+    through = await ledger.head_seq()
+    while await event_cursor() is not None:
+        async for after, events in committed_batches(
+            ledger, event_cursor, limit=limit, through=through
+        ):
+            position = (after,) if after else ()
+            page = BackfillPage(
+                (events[-1].seq,) if events else None,
+                tuple(event_record(event) for event in events if event.kind in EVENT_KINDS),
+            )
+            await commit(BackfillSource.EVENTS, position, page)
+
+    for source in (
+        BackfillSource.DECISIONS,
+        BackfillSource.ASKS,
+        BackfillSource.COMMENTS,
+        BackfillSource.PULLS,
+    ):
+        while (position := await index.backfill_position(source)) is not None:
+            page = await index.backfill_page(source, position, limit)
+            await commit(source, position, page)
 
 
 def pack_vector(vector: tuple[float, ...], dimension: int) -> bytes:

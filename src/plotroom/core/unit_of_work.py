@@ -53,7 +53,16 @@ from plotroom.core.search_sources import (
 )
 from plotroom.core.trigger_actions import SEND
 from plotroom.ports.clock import Clock
-from plotroom.ports.search import EmbeddedMessage, EmbeddingIndex, Search, SearchRecord
+from plotroom.ports.search import (
+    BackfillPage,
+    BackfillPosition,
+    BackfillSource,
+    EmbeddedMessage,
+    EmbeddingIndex,
+    Search,
+    SearchBackfill,
+    SearchRecord,
+)
 from plotroom.ports.store import Transaction
 from plotroom.ports.work_items import WorkItem
 
@@ -150,6 +159,17 @@ class UnitOfWork:
         if self._role != "system":
             raise LedgerError("forbidden", "only core may update the embedding index")
         return await index.commit(self._tx, expected, through, records)
+
+    async def save_search_backfill(
+        self,
+        index: SearchBackfill,
+        source: BackfillSource,
+        expected: BackfillPosition,
+        page: BackfillPage,
+    ) -> bool:
+        if self._role != "system":
+            raise LedgerError("forbidden", "only core may update search backfill")
+        return await index.commit_backfill(self._tx, source, expected, page)
 
     async def ready_work_items(self) -> tuple[WorkItem, ...]:
         return await self._tx.ready_work_items()
