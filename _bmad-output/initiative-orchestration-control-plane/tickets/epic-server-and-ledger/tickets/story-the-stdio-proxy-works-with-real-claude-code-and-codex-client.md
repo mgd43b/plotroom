@@ -10,6 +10,7 @@ risk: high
 tracker_id: "14"
 remote: "https://github.com/mgd43b/plotroom/issues/14"
 tracker_status: backlog
+status: built
 ---
 
 # The stdio proxy works with real Claude Code and Codex clients
@@ -29,3 +30,4 @@ Verify: A real Claude Code session and a real Codex session each call snapshot()
 ## Notes
 
 - Check beyond its criteria: the proxy holds two concurrent calls, one of them a long wait, without blocking the other.
+- Built: https://github.com/mgd43b/plotroom/pull/51
