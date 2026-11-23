@@ -44,8 +44,14 @@ class _MemoryTransaction:
     def __init__(self, events: list[StoredEvent], seq: int) -> None:
         self.events = events
         self.seq = seq
+        self.expired = False
+
+    def _live(self) -> None:
+        if self.expired:
+            raise RuntimeError("this transaction has ended; a retained handle cannot write")
 
     async def find_event(self, source: str, kind: str, upstream_id: str) -> StoredEvent | None:
+        self._live()
         await asyncio.sleep(0)
         for event in self.events:
             if (event.source, event.kind, event.upstream_id) == (source, kind, upstream_id):
@@ -53,6 +59,7 @@ class _MemoryTransaction:
         return None
 
     async def insert_event(self, event: StoredEvent) -> None:
+        self._live()
         await asyncio.sleep(0)
         if any(
             (e.source, e.kind, e.upstream_id) == (event.source, event.kind, event.upstream_id)
@@ -62,6 +69,7 @@ class _MemoryTransaction:
         self.events.append(copy.deepcopy(event))
 
     async def allocate_seq(self) -> int:
+        self._live()
         await asyncio.sleep(0)
         self.seq += 1
         return self.seq
@@ -101,6 +109,7 @@ class MemoryStore:
             self._events, self._seq = tx.events, tx.seq
             self.commits += 1
         finally:
+            tx.expired = True
             self._open = False
 
     async def head_seq(self) -> int:

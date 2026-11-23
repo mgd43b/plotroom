@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -226,3 +227,27 @@ async def test_a_retry_returns_the_first_result_even_if_its_args_no_longer_valid
     assert raised.value.code == "invalid"
     assert store.dump() == before
     assert fixture.calls == ["n1"]
+
+
+async def test_a_caller_mutating_its_args_while_the_handler_runs_changes_nothing(
+    parts: Parts,
+) -> None:
+    ledger, _, fixture, _ = parts
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
+        started.set()
+        await release.wait()
+        return {"saw": args["key"]}
+
+    fixture.catalog.commands.register(Command("slow", (FieldSpec("key", "str"),), slow))
+    args: dict[str, Any] = {"key": "original"}
+    running = asyncio.create_task(ledger.execute("orchestrator", "slow", "req-1", args))
+    await started.wait()
+    args["key"] = "changed"  # the caller reuses its dict while the handler awaits
+    args["extra"] = 1
+    release.set()
+    done = await running
+    assert done.result == {"saw": "original"}
+    recorded = (await ledger.events_after(0))[-1]
+    assert recorded.fields["args"] == {"key": "original"}

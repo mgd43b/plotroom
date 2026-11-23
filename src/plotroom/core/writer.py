@@ -54,6 +54,8 @@ class ProjectWriter:
 
         Canceling the caller does not cancel the draining: the task is awaited shielded.
         """
+        if _WORKING_FOR.get() is self:
+            raise RuntimeError("re-entrant stop: the writer cannot be stopped from inside its work")
         queue, task = self._queue, self._task
         if task is None or queue is None:
             return
@@ -72,7 +74,8 @@ class ProjectWriter:
         ``LedgerError("unavailable")`` when the writer is not running. A caller canceled while
         queued is skipped; one canceled while its transaction runs does not interrupt it.
         ``RuntimeError`` when called from inside work running on this writer: it would wait
-        behind itself.
+        behind itself. The backlog is not capped: inputs are bounded by the transport's request
+        size, and a cap with backpressure belongs with the transport limits.
         """
         if _WORKING_FOR.get() is self:
             raise RuntimeError("re-entrant submit: use the UnitOfWork inside work")
@@ -102,6 +105,21 @@ class ProjectWriter:
                 except Exception as exc:
                     if not future.done():
                         future.set_exception(exc)
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        # the writer itself was canceled: fail this input and end
+                        if not future.done():
+                            future.set_exception(_unavailable())
+                        raise
+                    # the work awaited something canceled elsewhere: the transaction has rolled
+                    # back, this input fails, and the writer keeps serving the queue
+                    if not future.done():
+                        future.set_exception(
+                            LedgerError(
+                                "unavailable", "the input was canceled; nothing was written"
+                            )
+                        )
                 except BaseException:
                     if not future.done():
                         future.set_exception(_unavailable())

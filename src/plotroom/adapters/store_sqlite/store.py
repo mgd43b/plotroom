@@ -110,8 +110,12 @@ class SqliteStore:
             except BaseException:
                 await self._discard_writer()
                 raise
+            handle = SqliteTransaction(connection)
             try:
-                yield SqliteTransaction(connection)
+                try:
+                    yield handle
+                finally:
+                    handle.expire()  # a retained handle must not reach the next input's transaction
             except BaseException:
                 try:
                     await _uninterrupted(transaction.rollback())

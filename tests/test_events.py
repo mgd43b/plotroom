@@ -317,3 +317,9 @@ async def test_a_duplicate_is_returned_whatever_its_fields_and_a_new_bad_event_i
     finally:
         await ledger.stop()
         await backend.store.close()
+
+
+async def test_an_integer_too_large_for_a_float_is_still_a_number(parts: Parts) -> None:
+    ledger, _, _ = parts
+    huge = NewEvent("claude", "claude.turn_end", "huge", {"turns": 1, "ratio": 10**400})
+    assert (await ledger.append("orchestrator", huge)).created is True  # not an OverflowError

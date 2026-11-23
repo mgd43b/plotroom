@@ -91,6 +91,9 @@ class Ledger:
             raise LedgerError("invalid", f"{command}: request_id must be a non-empty string")
         if not isinstance(args, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise LedgerError("invalid", f"{command}: args must be an object")
+        # One snapshot is validated, copied to the handler and recorded in the receipt, so a caller
+        # mutating its dict while the handler runs changes none of the three.
+        snapshot = copy.deepcopy(args)
         kind = command_kind(command)
         upstream_id = f"{role}:{request_id}"
 
@@ -101,8 +104,8 @@ class Ledger:
             recorded = await uow.find_event("core", kind, upstream_id)
             if recorded is not None:
                 return CommandResult(recorded.fields["result"], True)
-            validate_fields(registered.args, args, command)  # a retry never gets here
-            result = await registered.handler(uow, copy.deepcopy(args))
+            validate_fields(registered.args, snapshot, command)  # a retry never gets here
+            result = await registered.handler(uow, copy.deepcopy(snapshot))
             if not isinstance(result, dict) or not is_json(result):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise TypeError(f"command {command!r} must return a JSON object")
             await uow.append(
@@ -113,7 +116,7 @@ class Ledger:
                     fields={
                         "role": role,
                         "request_id": request_id,
-                        "args": copy.deepcopy(args),
+                        "args": copy.deepcopy(snapshot),
                         "result": result,
                     },
                 )

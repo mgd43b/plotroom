@@ -115,7 +115,8 @@ def _has_type(value: Any, expected: str) -> bool:
     if expected == "int":
         return isinstance(value, int)
     if expected == "number":
-        return isinstance(value, (int, float)) and math.isfinite(value)
+        # an int of any size is a number; isfinite() would overflow converting it to a float
+        return isinstance(value, int) or (isinstance(value, float) and math.isfinite(value))
     if expected == "object":
         return isinstance(value, dict)
     if expected == "array":

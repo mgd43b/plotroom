@@ -301,3 +301,47 @@ async def test_events_after_treats_a_limit_below_one_as_empty(ledger: Ledger) ->
     assert [e.seq for e in await ledger.events_after(0, 2)] == [1, 2]
     for limit in (1, 0, -1, -5):
         assert len(await ledger.events_after(0, limit)) == max(limit, 0)
+
+
+async def test_a_retained_unit_of_work_cannot_write_after_its_transaction(ledger: Ledger) -> None:
+    async def keep(uow: UnitOfWork) -> UnitOfWork:
+        return uow
+
+    kept = await ledger.run("system", keep)
+    with pytest.raises(RuntimeError, match="transaction has ended"):
+        await kept.append(note("late"))
+    with pytest.raises(RuntimeError, match="transaction has ended"):
+        await kept.allocate_seq()
+    assert await ledger.head_seq() == 0
+    assert (await ledger.append("system", note("next"))).event.seq == 1
+
+
+async def test_work_that_stops_its_own_writer_fails_fast_and_the_writer_serves_on(
+    ledger: Ledger,
+) -> None:
+    async def stops(uow: UnitOfWork) -> None:
+        await uow.append(note("doomed"))
+        await ledger.stop()  # would wait for itself
+
+    with pytest.raises(RuntimeError, match="re-entrant stop"):
+        await asyncio.wait_for(ledger.run("system", stops), timeout=10)
+    assert await ledger.head_seq() == 0
+    assert (await ledger.append("system", note("next"))).event.seq == 1
+
+
+async def test_work_that_awaits_a_canceled_child_fails_alone_and_the_writer_serves_on(
+    ledger: Ledger,
+) -> None:
+    async def awaits_canceled_child(uow: UnitOfWork) -> None:
+        await uow.append(note("doomed"))
+        child = asyncio.ensure_future(asyncio.sleep(3600))
+        child.cancel()
+        await child  # raises CancelledError although this task was not canceled
+
+    queued = asyncio.create_task(ledger.append("system", note("queued")))
+    with pytest.raises(LedgerError) as raised:
+        await ledger.run("system", awaits_canceled_child)
+    assert raised.value.code == "unavailable"
+    assert (await queued).event.seq == 1  # the doomed append rolled back, the queue was served
+    assert [e.upstream_id for e in await ledger.events_after(0)] == ["queued"]
+    assert (await ledger.append("system", note("after"))).event.seq == 2

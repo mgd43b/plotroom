@@ -45,16 +45,26 @@ class SqliteTransaction:
 
     def __init__(self, connection: AsyncConnection) -> None:
         self._connection = connection
+        self._expired = False
+
+    def expire(self) -> None:
+        """End the handle's life with its transaction: the connection serves the next input."""
+        self._expired = True
+
+    def _live(self) -> AsyncConnection:
+        if self._expired:
+            raise RuntimeError("this transaction has ended; a retained handle cannot write")
+        return self._connection
 
     async def find_event(self, source: str, kind: str, upstream_id: str) -> Event | None:
-        result = await self._connection.execute(
+        result = await self._live().execute(
             FIND_EVENT, {"source": source, "kind": kind, "uid": upstream_id}
         )
         row = result.first()
         return None if row is None else event_from_row(row)
 
     async def insert_event(self, event: Event) -> None:
-        await self._connection.execute(
+        await self._live().execute(
             INSERT_EVENT,
             {
                 "seq": event.seq,
@@ -70,5 +80,5 @@ class SqliteTransaction:
         )
 
     async def allocate_seq(self) -> int:
-        result = await self._connection.execute(ALLOCATE_SEQ)
+        result = await self._live().execute(ALLOCATE_SEQ)
         return int(result.scalar_one())
