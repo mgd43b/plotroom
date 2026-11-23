@@ -9,7 +9,7 @@ hitl: false
 risk: low
 tracker_id: "97"
 remote: "https://github.com/mgd43b/plotroom/issues/97"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Checklist steps, the archive refusal and the archive item
