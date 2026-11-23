@@ -99,6 +99,7 @@ async def start_lane(
     workers: frozenset[str],
     imported_channel: str | None = None,
     imported_trigger_id: str | None = None,
+    refresh_idle: bool = True,
 ) -> dict[str, Any]:
     lane_id: str = args["lane"]
     worker: str = args["worker"]
@@ -130,7 +131,8 @@ async def start_lane(
     )
     await uow.save_lane(lane)
     uow.pull_overlaps_changed()
-    await refresh_idle_workers(uow, workers)
+    if refresh_idle:
+        await refresh_idle_workers(uow, workers)
     return lane.render()
 
 

@@ -53,8 +53,14 @@ An orchestrator can bring supported clerk ledger rows into the same local import
 
 - Follow-up review verified first-source reservation for bind and exact outcomes.
 
+- Medium, opening Kodus review. The importer discarded the State cell. It now preserves that text and shows an explicit state-only hold using the same per-PR advisory as the skip list.
+
+- False, opening Kodus review. A trigger-linked lane gets its current PR and head from the GitHub projection on board reads. A head-movement assertion now covers this path without introducing another source of PR identity.
+- Medium, opening Kodus review. Starting lanes repeated the idle-worker scan in a single batch. The importer refreshes idle items once after creating lanes.
+
 ## Verification
 
 - `uv run --locked python -m pytest -q tests/test_clerk_import.py tests/test_migrations.py`
 - Check the populated prior revision upgrades to one head and preserves prior records.
 - On the reviewed opening tree, 841 local Python 3.14 tests passed. The 40 affected tests passed on Python 3.14 and 3.15.
+- After review changes, 47 affected tests passed on both Python versions. The hold-state round trip preserves existing lane IDs and explicit skips take precedence.

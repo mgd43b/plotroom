@@ -13,6 +13,7 @@ from plotroom.core.lanes import checklist_import, start_lane
 from plotroom.core.next_items import ItemKind
 from plotroom.core.trigger_actions import NOTIFY, SEND, DeliveryRoute
 from plotroom.core.triggers import LeafRegistry, create_trigger
+from plotroom.core.work_items import refresh_idle_workers
 
 if TYPE_CHECKING:
     from plotroom.core.unit_of_work import UnitOfWork
@@ -26,6 +27,10 @@ SKIPPED_PULL = ItemKind("clerk_import_skipped_pull", 20, True, ("Review the lega
 CLERK_IMPORT_ITEMS = (BIND_TRIGGER, REVIEW_PULL, SKIPPED_PULL)
 
 _PLACEHOLDER_NOTE = "Imported fire-time fields such as [sha8] and [N] are literal text."
+_HOLD_STATE = re.compile(
+    r"(?:on[ \t]+hold|hold(?:ing)?|held)(?:$|[ \t]+(?:for|by|until|pending)\b|[ \t]*[:(])",
+    re.IGNORECASE,
+)
 _TRIGGER_REF = re.compile(r"(?:Trigger[ \t]+)?(?:(T[0-9]+)|`(T[0-9]+)`)", re.IGNORECASE)
 
 
@@ -43,6 +48,7 @@ class PullImportRow(TypedDict):
     pr: int
     worker: str
     channel: str
+    state: str
     after_merge: str
 
 
@@ -64,6 +70,7 @@ _PULL_FIELDS = (
     FieldSpec("pr", "int"),
     FieldSpec("worker", "str"),
     FieldSpec("channel", "str"),
+    FieldSpec("state", "str"),
     FieldSpec("after_merge", "str"),
 )
 _SKIP_FIELDS = (FieldSpec("pr", "int"), FieldSpec("reason", "str"))
@@ -217,8 +224,10 @@ async def _import_trigger(
 
 
 async def _review_pull(uow: UnitOfWork, row: PullImportRow, reason: str) -> tuple[str, str]:
+    context = dict(row)
+    context.pop("state")
     item = await uow.raise_item(
-        REVIEW_PULL.name, str(row["pr"]), "orchestrator", {**row, "reason": reason}
+        REVIEW_PULL.name, str(row["pr"]), "orchestrator", {**context, "reason": reason}
     )
     return "items", item.id
 
@@ -262,6 +271,7 @@ async def _import_pull(
         workers=workers,
         imported_channel=row["channel"],
         imported_trigger_id=trigger.id if trigger is not None else None,
+        refresh_idle=False,
     )
     if trigger is None and after_merge.strip():
         await checklist_import(
@@ -310,7 +320,14 @@ async def clerk_import(
     )
     pulls = _validated_rows(args["pulls"], _PULL_FIELDS, "pr", "clerk PR")
     skips = _validated_rows(args["skips"], _SKIP_FIELDS, "pr", "clerk skip")
+    explicit_holds = {row["pr"] for row in skips}
+    skips.extend(
+        {"pr": row["pr"], "reason": row["state"]}
+        for row in pulls
+        if row["pr"] not in explicit_holds and _HOLD_STATE.match(row["state"].strip())
+    )
     result: dict[str, dict[str, str]] = {"triggers": {}, "lanes": {}, "items": {}}
+    added_lane = False
     for kind, rows, key in (
         ("trigger", triggers, "label"),
         ("pull", pulls, "pr"),
@@ -318,7 +335,9 @@ async def clerk_import(
     ):
         for row in rows:
             source_id = str(row[key])
-            digest = _digest(json.dumps(row, sort_keys=True, separators=(",", ":")))
+            # State changes affect hold advisories independently of lane identity.
+            stable = {name: value for name, value in row.items() if name != "state"}
+            digest = _digest(json.dumps(stable, sort_keys=True, separators=(",", ":")))
             receipt_id = f"{kind}:{digest}"
             receipt = await uow.find_event("core", CLERK_IMPORT_ENTRY, receipt_id)
             if receipt is not None:
@@ -337,6 +356,7 @@ async def clerk_import(
                     category, identifier = await _import_pull(
                         uow, cast(PullImportRow, row), repository=repository, workers=workers
                     )
+                    added_lane = added_lane or category == "lanes"
                 else:
                     category, identifier = await _import_skip(uow, cast(SkipImportRow, row))
                 await uow.append(
@@ -350,4 +370,6 @@ async def clerk_import(
                 )
             result_key = f"{kind}:{source_id}" if category == "items" else source_id
             result[category][result_key] = identifier
+    if added_lane:
+        await refresh_idle_workers(uow, workers)
     return result

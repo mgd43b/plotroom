@@ -10,12 +10,15 @@ import pytest
 from fakes import FixedClock
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.app.clerk_import import parse_ledger, parse_triggers
+from plotroom.core import clerk_import
+from plotroom.core import lanes as lane_commands
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import LedgerError
 from plotroom.core.github import PULL_REQUESTS, ObservedPull, apply_pull_poll
 from plotroom.core.ledger import Ledger
 from plotroom.core.trigger_actions import DeliveryRoute
 from plotroom.core.triggers import TRIGGER_FIRED
+from plotroom.core.unit_of_work import UnitOfWork
 
 REPO = "fixture/project"
 FIXTURES = Path(__file__).parent / "fixtures" / "clerk_import"
@@ -341,3 +344,83 @@ async def test_a_prior_bind_also_reserves_the_trigger_label(
     assert lane.imported_trigger_id is None
     assert lane.checklist is not None
     assert [step.step for step in lane.checklist.steps] == ["Trigger T1"]
+
+
+async def test_open_pr_state_holds_share_the_skip_advisory(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, store = board
+    text = (FIXTURES / "ledger.md").read_text()
+    repo, initial_pulls, _ = parse_ledger(text)
+    initial = await ledger.execute(
+        "orchestrator",
+        "clerk_import",
+        "before-holds",
+        {"ledger_repository": repo, "triggers": [], "pulls": initial_pulls, "skips": []},
+    )
+    text = text.replace(
+        "`relay:fixture-worker` | waiting",
+        "`relay:fixture-worker` | Holding for coordinator review",
+    ).replace("`coordinator-only` | waiting", "`coordinator-only` | Hold until the next window")
+    repo, pulls, _ = parse_ledger(text)
+    assert pulls[0]["state"] == "Holding for coordinator review"
+    data = await ledger.execute(
+        "orchestrator",
+        "clerk_import",
+        "state-holds",
+        {
+            "ledger_repository": repo,
+            "triggers": [],
+            "pulls": pulls,
+            "skips": [{"pr": 42, "reason": "Explicit fixture skip"}],
+        },
+    )
+    _, current = await store.read_next("orchestrator", 0, 50)
+    holds = {
+        item.id: item.context["reason"] for item in current if item.kind.endswith("skipped_pull")
+    }
+    assert holds == {
+        data.result["items"]["skip:41"]: "Holding for coordinator review",
+        data.result["items"]["skip:42"]: "Explicit fixture skip",
+    }
+    assert data.result["lanes"] == initial.result["lanes"]
+    assert set(data.result["items"]) == {"pull:43", "skip:41", "skip:42"}
+
+
+async def test_trigger_linked_lane_tracks_the_projected_head(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, _ = board
+    imported = await ledger.execute("orchestrator", "clerk_import", "projected-head", inputs())
+    lane_id = imported.result["lanes"]["41"]
+    lanes = (await ledger.snapshot_board("orchestrator"))[0][3]
+    lane = next(lane for lane in lanes if lane.id == lane_id)
+    assert (lane.pr, lane.head_sha) == (41, PULLS[0].head_sha)
+    assert lane.imported_trigger_id == imported.result["triggers"]["T1"]
+
+    pushed = replace(PULLS[0], head_sha="f" * 40, updated_at="2026-11-23T12:01:30Z")
+    await observe(ledger, (pushed, *PULLS[1:]))
+    lanes = (await ledger.snapshot_board("orchestrator"))[0][3]
+    lane = next(lane for lane in lanes if lane.id == lane_id)
+    assert (lane.pr, lane.head_sha) == (41, pushed.head_sha)
+    assert lane.imported_trigger_id == imported.result["triggers"]["T1"]
+
+
+async def test_import_refreshes_idle_workers_once(
+    board: tuple[Ledger, SqliteStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, _ = board
+    refresh = lane_commands.refresh_idle_workers
+    calls: list[frozenset[str]] = []
+
+    async def observed(uow: UnitOfWork, workers: frozenset[str]) -> None:
+        calls.append(workers)
+        await refresh(uow, workers)
+
+    monkeypatch.setattr(clerk_import, "refresh_idle_workers", observed)
+    monkeypatch.setattr(lane_commands, "refresh_idle_workers", observed)
+    result = await ledger.execute("orchestrator", "clerk_import", "batch", inputs())
+    assert len(result.result["lanes"]) == 2
+    assert calls == [frozenset({"fixture", "peer"})]
+    await ledger.execute("orchestrator", "clerk_import", "same-rows", inputs())
+    assert calls == [frozenset({"fixture", "peer"})]

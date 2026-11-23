@@ -239,7 +239,7 @@ def parse_ledger(text: str) -> tuple[str, list[PullImportRow], list[SkipImportRo
     for heading, body in sections:
         name = heading.lower()
         if name == "open prs":
-            for pr, owner, _, channel, _, after_merge in _table(body, _OPEN_HEADER):
+            for pr, owner, _, channel, state, after_merge in _table(body, _OPEN_HEADER):
                 if pr.lower() == "(soon)":
                     continue
                 number = _pull_number(pr)
@@ -247,6 +247,7 @@ def parse_ledger(text: str) -> tuple[str, list[PullImportRow], list[SkipImportRo
                     "pr": number,
                     "worker": _unquote(owner),
                     "channel": _unquote(channel),
+                    "state": _unquote(state),
                     "after_merge": after_merge,
                 }
                 if number in pulls and pulls[number] != row:
