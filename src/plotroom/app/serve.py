@@ -366,15 +366,17 @@ class Daemon:
             desktop = self._config.session_readers.get(project_id)
             repository = github.repository if github is not None else None
             remote_tree = self._config.github_ticket_trees.get(project_id)
+            routes = self._config.delivery_routes.get(project_id)
             project.ledger = Ledger(
                 project.store,
-                build_catalog(workers, github_repository=repository),
+                build_catalog(workers, github_repository=repository, delivery_routes=routes),
                 self._clock,
                 watcher_roles=self._config.watchers.get(project_id, ()),
                 wait_cap=self._config.wait_cap,
                 github_repository=repository,
                 github_tree_path=remote_tree[0] if remote_tree is not None else None,
                 session_workers=desktop.sessions if desktop is not None else None,
+                drain_enabled=project_id in self._config.drain_sessions,
             )
             project.ledger.start()
             await project.ledger.initialize_overlaps()
@@ -440,6 +442,7 @@ class Daemon:
                 tick_seconds=self._config.tick_seconds,
                 action_attempts=self._config.action_attempts,
                 handlers={SWITCHBOARD_SEND: switchboard.send} if switchboard is not None else {},
+                delivery_routes=routes,
                 workers=workers,
                 work_items=work_items,
                 inputs=tuple(inputs),

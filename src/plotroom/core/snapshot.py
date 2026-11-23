@@ -51,6 +51,7 @@ def render_snapshot(
     github: GitHubSummary | None = None,
     github_error: str | None = None,
     claim_count: int = 0,
+    trigger_counts: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     listed: list[dict[str, Any]] = []
     board: dict[str, Any] = {
@@ -63,6 +64,8 @@ def render_snapshot(
         "items": listed,
         "left_out": len(items),
     }
+    if trigger_counts:
+        board["triggers"] = trigger_counts
     if github is not None:
         board["open_prs"] = github.open_prs
         board["github"] = {"available": github_error is None, "as_of": github.as_of}

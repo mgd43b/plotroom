@@ -7,6 +7,7 @@ import os
 import signal
 import socket
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from plotroom.app.tokens import TokenRegistry
 from plotroom.core.catalog import Catalog, build_catalog
 from plotroom.core.commands import Command
 from plotroom.core.roles import WriterRule
+from plotroom.core.trigger_actions import DeliveryRoute
 from plotroom.core.unit_of_work import UnitOfWork
 
 
@@ -168,7 +170,10 @@ async def test_a_mutating_tool_uses_the_authenticated_role_and_project_ledger(
     monkeypatch.setattr("plotroom.adapters.mcp.server.MCPServer", fixture_server)
 
     def fixture_catalog(
-        _workers: frozenset[str], *, github_repository: str | None = None
+        _workers: frozenset[str],
+        *,
+        github_repository: str | None = None,
+        delivery_routes: Mapping[str, DeliveryRoute] | None = None,
     ) -> Catalog:
         return catalog
 

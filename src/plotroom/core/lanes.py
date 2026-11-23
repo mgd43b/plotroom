@@ -3,14 +3,16 @@
 from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from plotroom.core.events import LedgerError
+from plotroom.core.events import LedgerError, NewEvent
 from plotroom.core.roles import OwnershipView
 from plotroom.core.work_items import refresh_idle_workers
 
 if TYPE_CHECKING:
+    from plotroom.core.actions import Action
     from plotroom.core.unit_of_work import UnitOfWork
 
 LANE_WAITING = "lane_waiting"
+ARCHIVE_PROPOSAL = "archive_lane"
 
 
 @dataclass(frozen=True)
@@ -130,5 +132,32 @@ async def archive_lane(
     lane = await _current(uow, args["lane"])
     result = await _save(uow, replace(lane, state="archived", waiting_on=None))
     await uow.delete_claims(lane.id)
+    await uow.clear_item(ARCHIVE_PROPOSAL, lane.id)
     await refresh_idle_workers(uow, workers)
     return result
+
+
+async def mark_lane(uow: UnitOfWork, action: Action, *, repository: str | None) -> None:
+    """Apply a system-owned mark using the normal current-lane and ready rules."""
+    lane = await _current(uow, action.payload["lane"])
+    state = action.payload["state"]
+    if state == "active":
+        await _save(uow, replace(lane, state="active"))
+    elif state == "ready":
+        pr, head = lane.pr, lane.head_sha
+        if repository is not None and (pull := await uow.open_branch_pull(repository, lane.branch)):
+            pr, head = pull.number, pull.head_sha
+        if pr is None or head is None:
+            raise LedgerError("conflict", "a ready lane requires a PR and head")
+        await ready_lane(uow, {"lane": lane.id, "pr": pr, "head_sha": head}, repository=repository)
+    else:
+        raise LedgerError("invalid", "mark state must be active or ready")
+    await uow.append(
+        NewEvent(
+            "core",
+            "core.lane_marked",
+            action.key,
+            {"lane": lane.id, "state": state},
+            lane_id=lane.id,
+        )
+    )

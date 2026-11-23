@@ -18,6 +18,7 @@ from plotroom.core.envelope import err, ok
 from plotroom.core.events import LedgerError
 from plotroom.core.intake import record_claude
 from plotroom.core.ledger import Ledger
+from plotroom.core.outbox import lease_request_id
 from plotroom.core.roles import Identity
 from plotroom.core.snapshot import (
     DEFAULT_SNAPSHOT_BUDGET,
@@ -133,7 +134,7 @@ def build_app(
         if unavailable is not None:
             raise LedgerError("unavailable", unavailable)
         if caller.identity.role == "drain":
-            raise LedgerError("forbidden", "the drain role may only read the outbox")
+            raise LedgerError("forbidden", "the drain role may only use wait and outbox tools")
         return caller
 
     @server.tool()
@@ -147,8 +148,8 @@ def build_app(
             caller = board_access(ctx)
             if lane_offset < 0:
                 return err("invalid", "lane_offset must be nonnegative")
-            (cursor, items, lanes, details), github, claim_count = (
-                ((0, [], {}, []), None, 0)
+            (cursor, items, lanes, details), github, trigger_counts, claim_count = (
+                ((0, [], {}, []), None, {}, 0)
                 if caller.ledger is None
                 else await caller.ledger.read_snapshot(caller.identity.role)
             )
@@ -169,6 +170,7 @@ def build_app(
                     github=github,
                     github_error=None if caller.ledger is None else caller.ledger.github_error,
                     claim_count=claim_count,
+                    trigger_counts=trigger_counts,
                 )
             )
         except LedgerError as exc:
@@ -402,6 +404,66 @@ def build_app(
     ) -> dict[str, Any]:
         """Release the requested path claims for a lane."""
         return await execute_command(ctx, "release", request_id, {"lane": lane, "globs": globs})
+
+    @server.tool()
+    async def trigger(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        predicate: dict[str, Any],
+        action: dict[str, Any],
+        request_id: str,
+        lane: str | None = None,
+    ) -> dict[str, Any]:
+        """Register a once trigger. A predicate can be {"pr_merged":{"number":42}} or use
+        branch_glob instead of number. all_of and any_of take arrays of predicates.
+        An action object names one of notify_orchestrator (text), send (worker, text),
+        mark (lane, state), or propose_archive (lane).
+        """
+        args: dict[str, Any] = {"predicate": predicate, "action": action}
+        if lane is not None:
+            args["lane"] = lane
+        return await execute_command(ctx, "trigger", request_id, args)
+
+    @server.tool()
+    async def triggers(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], lane: str | None = None
+    ) -> dict[str, Any]:
+        """List trigger states and bindings, optionally for a single lane."""
+        try:
+            caller = board_access(ctx)
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            return ok({"triggers": await caller.ledger.list_triggers(caller.identity.role, lane)})
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
+
+    @server.tool()
+    async def cancel(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], trigger_id: str, request_id: str
+    ) -> dict[str, Any]:
+        """Cancel a trigger before it fires."""
+        return await execute_command(ctx, "cancel", request_id, {"trigger_id": trigger_id})
+
+    @server.tool()
+    async def outbox_lease(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], request_id: str, consumer_id: str
+    ) -> dict[str, Any]:
+        """Lease the next Claude outbox message. Generate a UUIDv4 consumer ID per drain process.
+
+        Use a fresh request ID for new work. A retry from the same consumer returns its original
+        lease and expiry. Deliver only while the lease is current.
+        """
+        try:
+            scoped_request = lease_request_id(consumer_id, request_id)
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
+        return await execute_command(ctx, "outbox_lease", scoped_request, {})
+
+    @server.tool()
+    async def outbox_done(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], act_id: str, request_id: str
+    ) -> dict[str, Any]:
+        """Complete the current lease after delivery. Pass its opaque act_id."""
+        return await execute_command(ctx, "outbox_done", request_id, {"act_id": act_id})
 
     app = server.streamable_http_app(
         stateless_http=True,

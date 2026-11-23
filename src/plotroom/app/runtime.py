@@ -3,11 +3,21 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from datetime import timedelta
 
-from plotroom.core.actions import Action, finish_action, record_attempt
+from plotroom.core.actions import SWITCHBOARD_SEND, Action, finish_action, record_attempt
 from plotroom.core.events import NewEvent, format_time
 from plotroom.core.ledger import Ledger
+from plotroom.core.outbox import OutboxMessage
+from plotroom.core.trigger_actions import (
+    MARK,
+    NOTIFY,
+    PROPOSE_ARCHIVE,
+    SEND,
+    DeliveryRoute,
+    apply_local_action,
+)
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.work_items import refresh_idle_workers
 from plotroom.ports.clock import Clock
@@ -26,6 +36,7 @@ class ProjectRuntime:
         tick_seconds: int,
         action_attempts: int,
         handlers: Mapping[str, ActionHandler] | None = None,
+        delivery_routes: Mapping[str, DeliveryRoute] | None = None,
         workers: frozenset[str] = frozenset(),
         work_items: WorkItemSource | None = None,
         inputs: tuple[Callable[[], Awaitable[None]], ...] = (),
@@ -36,6 +47,7 @@ class ProjectRuntime:
         self.next_tick = clock.now() + self.interval
         self.action_attempts = action_attempts
         self.handlers: Mapping[str, ActionHandler] = handlers if handlers is not None else {}
+        self.delivery_routes = dict(delivery_routes or {})
         self.workers = workers
         self.work_items = work_items
         self.inputs = inputs
@@ -80,7 +92,8 @@ class ProjectRuntime:
             return True
         failed = False
         try:
-            await self.handlers[action.kind](action)
+            if await self._dispatch(action):
+                return True
         except Exception:
             # Action payloads and exception text may be sensitive. The item points to the key.
             log.warning("action attempt failed", extra={"kind": action.kind})
@@ -95,6 +108,54 @@ class ProjectRuntime:
 
         await self.ledger.run("system", commit_attempt)
         return True
+
+    async def _dispatch(self, action: Action) -> bool:
+        """Dispatch the effect. Local effects record their attempt in the same commit."""
+        if action.kind == SEND:
+            worker = action.payload["worker"]
+            route = self.delivery_routes[worker]
+            if route.channel == "switchboard":
+                await self.handlers[SWITCHBOARD_SEND](
+                    replace(
+                        action,
+                        kind=SWITCHBOARD_SEND,
+                        payload={"to": route.destination, "body": action.payload["text"]},
+                    )
+                )
+                return False
+
+            async def stage(uow: UnitOfWork) -> None:
+                await uow.insert_outbox(
+                    OutboxMessage(
+                        action.key,
+                        worker,
+                        route.destination,
+                        action.payload["text"],
+                        await uow.allocate_seq(),
+                    )
+                )
+
+            await self._commit_local(action, stage)
+            return True
+        if action.kind in (NOTIFY, MARK, PROPOSE_ARCHIVE):
+
+            async def apply(uow: UnitOfWork) -> None:
+                await apply_local_action(uow, action, self.ledger.github_repository)
+
+            await self._commit_local(action, apply)
+            return True
+        await self.handlers[action.kind](action)
+        return False
+
+    async def _commit_local(
+        self, action: Action, apply: Callable[[UnitOfWork], Awaitable[None]]
+    ) -> None:
+        async def commit(uow: UnitOfWork) -> None:
+            attempted = await record_attempt(uow, action)
+            await apply(uow)
+            await finish_action(uow, attempted, "done")
+
+        await self.ledger.run("system", commit)
 
     def start(self) -> None:
         self._tasks = [asyncio.create_task(self._ticks()), asyncio.create_task(self._actions())]

@@ -11,6 +11,7 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,9 @@ from plotroom.core.github_projection import GitHubResource
 from plotroom.core.lanes import Lane, with_projected_pr
 from plotroom.core.ledger import Ledger
 from plotroom.core.next_items import Item, visible
+from plotroom.core.outbox import OutboxLease, OutboxMessage, OutboxReadiness
 from plotroom.core.roles import WriterRule
+from plotroom.core.triggers import Trigger
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.ports.store import Board
 from plotroom.ports.work_items import WorkItem
@@ -88,11 +91,16 @@ class _MemoryTransaction:
         self.changes: list[Item] = []
         self.receipts: dict[tuple[str, str], dict[str, Any]] = {}
         self.actions: dict[str, Action] = {}
+        self.outbox: dict[str, OutboxMessage] = {}
+        self.leases: dict[str, OutboxLease] = {}
+        self.delivered: set[str] = set()
+        self.triggers: dict[str, Trigger] = {}
         self.lanes: dict[str, Lane] = {}
         self.claims: dict[tuple[str, str], Claim] = {}
         self.work_items: tuple[WorkItem, ...] = ()
         self.claude_turns: dict[tuple[str, str], set[str]] = {}
         self.pulls: dict[tuple[str, int], PullRequest] = {}
+        self.branch_order: dict[tuple[str, int, str], None] = {}
         self.github_resources: dict[tuple[str, str, str], GitHubResource] = {}
         self.fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
         self.fetch_retries: dict[tuple[str, str], FetchRetry] = {}
@@ -210,6 +218,8 @@ class _MemoryTransaction:
     async def save_pull_request(self, pull: PullRequest) -> None:
         self._live()
         self.pulls[pull.repository, pull.number] = pull
+        if pull.complete:
+            self.branch_order[pull.repository, pull.number, pull.branch] = None
 
     async def github_resource(
         self, repository: str, resource: str, scope: str = ""
@@ -251,6 +261,51 @@ class _MemoryTransaction:
     async def update_action(self, action: Action) -> None:
         self._live()
         self.actions[action.key] = copy.deepcopy(action)
+
+    async def insert_outbox(self, message: OutboxMessage) -> None:
+        self._live()
+        self.outbox.setdefault(message.action_key, message)
+
+    async def lease_outbox(self, lease_id: str, now: str, expires_at: str) -> OutboxLease | None:
+        self._live()
+        for key, message in self.outbox.items():
+            if key not in self.delivered and (
+                key not in self.leases or self.leases[key].expires_at <= now
+            ):
+                lease = OutboxLease(message, lease_id, expires_at)
+                self.leases[key] = lease
+                return lease
+        return None
+
+    async def complete_outbox(self, lease_id: str, now: str) -> str | None:
+        self._live()
+        for key, lease in self.leases.items():
+            if key not in self.delivered and lease.act_id == lease_id and lease.expires_at > now:
+                self.delivered.add(key)
+                return key
+        return None
+
+    async def find_trigger(self, trigger_id: str) -> Trigger | None:
+        self._live()
+        return copy.deepcopy(self.triggers.get(trigger_id))
+
+    async def open_triggers(self) -> list[Trigger]:
+        self._live()
+        return [copy.deepcopy(t) for t in self.triggers.values() if t.state == "open"]
+
+    async def save_trigger(self, trigger: Trigger) -> None:
+        self._live()
+        self.triggers[trigger.id] = copy.deepcopy(trigger)
+
+    async def first_matching_pull(self, repository: str, pattern: str) -> int | None:
+        self._live()
+        for repo, number, branch in self.branch_order:
+            if repo != repository or not fnmatchcase(branch, pattern):
+                continue
+            pull = self.pulls[repo, number]
+            if pull.complete and pull.branch == branch:
+                return number
+        return None
 
     async def insert_event(self, event: StoredEvent) -> None:
         self._live()
@@ -315,11 +370,16 @@ class MemoryStore:
         self._changes: list[Item] = []
         self._receipts: dict[tuple[str, str], dict[str, Any]] = {}
         self._actions: dict[str, Action] = {}
+        self._outbox: dict[str, OutboxMessage] = {}
+        self._leases: dict[str, OutboxLease] = {}
+        self._delivered: set[str] = set()
+        self._triggers: dict[str, Trigger] = {}
         self._lanes: dict[str, Lane] = {}
         self._claims: dict[tuple[str, str], Claim] = {}
         self._work_items: tuple[WorkItem, ...] = ()
         self._claude_turns: dict[tuple[str, str], set[str]] = {}
         self._pulls: dict[tuple[str, int], PullRequest] = {}
+        self._branch_order: dict[tuple[str, int, str], None] = {}
         self._github_resources: dict[tuple[str, str, str], GitHubResource] = {}
         self._fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
         self._fetch_retries: dict[tuple[str, str], FetchRetry] = {}
@@ -346,11 +406,16 @@ class MemoryStore:
         tx.changes = self._changes.copy()
         tx.receipts = copy.deepcopy(self._receipts)
         tx.actions = copy.deepcopy(self._actions)
+        tx.outbox = self._outbox.copy()
+        tx.leases = self._leases.copy()
+        tx.delivered = self._delivered.copy()
+        tx.triggers = copy.deepcopy(self._triggers)
         tx.lanes = self._lanes.copy()
         tx.claims = self._claims.copy()
         tx.work_items = self._work_items
         tx.claude_turns = {key: ids.copy() for key, ids in self._claude_turns.items()}
         tx.pulls = self._pulls.copy()
+        tx.branch_order = self._branch_order.copy()
         tx.github_resources = copy.deepcopy(self._github_resources)
         tx.fetch_cursors = self._fetch_cursors.copy()
         tx.fetch_retries = self._fetch_retries.copy()
@@ -364,11 +429,14 @@ class MemoryStore:
             self._changes = tx.changes
             self._receipts = tx.receipts
             self._actions = tx.actions
+            self._outbox, self._leases, self._delivered = tx.outbox, tx.leases, tx.delivered
+            self._triggers = tx.triggers
             self._lanes = tx.lanes
             self._claims = tx.claims
             self._work_items = tx.work_items
             self._claude_turns = tx.claude_turns
             self._pulls = tx.pulls
+            self._branch_order = tx.branch_order
             self._github_resources = tx.github_resources
             self._fetch_cursors = tx.fetch_cursors
             self._fetch_retries = tx.fetch_retries
@@ -379,6 +447,19 @@ class MemoryStore:
 
     async def head_seq(self) -> int:
         return self._seq
+
+    async def outbox_readiness(self, now: str) -> OutboxReadiness:
+        ready: list[int] = []
+        expiries: list[str] = []
+        for key, message in self._outbox.items():
+            if key in self._delivered:
+                continue
+            lease = self._leases.get(key)
+            if lease is None or lease.expires_at <= now:
+                ready.append(message.seq)
+            else:
+                expiries.append(lease.expires_at)
+        return OutboxReadiness(self._seq, min(ready, default=None), min(expiries, default=None))
 
     async def events_after(self, seq: int, limit: int = 100) -> list[StoredEvent]:
         return [copy.deepcopy(e) for e in self._events if e.seq > seq][: max(limit, 0)]
@@ -403,26 +484,30 @@ class MemoryStore:
 
     async def read_snapshot(
         self, role: str, repository: str | None
-    ) -> tuple[Board, GitHubSummary | None, int]:
-        board = await self.read_board(role)
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int]:
+        board, github = (
+            (await self.read_board(role), None)
+            if repository is None
+            else await self.read_github_board(role, repository)
+        )
+        trigger_counts = dict(Counter(t.state for t in self._triggers.values()))
         claim_count = len(_visible_claims(self._claims, self._lanes, role))
-        if repository is None:
-            return board, None, claim_count
+        return board, github, trigger_counts, claim_count
+
+    async def read_github_board(self, role: str, repository: str) -> tuple[Board, GitHubSummary]:
         opened = sum(
             pull.state == "open" for pull in self._pulls.values() if pull.repository == repository
         )
         cursor = await self.fetch_cursor(repository, PULL_REQUESTS)
-        seq, items, counts, lanes = board
+        seq, items, counts, lanes = await self.read_board(role)
         projected = [
             with_projected_pr(lane, pr.number, pr.head_sha)
             if (pr := _branch_pull(self._pulls, repository, lane.branch)) is not None
             else with_projected_pr(lane, None, None)
             for lane in lanes
         ]
-        return (
-            (seq, items, counts, projected),
-            GitHubSummary(opened, cursor.as_of if cursor else None),
-            claim_count,
+        return (seq, items, counts, projected), GitHubSummary(
+            opened, cursor.as_of if cursor else None
         )
 
     async def read_claims(
@@ -441,6 +526,9 @@ class MemoryStore:
             item for item in items if item.kind in OVERLAP_KINDS and subject in item.context[path]
         ]
         return cursor, overlaps[offset : offset + limit]
+
+    async def list_triggers(self, lane: str | None) -> list[Trigger]:
+        return [copy.deepcopy(t) for t in self._triggers.values() if lane is None or t.lane == lane]
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return self._pulls.get((repository, number))

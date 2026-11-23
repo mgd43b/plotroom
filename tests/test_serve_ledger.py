@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from plotroom.app.serve import Daemon
 from plotroom.core.catalog import Catalog
 from plotroom.core.events import LedgerError, NewEvent
 from plotroom.core.ledger import Ledger
+from plotroom.core.trigger_actions import DeliveryRoute
 from plotroom.core.unit_of_work import UnitOfWork
 from test_daemon import make_config, run_daemon, stop
 
@@ -23,7 +25,10 @@ from test_daemon import make_config, run_daemon, stop
 @pytest.fixture(autouse=True)
 def fixture_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
     def build_fixture_catalog(
-        _workers: frozenset[str], *, github_repository: str | None = None
+        _workers: frozenset[str],
+        *,
+        github_repository: str | None = None,
+        delivery_routes: Mapping[str, DeliveryRoute] | None = None,
     ) -> Catalog:
         return Fixture().catalog
 
