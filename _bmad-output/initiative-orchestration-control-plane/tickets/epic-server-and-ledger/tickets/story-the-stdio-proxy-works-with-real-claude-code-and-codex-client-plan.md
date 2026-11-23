@@ -72,7 +72,7 @@ context:
 
 ## Implementation Notes
 
-Approval: the lane brief fixes the scope and plan shape; Checkpoint 1 was not held for a human. The real-client trial found that Claude Code's never-ending `subscriptions/listen` kept the proxy alive after the client exited; cancelling listen streams at stdin EOF, and cancelling every call once stdout is gone, were added to `proxy.py` beyond the Code Map for that reason. Two defaults went to the coordinator as a `Q:`, were approved and were built as written: the daemon outlives its proxy, and its clean environment drops adapter credentials.
+Approval: the lane brief fixes the scope and plan shape; Checkpoint 1 was not held for a human. The real-client trial found that Claude Code's never-ending `subscriptions/listen` kept the proxy alive after the client exited; canceling listen streams at stdin EOF, and canceling every call once stdout is gone, were added to `proxy.py` beyond the Code Map for that reason. Two defaults went to the coordinator as a `Q:`, were approved and were built as written: the daemon outlives its proxy, and its clean environment drops adapter credentials.
 
 ## Plan Change Log
 

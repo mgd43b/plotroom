@@ -22,7 +22,7 @@ import httpx
 from plotroom.adapters.mcp.proxy import UpstreamStartError
 from plotroom.app.cli import DEFAULT_START_TIMEOUT, EXIT_LOCKED
 from plotroom.app.config import Config
-from plotroom.app.lock import DataDirLock, LockError
+from plotroom.app.lock import LOCK_FILE_NAME, DataDirLock, LockError
 
 log = logging.getLogger("plotroom.daemon_start")
 
@@ -137,6 +137,16 @@ def logged_reason(log_path: Path, since: int) -> str | None:
     return found[:400] if found else None
 
 
+def lock_owner(data_dir: Path) -> int | None:
+    """The pid of the server that owns ``data_dir`` right now, or ``None`` when none does."""
+    if not holds_lock(data_dir):
+        return None
+    try:
+        return int((data_dir / LOCK_FILE_NAME).read_text(encoding="utf-8").strip())
+    except OSError, ValueError:
+        return None
+
+
 def holds_lock(data_dir: Path) -> bool:
     """Whether a server owns ``data_dir`` right now."""
     probe = DataDirLock(data_dir)
@@ -200,6 +210,12 @@ async def ensure_daemon(
             await asyncio.sleep(_POLL_SECONDS)
         else:
             break
+    owner = await asyncio.to_thread(lock_owner, config.data_dir)
+    if owner is not None and owner != child.pid and not (locked_out and reason):
+        raise UpstreamStartError(
+            f"another plotroom serve owns {config.data_dir} (pid {owner}), and nothing answers at "
+            f"{config.url}; that server uses another address than this config's"
+        )
     if locked_out and reason:
         raise UpstreamStartError(
             f"{reason}, and nothing answers at {config.url}; "
