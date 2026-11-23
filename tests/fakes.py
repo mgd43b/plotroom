@@ -57,6 +57,7 @@ class _MemoryTransaction:
         self.actions: dict[str, Action] = {}
         self.lanes: dict[str, Lane] = {}
         self.work_items: tuple[WorkItem, ...] = ()
+        self.claude_turns: dict[tuple[str, str], str] = {}
         self.seq = seq
         self.expired = False
         self._on_allocate = on_allocate
@@ -76,6 +77,18 @@ class _MemoryTransaction:
     async def ready_work_items(self) -> tuple[WorkItem, ...]:
         self._live()
         return self.work_items
+
+    async def find_claude_turn(self, session: str, aliases: tuple[str, ...]) -> StoredEvent | None:
+        self._live()
+        for alias in aliases:
+            if (event := self.claude_turns.get((session, alias))) is not None:
+                return next(copy.deepcopy(row) for row in self.events if row.id == event)
+        return None
+
+    async def bind_claude_turn(self, session: str, aliases: tuple[str, ...], event: str) -> None:
+        self._live()
+        for alias in aliases:
+            self.claude_turns.setdefault((session, alias), event)
 
     async def replace_work_items(self, items: tuple[WorkItem, ...]) -> None:
         self._live()
@@ -182,6 +195,7 @@ class MemoryStore:
         self._actions: dict[str, Action] = {}
         self._lanes: dict[str, Lane] = {}
         self._work_items: tuple[WorkItem, ...] = ()
+        self._claude_turns: dict[tuple[str, str], str] = {}
         self._open = False
         self.commits = 0
         self.on_allocate: Callable[[], None] | None = None
@@ -207,6 +221,7 @@ class MemoryStore:
         tx.actions = copy.deepcopy(self._actions)
         tx.lanes = self._lanes.copy()
         tx.work_items = self._work_items
+        tx.claude_turns = self._claude_turns.copy()
         try:
             yield tx
         except BaseException:
@@ -219,6 +234,7 @@ class MemoryStore:
             self._actions = tx.actions
             self._lanes = tx.lanes
             self._work_items = tx.work_items
+            self._claude_turns = tx.claude_turns
             self.commits += 1
         finally:
             tx.expired = True

@@ -16,9 +16,11 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from plotroom.core.envelope import err, ok
 from plotroom.core.events import LedgerError
+from plotroom.core.intake import record_claude
 from plotroom.core.ledger import Ledger
 from plotroom.core.roles import Identity
 from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, render_next, render_snapshot
+from plotroom.ports.session_reader import SessionEvent
 
 _NEXT_PAGE_SIZE = 64
 
@@ -196,6 +198,29 @@ def build_app(
             return err(exc.code, exc.message)
 
     server.tool(name="next")(next_items)
+
+    @server.tool()
+    async def ingest(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        kind: str,
+        session_id: str,
+        body: str,
+        lane: str | None = None,
+        upstream_id: str | None = None,
+        turn_index: int | None = None,
+    ) -> dict[str, Any]:
+        """Report a Claude turn or session message from an authenticated project session."""
+        caller = _project_request(ctx)
+        if caller.ledger is None:
+            return err("unavailable", unavailable or "the project ledger is unavailable")
+        report = SessionEvent(kind, session_id, body, upstream_id, turn_index)
+        try:
+            result = await caller.ledger.run(
+                caller.identity.role, lambda uow: record_claude(uow, report, lane=lane)
+            )
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
+        return ok({"event": result.event.id, "created": result.created})
 
     @server.tool()
     async def ack(  # pyright: ignore[reportUnusedFunction]

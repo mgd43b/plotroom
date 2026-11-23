@@ -15,6 +15,7 @@ from mcp.types import TextContent
 
 from plotroom.core.actions import Action
 from plotroom.core.events import NewEvent
+from plotroom.core.intake import append_inbound
 from plotroom.core.lanes import infer_lane
 from plotroom.core.ledger import Ledger
 from plotroom.core.unit_of_work import UnitOfWork
@@ -129,7 +130,8 @@ class Switchboard:
 
         async def record(uow: UnitOfWork) -> None:
             lane = await infer_lane(uow, worker=self._senders.get(sender))
-            await uow.append(
+            await append_inbound(
+                uow,
                 NewEvent(
                     "switchboard",
                     "switchboard.message",
@@ -137,7 +139,7 @@ class Switchboard:
                     {"sender": sender},
                     body,
                     lane,
-                )
+                ),
             )
 
         await self._ledger.run("system", record)

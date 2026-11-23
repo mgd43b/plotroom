@@ -8,6 +8,14 @@ from functools import partial
 from plotroom.core.actions import ACTION_FIELDS, FAILED_ACTION
 from plotroom.core.commands import Command, CommandRegistry
 from plotroom.core.events import EventKind, EventRegistry, FieldSpec
+from plotroom.core.intake import (
+    CLAUDE_APPENDERS,
+    INBOUND_MESSAGE,
+    SESSION_FIELD,
+    SESSION_MESSAGE,
+    TURN_FIELDS,
+    TURN_REPORT,
+)
 from plotroom.core.lanes import (
     LANE_WAITING,
     archive_lane,
@@ -60,6 +68,11 @@ def build_catalog(workers: frozenset[str] = frozenset()) -> Catalog:
     events.register(EventKind("core.tick", (), frozenset({"system"})))
     events.register(
         EventKind("switchboard.message", (FieldSpec("sender", "str"),), frozenset({"system"}))
+    )
+    events.register(EventKind(TURN_REPORT, TURN_FIELDS, CLAUDE_APPENDERS))
+    events.register(EventKind(SESSION_MESSAGE, (SESSION_FIELD,), CLAUDE_APPENDERS))
+    catalog.register_item(
+        ItemKind(INBOUND_MESSAGE, 20, False, ("Read and acknowledge the message",))
     )
     for status in ("attempt", "done", "failed"):
         events.register(EventKind(f"core.action_{status}", ACTION_FIELDS, frozenset({"system"})))

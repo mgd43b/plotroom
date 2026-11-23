@@ -62,8 +62,24 @@ async def test_switchboard_redelivery_after_interrupted_ack(tmp_path: Path) -> N
             "start",
             {"lane": "fixture-lane", "worker": "fixture", "branch": "feature", "work_items": []},
         )
+        ready = asyncio.Event()
+
+        async def progress(_elapsed: float, _cap: float) -> None:
+            ready.set()
+
+        watch = asyncio.create_task(
+            ledger.wait_for_item("orchestrator", await ledger.head_seq(), 8, progress)
+        )
+        await ready.wait()
         (tmp_path / "available").touch()
         await marker(tmp_path, "interrupted")
+        _, item = await watch
+        assert item is not None
+        assert item["kind"] == "inbound_message"
+        acknowledged = await ledger.execute(
+            "orchestrator", "ack", "ack-message", {"item": item["id"]}
+        )
+        assert acknowledged.result["state"] == "closed"
         events = [event for event in await ledger.events_after(0) if event.source == "switchboard"]
         assert len(events) == 1
         original = events[0]
@@ -79,6 +95,7 @@ async def test_switchboard_redelivery_after_interrupted_ack(tmp_path: Path) -> N
         assert (tmp_path / "acked").read_text() == "redelivered"
         events = [event for event in await ledger.events_after(0) if event.source == "switchboard"]
         assert events == [original]
+        assert not (await ledger.read_board("orchestrator"))[1]
 
 
 async def test_switchboard_send_reuses_action_key_after_interruption(tmp_path: Path) -> None:
@@ -101,7 +118,9 @@ async def test_switchboard_send_reuses_action_key_after_interruption(tmp_path: P
             with pytest.raises(asyncio.CancelledError):
                 await task
         pending = await ledger.pending_action()
-        assert pending is not None and pending.key == action_key and pending.attempts == 0
+        assert pending is not None
+        assert pending.key == action_key
+        assert pending.attempts == 0
 
     async with connected(tmp_path) as (ledger, runtime):
         async with asyncio.timeout(8):

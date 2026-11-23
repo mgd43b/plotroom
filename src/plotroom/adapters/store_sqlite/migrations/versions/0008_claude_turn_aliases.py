@@ -1,0 +1,18 @@
+"""Persist the alternate identities of Claude turn reports."""
+
+import sqlalchemy as sa
+from alembic import op
+
+revision = "0008"
+down_revision = "0007"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "claude_turn_aliases",
+        sa.Column("session", sa.Text(), primary_key=True),
+        sa.Column("alias", sa.Text(), primary_key=True),
+        sa.Column("event_id", sa.Text(), sa.ForeignKey("events.id"), nullable=False),
+    )

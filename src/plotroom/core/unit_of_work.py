@@ -67,6 +67,12 @@ class UnitOfWork:
     async def find_event(self, source: str, kind: str, upstream_id: str) -> Event | None:
         return await self._tx.find_event(source, kind, upstream_id)
 
+    async def find_claude_turn(self, session: str, aliases: tuple[str, ...]) -> Event | None:
+        return await self._tx.find_claude_turn(session, aliases)
+
+    async def bind_claude_turn(self, session: str, aliases: tuple[str, ...], event: str) -> None:
+        await self._tx.bind_claude_turn(session, aliases, event)
+
     async def allocate_seq(self) -> int:
         """The project's next ``seq``; rolled back with the transaction."""
         return await self._tx.allocate_seq()
