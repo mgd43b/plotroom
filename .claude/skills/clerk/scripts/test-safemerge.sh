@@ -31,7 +31,9 @@ case "$*" in
   'run list --branch main --workflow CI --status completed --limit 30 --json databaseId,conclusion,headSha --jq '*)
     jq -r "${@: -1}" "$FIXTURE/main.json" ;;
   "api $RUNS_ENDPOINT")
-    if [ -e "$FIXTURE/jobs-read" ] && [ -e "$FIXTURE/later-runs.json" ]; then
+    if [ -e "$FIXTURE/body-read" ] && [ -e "$FIXTURE/final-runs.json" ]; then
+      cat "$FIXTURE/final-runs.json"
+    elif [ -e "$FIXTURE/jobs-read" ] && [ -e "$FIXTURE/later-runs.json" ]; then
       cat "$FIXTURE/later-runs.json"
     else
       cat "$FIXTURE/runs.json"
@@ -41,7 +43,8 @@ case "$*" in
   "api repos/fixture/plotroom/commits/$OPENING_SHA/$CHECKS_SUFFIX") cat "$FIXTURE/opening.json" ;;
   'api graphql -f query='*)
     if [ "$#" = 10 ] && [ "$5 $6 $7 $8 $9 ${10}" = '-f owner=fixture -f repo=plotroom -F pr=141' ] &&
-       [[ "$4" == *'number headRefOid reviewThreads(first: 100) { totalCount pageInfo { hasNextPage } nodes { isResolved comments(first: 1) { totalCount } } }'* ]]; then
+       [[ "$4" == *'number headRefOid author { login }'*'reviewThreads(first: 100) {'* ]] &&
+       [[ "$4" == *'nodes { isResolved comments(first: 10) { totalCount pageInfo { hasNextPage } nodes { author { __typename login } authorAssociation } } }'* ]]; then
       cat "$FIXTURE/threads.json"
     elif [ "$#" = 12 ] && [ "$5 $6 $7 $8 $9 ${11} ${12}" = '-f owner=fixture -f repo=plotroom -f -F pr=141' ] &&
          [[ "$4" == *'pullRequest(number: $pr) { number createdAt }'* ]] &&
@@ -88,7 +91,7 @@ jq -n --arg sha "$HEAD_SHA" '{total_count:2,jobs:["3.14","3.15"] | map({run_id:4
 jq -n --arg sha "$HEAD_SHA" '{total_count:1,check_runs:[{name:"Kody Code Review",head_sha:$sha,app:{id:5822892,slug:"kodus-mgd43b"},status:"completed",conclusion:"success",started_at:"2026-11-23T12:00:00Z",output:{summary:"Review finished successfully. Suggestions (if any) were posted as PR/file comments."},pull_requests:[]}]}' > "$tmp/baseline/current.json"
 jq -n --arg sha "$HEAD_SHA" '{data:{repository:{pullRequest:{number:141,createdAt:"2026-11-23T11:00:00Z"},object:{oid:$sha,associatedPullRequests:{totalCount:1,nodes:[{number:141}],pageInfo:{hasNextPage:false}}}}}}' > "$tmp/baseline/current-association.json"
 jq --arg sha "$OPENING_SHA" '.data.repository.object.oid = $sha' "$tmp/baseline/current-association.json" > "$tmp/baseline/opening-association.json"
-jq -n --arg sha "$HEAD_SHA" '{data:{repository:{pullRequest:{number:141,headRefOid:$sha,reviewThreads:{totalCount:0,nodes:[],pageInfo:{hasNextPage:false}}}}}}' > "$tmp/baseline/threads.json"
+jq -n --arg sha "$HEAD_SHA" '{data:{repository:{pullRequest:{number:141,headRefOid:$sha,author:{login:"lane"},reviewThreads:{totalCount:0,nodes:[],pageInfo:{hasNextPage:false}}}}}}' > "$tmp/baseline/threads.json"
 jq -n --arg sha "$OTHER_SHA" '[{databaseId:876,headSha:$sha,conclusion:"success"}]' > "$tmp/baseline/main.json"
 touch "$tmp/baseline/main-files"
 
@@ -137,7 +140,7 @@ rm "$FIXTURE/current-association.json"
 expect 'direct Kody association proves the current PR' 0 'DRY #141: would merge 01234567'
 reset_fixture
 skip_review
-mutate threads '.data.repository.pullRequest.reviewThreads |= (.totalCount = 1 | .nodes = [{isResolved:true,comments:{totalCount:2}}])'
+mutate threads '.data.repository.pullRequest.reviewThreads |= (.totalCount = 1 | .nodes = [{isResolved:true,comments:{totalCount:2,pageInfo:{hasNextPage:false},nodes:[{author:{__typename:"Bot",login:"reviewer"},authorAssociation:"NONE"},{author:{__typename:"User",login:"lane"},authorAssociation:"NONE"}]}}])'
 expect 'genuine later skip plus trusted opening success and resolved threads' 0 'DRY #141: would merge 01234567'
 reset_fixture
 skip_review
@@ -284,13 +287,40 @@ reset_fixture
 mutate threads '.data.repository.pullRequest.reviewThreads |= (.totalCount = 1 | .nodes = [{isResolved:false}])'
 expect 'unresolved thread blocks current review' 2 '1 unresolved threads'
 skip_review
-mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.totalCount = 2'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments = {totalCount:2,pageInfo:{hasNextPage:false},nodes:[{author:{__typename:"Bot",login:"reviewer"},authorAssociation:"NONE"},{author:{__typename:"User",login:"lane"},authorAssociation:"NONE"}]}'
 expect 'unresolved thread blocks cadence skip' 2 '1 unresolved threads'
 reset_fixture
-mutate threads '.data.repository.pullRequest.reviewThreads |= (.totalCount = 1 | .nodes = [{isResolved:true,comments:{totalCount:1}}])'
+mutate threads '.data.repository.pullRequest.reviewThreads |= (.totalCount = 1 | .nodes = [{isResolved:true,comments:{totalCount:1,pageInfo:{hasNextPage:false},nodes:[{author:{__typename:"User",login:"reviewer"},authorAssociation:"OWNER"}]}}])'
 expect 'current-head proof requires resolution alone' 0 'DRY #141: would merge 01234567'
 skip_review
-expect 'a resolved thread without a reply blocks cadence skip' 2 'review threads without a reply'
+expect 'a resolved thread without a reply blocks cadence skip' 2 'review threads without an authorized reply'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments |= (.totalCount = 2 | .nodes += [{author:{__typename:"User",login:"Reviewer"},authorAssociation:"OWNER"}])'
+expect 'an authorized root reviewer cannot answer their own thread' 2 'review threads without an authorized reply'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes[0].author.login = "lane"'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes[1].authorAssociation = "CONTRIBUTOR"'
+expect 'a root comment from the PR author does not count as a reply' 2 'review threads without an authorized reply'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes[1].author = null'
+threads_refused 'cadence skip requires a readable reply author'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes[0].author.login = "reviewer"'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes[1] = {author:{__typename:"User",login:"lane"},authorAssociation:"NONE"}'
+expect 'an actual PR-author reply after the root answers the thread' 0 'DRY #141: would merge 01234567'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes[1] = {author:{__typename:"User",login:"maintainer"},authorAssociation:"COLLABORATOR"}'
+expect 'an authorized collaborator can answer the thread' 0 'DRY #141: would merge 01234567'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes[1].authorAssociation = "OWNER"'
+expect 'a repository owner can answer the thread' 0 'DRY #141: would merge 01234567'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes[1].authorAssociation = "MEMBER"'
+expect 'a repository member can answer the thread' 0 'DRY #141: would merge 01234567'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes[1].author.__typename = "Bot"'
+expect 'a bot with an apparent member role cannot answer the thread' 2 'review threads without an authorized reply'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes[1] = {author:{__typename:"User",login:"participant"},authorAssociation:"CONTRIBUTOR"}'
+expect 'an unauthorized participant cannot answer the thread' 2 'review threads without an authorized reply'
+mutate threads '.data.repository.pullRequest.author = null'
+threads_refused 'cadence skip requires a readable PR author when threads exist'
+mutate threads '.data.repository.pullRequest.author = {login:"lane"}'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments |= (.totalCount = 11 | .pageInfo.hasNextPage = true | .nodes = [range(10) | {author:{__typename:"User",login:"reviewer"},authorAssociation:"NONE"}])'
+expect 'truncated comments without positive reply evidence block cadence skip' 2 'review threads without an authorized reply'
+mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.nodes[1].author.login = "lane"'
+expect 'a bounded page can prove the reply even with more comments available' 0 'DRY #141: would merge 01234567'
 mutate threads '.data.repository.pullRequest.reviewThreads.nodes[0].comments.totalCount = "2"'
 threads_refused 'cadence skip needs a valid thread comment count'
 reset_fixture
@@ -336,6 +366,9 @@ expect 'newer run for a different PR does not shadow this PR' 0 'DRY #141: would
 reset_fixture
 jq '.workflow_runs[0].run_attempt += 1' "$FIXTURE/runs.json" > "$FIXTURE/later-runs.json"
 ci_refused 'CI attempt changed while its prior jobs were read'
+reset_fixture
+jq '.workflow_runs[0] |= (.run_attempt += 1 | .status = "in_progress" | .conclusion = null)' "$FIXTURE/runs.json" > "$FIXTURE/final-runs.json"
+ci_refused 'same-head CI attempt started during the later gate reads'
 reset_fixture
 jq '.workflow_runs[1] = (.workflow_runs[0] | .id += 1 | .created_at = "2026-11-23T12:01:00Z") | .total_count = 2' "$FIXTURE/runs.json" > "$FIXTURE/later-runs.json"
 ci_refused 'a newer successful run appeared while jobs were read'

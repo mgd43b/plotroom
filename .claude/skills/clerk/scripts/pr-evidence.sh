@@ -34,7 +34,7 @@ or_pr_ci_green() {
       and ([$jobs[] | select(.name == "check (python 3.14)")] | successful)
       and ([$jobs[] | select(.name == "check (python 3.15)")] | successful)
   ' <<< "$jobs" >/dev/null || return 1
-  [ "$(or_latest_pr_ci_attempt "$pr" "$sha")" = "$run" ]
+  printf '%s\n' "$run"
 }
 
 or_commit_belongs_to_pr() {
@@ -110,27 +110,46 @@ or_pr_threads() {
   query='query($owner: String!, $repo: String!, $pr: Int!) {
     repository(owner: $owner, name: $repo) {
       pullRequest(number: $pr) {
-        number headRefOid reviewThreads(first: 100) { totalCount pageInfo { hasNextPage } nodes { isResolved comments(first: 1) { totalCount } } }
+        number headRefOid author { login }
+        reviewThreads(first: 100) {
+          totalCount pageInfo { hasNextPage }
+          nodes { isResolved comments(first: 10) { totalCount pageInfo { hasNextPage } nodes { author { __typename login } authorAssociation } } }
+        }
       }
     }
   }'
   evidence=$(gh api graphql -f query="$query" -f owner="$OR_OWNER" -f repo="$OR_NAME" -F pr="$pr") || return 1
   jq -ser --arg sha "$sha" --argjson pr "$pr" --arg mode "$mode" '
+    def login: type == "string" and length > 0;
+    def valid_comments:
+      .totalCount as $count
+      | ($count | type == "number" and . >= 1 and floor == .)
+        and .pageInfo.hasNextPage == ($count > 10)
+        and (.nodes | type == "array" and length == ([$count, 10] | min))
+        and all(.nodes[]; (.author.login | login) and (.author.__typename | login) and (.authorAssociation | login));
+    def answered($pr_author):
+      (.comments.nodes[0].author.login | ascii_downcase) as $reviewer
+      | any(.comments.nodes[1:][];
+          .author.__typename == "User"
+          and (.author.login | ascii_downcase) != $reviewer
+          and ((.author.login | ascii_downcase) == ($pr_author | ascii_downcase)
+            or .authorAssociation == "OWNER" or .authorAssociation == "MEMBER" or .authorAssociation == "COLLABORATOR"));
     select(length == 1) | .[0] | select(type == "object" and (.errors == null or .errors == []))
     | .data.repository.pullRequest
     | select(.number == $pr and (.headRefOid | type) == "string")
+    | .author.login as $author
     | if .headRefOid != $sha then "moved"
       else .reviewThreads
         | select(.totalCount | type == "number" and . >= 0 and floor == .)
         | if .totalCount > 100 then "many"
           else select(.pageInfo.hasNextPage == false and (.nodes | type) == "array" and (.nodes | length) == .totalCount)
             | select(all(.nodes[]; (.isResolved | type) == "boolean"))
-            | if $mode == "cadence-skip" then
-                select(all(.nodes[]; .comments.totalCount | type == "number" and . >= 1 and floor == .))
+            | if $mode == "cadence-skip" and .totalCount > 0 then
+                select(($author | login) and all(.nodes[]; .comments | valid_comments))
               end
             | ([.nodes[] | select(.isResolved == false)] | length) as $unresolved
             | if $unresolved > 0 then $unresolved
-              elif $mode == "cadence-skip" and any(.nodes[]; .comments.totalCount < 2) then "unanswered"
+              elif $mode == "cadence-skip" and any(.nodes[]; answered($author) | not) then "unanswered"
               else 0 end
           end
       end

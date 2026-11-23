@@ -43,14 +43,14 @@ fails=$(printf '%s\n' "$failnames" | awk 'NF { s = s (n++ ? "; " : "") $0 } END 
 [ "$pending" = "0" ] || { echo "REFUSE #$n: $pending checks pending"; exit 2; }
 [ "$total" -ge "$OR_MIN_CHECKS" ] || { echo "REFUSE #$n: only $total checks have reported (at least $OR_MIN_CHECKS expected)"; exit 2; }
 [ -z "$fails" ] || { echo "REFUSE #$n: failing: $fails"; exit 2; }
-or_pr_ci_green "$n" "$head" || { echo "REFUSE #$n: latest PR CI attempt has no readable successful Python 3.14 and 3.15 jobs on ${head:0:8}"; exit 2; }
+ci_attempt=$(or_pr_ci_green "$n" "$head") || { echo "REFUSE #$n: latest PR CI attempt has no readable successful Python 3.14 and 3.15 jobs on ${head:0:8}"; exit 2; }
 review=$(or_kody_review_complete "$n" "$head") || { echo "REFUSE #$n: no verified completed Kody review for ${head:0:8}"; exit 2; }
 u=$(or_pr_threads "$n" "$head" "$review") || { echo "REFUSE #$n: could not read the review threads"; exit 2; }
 case "$u" in
   0) ;;
   moved) echo "REFUSE #$n: the head moved during the merge check"; exit 2;;
   many) echo "REFUSE #$n: more than 100 review threads; the gate cannot count them all"; exit 2;;
-  unanswered) echo "REFUSE #$n: the cadence skip has review threads without a reply"; exit 2;;
+  unanswered) echo "REFUSE #$n: the cadence skip has review threads without an authorized reply"; exit 2;;
   ''|*[!0-9]*) echo "REFUSE #$n: could not read the review threads"; exit 2;;
   *) echo "REFUSE #$n: $u unresolved threads"; exit 2;;
 esac
@@ -70,6 +70,7 @@ if [ -n "$overlap" ] && [ "$allow" != "--allow-overlap" ]; then
 fi
 kw=$( { gh pr view "$n" --json body --jq .body; git log --format=%B "$base..$head"; } | grep -oiE '\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #[0-9]+' | sort -u | tr '\n' ' ')
 [ -n "$kw" ] && [ -z "$ORCH_KEYWORDS_OK" ] && { echo "REFUSE #$n: closing keywords would close issues before they are verified: $kw (edit the body or commits to say Refs, or ORCH_KEYWORDS_OK=1)"; exit 4; }
+latest_attempt=$(or_latest_pr_ci_attempt "$n" "$head") && [ "$latest_attempt" = "$ci_attempt" ] || { echo "REFUSE #$n: could not confirm the latest PR CI attempt on ${head:0:8}"; exit 2; }
 latest_head=$(gh pr view "$n" --json headRefOid --jq .headRefOid) && [ "$latest_head" = "$head" ] || { echo "REFUSE #$n: could not confirm that the head is still ${head:0:8}"; exit 2; }
 [ -n "$ORCH_DRY" ] && { echo "DRY #$n: would merge ${head:0:8}"; exit 0; }
 gh pr merge "$n" "--$method" --match-head-commit "$head" || exit 1

@@ -48,15 +48,15 @@ Keep the copied Bash gate compatible with Bash 3.2 and macOS. Preserve main CI, 
 
 - [x] Clerk gate scripts. Validate the current PR CI workflow run and attempt jobs against the pinned SHA and retain the existing pending/failure checks. Read the configured Kody App evidence through GitHub and require one of the two completed-review paths. Refuse missing or incomplete records and verify all review threads, including the PR head reported with the thread evidence.
 - [x] Offline clerk fixtures. Stub both `gh` and `git` with GitHub-shaped data and run the real gate with `ORCH_DRY=1`. Exercise both permitted paths and the refusals above, including identity spoofing, wrong PR or SHA, and truncated or malformed evidence.
-- [ ] Canonical plan. Record independent review and dry-run results and add the Built link to the lane PR.
+- [x] Canonical plan. Record independent review and dry-run results and add the Built link to the lane PR.
 
 Given readable evidence for one permitted review path, a green main, successful current Python jobs, and all existing gates satisfied, when the clerk dry-runs the PR, then it names the pinned SHA and exits 0. Given missing or invalid evidence, when the same command runs, then it exits with a refusal before reaching the merge command.
 
 ## Implementation Notes
 
-- The PR gate validates the newest Actions run for the two Python jobs, then confirms the attempt is still current after reading the jobs. The existing main CI selector still handles the base branch.
+- The PR gate validates the newest Actions run for the two Python jobs, then confirms the attempt is still current immediately before the final head check. The existing main CI selector still handles the base branch.
 - The Kody evidence gate checks the configured App identity, terminal conclusion, and exact summary. If the check omits its PR association, GitHub must identify the target PR uniquely on that commit and the check must have started at or after PR creation.
-- A cadence skip needs a trusted opening SHA, the App's completed success on that SHA, and a reply on each resolved review thread. A final PR head read also protects the dry-run result.
+- A cadence skip needs a trusted opening SHA, the App's completed success on that SHA, and a reply on each resolved review thread from the PR author or an authorized repository participant. The reviewer's own follow-up and bot replies do not count.
 
 ## Plan Change Log
 
@@ -70,6 +70,8 @@ Given readable evidence for one permitted review path, a green main, successful 
 - Medium, patch. A resolved thread can have no reply. In the cadence-skip path, verify both a reply and a resolved thread.
 - High, patch. GitHub's commit association can omit a prior closed or moved PR. For Kody checks with no direct PR association, reject checks started before the target PR opened and require valid GitHub timestamps.
 - Three independent native reviewers checked the implementation. Follow-up review verified the corrections. GitHub's indirect association still cannot distinguish historical PRs it omits if their check times overlap the target PR.
+- Opening automatic Kody review completed on PR #158. Two threads led to the final CI attempt check and authorized reply validation. Two threads recorded the trusted opening record and the approved GitHub association limit.
+- Both opening-head Python jobs caught deterministic shell fixture drift after the parity suite landed on main. The follow-up supplies GitHub-shaped proof to the existing offline shell fixture, preserving parity coverage for the shared rules.
 
 ## Design Notes
 
@@ -81,5 +83,6 @@ Given readable evidence for one permitted review path, a green main, successful 
 ## Verification
 
 - Run `/bin/bash -n` on the changed shell scripts and execute the fixture suite with `/bin/bash` from the checkout.
-- Bash 3.2 syntax, ShellCheck, and all 84 offline fixture cases passed.
+- Bash 3.2 syntax, ShellCheck, and all 97 offline fixture cases passed. The offline application and clerk parity fixture also passed on Python 3.14 and 3.15.
 - After the clerk merges, verify the merge commit is on main, both Python CI jobs are green on that commit, and the same fixture suite passes from that exact main revision.
+- Built: https://github.com/mgd43b/plotroom/pull/158
