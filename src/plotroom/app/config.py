@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -47,6 +47,7 @@ class Config:
     projects: tuple[str, ...]
     log_max_bytes: int = DEFAULT_LOG_MAX_BYTES
     log_backups: int = DEFAULT_LOG_BACKUPS
+    drain_sessions: Mapping[str, str] = field(default_factory=lambda: {})
 
     @property
     def url(self) -> str:
@@ -104,6 +105,7 @@ def load_config(
         DEFAULT_ALLOWED_HOSTS,
     )
     projects = _projects(env.get("PLOTROOM_PROJECTS"), raw.get("projects"))
+    drain_sessions = _drain_sessions(projects, raw.get("projects"))
     if require_projects and not projects:
         raise ConfigError(
             "no projects configured: add a [projects.<id>] table to the config file "
@@ -127,6 +129,7 @@ def load_config(
         projects=projects,
         log_max_bytes=log_max_bytes,
         log_backups=log_backups,
+        drain_sessions=drain_sessions,
     )
 
 
@@ -201,3 +204,20 @@ def _projects(env_value: str | None, table: Any) -> tuple[str, ...]:
     if len(set(ids)) != len(ids):
         raise ConfigError("project ids must be unique")
     return tuple(ids)
+
+
+def _drain_sessions(projects: tuple[str, ...], table: Any) -> dict[str, str]:
+    if not isinstance(table, dict):
+        return {}
+    entries = cast("dict[str, Any]", table)
+    sessions: dict[str, str] = {}
+    for project_id in projects:
+        settings: Any = entries.get(project_id, {})
+        if not isinstance(settings, dict):
+            raise ConfigError(f"projects.{project_id} must be a table")
+        project = cast("dict[str, Any]", settings)
+        if "drain_session" in project:
+            sessions[project_id] = _string(
+                f"projects.{project_id}.drain_session", project["drain_session"]
+            )
+    return sessions

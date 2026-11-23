@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from plotroom.core.events import EventKind, EventRegistry, FieldSpec, LedgerError
+from plotroom.core.roles import WriterRule
 from plotroom.core.unit_of_work import UnitOfWork
 
 CommandHandler = Callable[[UnitOfWork, dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -60,12 +61,14 @@ class CommandRegistry:
         self._events = events
         self._commands: dict[str, Command] = {}
 
-    def register(self, command: Command) -> None:
+    def register(self, command: Command, *, rules: tuple[WriterRule, ...] = ()) -> None:
         if command.name in self._commands:
             raise ValueError(f"command {command.name!r} is already registered")
-        self._events.register(
-            EventKind(command_kind(command.name), COMMAND_FIELDS, frozenset({COMMAND_APPENDER}))
-        )
+        kind = command_kind(command.name)
+        if self._events.get(kind) is not None:
+            raise ValueError(f"event kind {kind!r} is already registered")
+        self._events.writer_rules.declare(command.name, rules)
+        self._events.register(EventKind(kind, COMMAND_FIELDS, frozenset({COMMAND_APPENDER})))
         self._commands[command.name] = command
 
     def get(self, name: str) -> Command | None:

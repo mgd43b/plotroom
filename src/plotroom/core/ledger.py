@@ -17,7 +17,7 @@ from plotroom.core.events import (
     is_json,
     validate_fields,
 )
-from plotroom.core.roles import role_family
+from plotroom.core.roles import OwnershipView, role_family
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.writer import ProjectWriter
 from plotroom.ports.clock import Clock
@@ -32,9 +32,9 @@ class CommandResult:
     replayed: bool
 
 
-def _check_role(role: str) -> None:
+def _check_role(role: str) -> str:
     try:
-        role_family(role)
+        return role_family(role)
     except ValueError as exc:
         raise LedgerError("invalid", str(exc)) from None
 
@@ -83,10 +83,13 @@ class Ledger:
         and result in the same transaction. A retry returns that result and runs nothing.
         A failed handler leaves nothing behind and the error reaches the caller.
         """
-        _check_role(role)
+        family = _check_role(role)
         registered = self._catalog.commands.get(command)
         if registered is None:
             raise LedgerError("invalid", f"unknown command {command!r}")
+        rule = self._catalog.writer_rules.rule_for(command, family)
+        if rule is None:
+            raise LedgerError("forbidden", f"role {role!r} may not execute {command}")
         if not isinstance(request_id, str) or not request_id:  # pyright: ignore[reportUnnecessaryIsInstance]
             raise LedgerError("invalid", f"{command}: request_id must be a non-empty string")
         if not isinstance(args, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
@@ -102,9 +105,19 @@ class Ledger:
                 tx, self._catalog.events, self._clock, role=role, append_role=COMMAND_APPENDER
             )
             recorded = await uow.find_event("core", kind, upstream_id)
+            if recorded is None:
+                validate_fields(registered.args, snapshot, command)
+            # A retry can supply different arguments. Authorize the actual target of the
+            # receipt, so new arguments cannot make a previous target visible.
+            target: dict[str, Any] = snapshot if recorded is None else recorded.fields["args"]
+            if rule.owns is not None:
+                view = OwnershipView(role, uow.find_event)
+                if not await rule.owns(view, copy.deepcopy(target)):
+                    raise LedgerError(
+                        "forbidden", f"role {role!r} does not own the target of {command}"
+                    )
             if recorded is not None:
                 return CommandResult(recorded.fields["result"], True)
-            validate_fields(registered.args, snapshot, command)  # a retry never gets here
             result = await registered.handler(uow, copy.deepcopy(snapshot))
             if not isinstance(result, dict) or not is_json(result):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise TypeError(f"command {command!r} must return a JSON object")

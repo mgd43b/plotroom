@@ -12,6 +12,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import re
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, BinaryIO, cast
@@ -30,6 +31,7 @@ _BASE_HEADERS = {
     "content-type": "application/json",
     "accept": "application/json, text/event-stream",
 }
+_BEARER = re.compile(r"[A-Za-z0-9._~+/-]+=*")
 
 
 class UpstreamStartError(Exception):
@@ -81,9 +83,15 @@ class StdioProxy:
         http: httpx.AsyncClient | None = None,
         max_pending: int = DEFAULT_MAX_PENDING,
         ensure: Callable[[], Awaitable[str | None]] | None = None,
+        bearer: str | None = None,
+        current_url: Callable[[], Awaitable[str | None]] | None = None,
+        host_alias: str | None = None,
     ) -> None:
-        check_endpoint(url)
+        if bearer is not None and not _BEARER.fullmatch(bearer):
+            raise EndpointError("invalid bearer token")
+        check_endpoint(url, credentialed=bearer is not None)
         self._url = url
+        self._bearer = bearer
         self._shown_url = _display_url(url)
         self._max_pending = max_pending
         self._tasks: set[asyncio.Task[None]] = set()
@@ -97,13 +105,17 @@ class StdioProxy:
         self._gone = False
         self._negotiated: str | None = None
         self._ensure = ensure
+        self._current_url = current_url
+        self._host_alias = host_alias
         self._starting: asyncio.Task[str | None] | None = None
         self._ready = ensure is None
 
     async def run(self) -> None:
         """Read messages until stdin closes, then let in-flight calls finish."""
         owned = self._http is None
-        http = self._http or httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None))
+        http = self._http or httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, read=None), trust_env=self._bearer is None
+        )
         tasks = self._tasks
         try:
             while line := await asyncio.to_thread(self._stdin.readline):
@@ -200,13 +212,22 @@ class StdioProxy:
         if self._ensure is None:
             return None
         if self._ready:
-            return self._starting
+            previous = self._starting
+            # A local bearer stays bound to the owner of its data directory, even if another
+            # listener takes the port after that daemon exits.
+            current = self._url if self._current_url is None else await self._current_url()
+            if self._ready and current == self._url:
+                return self._starting
+            if self._starting is previous:
+                self._ready = False
+                self._starting = None
         starting = self._starting
         if starting is None or (starting.done() and starting.exception() is not None):
             starting = self._starting = asyncio.ensure_future(self._ensure())
         # Shielded: one canceled request must not abort the start the others are waiting on.
         url = await asyncio.shield(starting)
         if url is not None:
+            check_endpoint(url, credentialed=self._bearer is not None)
             self._url = url
             self._shown_url = _display_url(url)
         self._ready = True
@@ -227,6 +248,10 @@ class StdioProxy:
         try:
             relied_on = await self._ensure_ready()
             headers = envelope_headers(message, self._negotiated)
+            if self._bearer is not None:
+                headers["authorization"] = f"Bearer {self._bearer}"
+            if self._host_alias is not None:
+                headers["host"] = f"{self._host_alias}:{urlsplit(self._url).port}"
             async with http.stream("POST", self._url, content=body, headers=headers) as response:
                 content_type = response.headers.get("content-type", "")
                 if "text/event-stream" in content_type:
@@ -353,17 +378,19 @@ class EndpointError(ValueError):
     """The server URL cannot be used safely."""
 
 
-def check_endpoint(url: str) -> None:
-    """Refuse a URL that is not http(s), or that sends credentials in plaintext to another host."""
-    parts = urlsplit(url)
+def check_endpoint(url: str, *, credentialed: bool = False) -> None:
+    """Refuse non-HTTP endpoints and require HTTPS for remote credentials."""
     try:
+        parts = urlsplit(url)
         _ = parts.port
     except ValueError as exc:
         raise EndpointError("the endpoint URL has an invalid port") from exc
     host = parts.hostname
     if parts.scheme not in ("http", "https") or not host:
         raise EndpointError("the endpoint must be an http or https URL with a host")
-    carries_secret = bool(parts.username or parts.password or parts.query)
+    if credentialed and parts.username is not None:
+        raise EndpointError("the endpoint cannot contain user info when a bearer token is supplied")
+    carries_secret = credentialed or bool(parts.username or parts.password or parts.query)
     if parts.scheme == "http" and carries_secret and not _is_loopback(host):
         raise EndpointError(
             "refusing to send a credential in a plaintext http URL to a non-local host; use https"

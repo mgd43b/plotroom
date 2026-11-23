@@ -706,6 +706,14 @@ def test_loopback_https_and_unauthenticated_endpoints_are_allowed(url: str) -> N
     check_endpoint(url)
 
 
+def test_a_bearer_cannot_be_combined_with_endpoint_user_info() -> None:
+    url = "https://fixture-user:fixture-password@plotroom.example.org/mcp"
+    check_endpoint(url)
+    with pytest.raises(EndpointError, match="cannot contain user info") as raised:
+        StdioProxy(url, bearer="fixture-bearer")
+    assert "fixture-" not in str(raised.value)
+
+
 async def test_refusals_stay_bounded_while_a_cancelled_write_is_stuck() -> None:
     write_started = threading.Event()
     release = threading.Event()

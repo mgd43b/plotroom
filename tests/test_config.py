@@ -131,6 +131,22 @@ def test_projects_are_optional_for_a_client(tmp_path: Path) -> None:
     assert config.port == 9000
 
 
+def test_drain_sessions_are_opt_in_and_project_scoped(tmp_path: Path) -> None:
+    path = write(
+        tmp_path,
+        '[projects.alpha]\ndrain_session = "alpha-desk"\n[projects.beta]\n',
+    )
+    assert load_config(path, {}).drain_sessions == {"alpha": "alpha-desk"}
+    assert load_config(path, {"PLOTROOM_PROJECTS": "beta"}).drain_sessions == {}
+
+
+@pytest.mark.parametrize("value", ['""', '"   "', "123", "true", "[]"])
+def test_invalid_drain_sessions_are_rejected(tmp_path: Path, value: str) -> None:
+    path = write(tmp_path, f"[projects.alpha]\ndrain_session = {value}\n")
+    with pytest.raises(ConfigError, match=r"projects\.alpha\.drain_session"):
+        load_config(path, {})
+
+
 def test_duplicate_project_ids_from_the_environment(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="unique"):
         load_config(write(tmp_path, ""), {"PLOTROOM_PROJECTS": "a,a"})

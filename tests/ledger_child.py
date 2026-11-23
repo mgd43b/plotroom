@@ -20,6 +20,7 @@ from plotroom.core.catalog import build_catalog
 from plotroom.core.commands import Command
 from plotroom.core.events import EventKind, FieldSpec, NewEvent
 from plotroom.core.ledger import Ledger
+from plotroom.core.roles import WriterRule
 from plotroom.core.unit_of_work import UnitOfWork
 
 BODY = "x" * 1_000_000
@@ -46,7 +47,7 @@ async def main(data_dir: Path) -> int:
         print("NOSPILL", flush=True)
         sys.exit(3)
 
-    catalog.commands.register(Command("bulk", (), bulk))
+    catalog.commands.register(Command("bulk", (), bulk), rules=(WriterRule("orchestrator"),))
     store = SqliteStore("demo", data_dir)
     await store.migrate()
     ledger = Ledger(store, catalog, SystemClock())

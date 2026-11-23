@@ -19,6 +19,7 @@ from plotroom.app.config import Config
 from plotroom.app.lock import DataDirLock
 from plotroom.app.portfile import remove_port, write_port
 from plotroom.app.sqlite_floor import floor_problem
+from plotroom.app.tokens import TokenRegistry
 from plotroom.core.catalog import build_catalog
 from plotroom.core.ledger import Ledger
 from plotroom.ports import Clock
@@ -27,7 +28,7 @@ log = logging.getLogger("plotroom.serve")
 
 
 class _Server(uvicorn.Server):
-    """uvicorn's server that publishes the port it actually bound."""
+    """uvicorn's server that publishes the address it actually bound."""
 
     def __init__(
         self, config: uvicorn.Config, started: asyncio.Future[int], data_dir: Path
@@ -60,11 +61,12 @@ class _Server(uvicorn.Server):
         await super().startup(sockets=sockets)
         if self.started and not self._started_future.done():
             bound: Any = self.servers[0].sockets[0].getsockname()
+            host = str(bound[0])
             port = int(bound[1])
             # Published before anyone is told the server is up: a client that sees "serving" in
             # the log, or reads the file, finds the same port.
             try:
-                write_port(self._data_dir, port)
+                write_port(self._data_dir, port, host=host)
             except BaseException:
                 # uvicorn skips its own shutdown when startup raises, which would leave the
                 # listener open after the lock is released.
@@ -141,7 +143,13 @@ class Daemon:
                     log.error("not ready", extra={"reason": problem})
                 else:
                     await self._open_projects()
-                app = build_app(config.projects, config.allowed_hosts, unavailable=problem)
+                app = build_app(
+                    config.projects,
+                    config.allowed_hosts,
+                    ledgers=self.ledgers,
+                    authenticate=TokenRegistry(config.data_dir).authenticate,
+                    unavailable=problem,
+                )
                 uvicorn_config = uvicorn.Config(
                     app,
                     host=config.host,

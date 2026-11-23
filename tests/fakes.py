@@ -19,6 +19,7 @@ from plotroom.core.commands import Command, CommandError
 from plotroom.core.events import AppendResult, EventKind, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
 from plotroom.core.ledger import Ledger
+from plotroom.core.roles import WriterRule
 from plotroom.core.unit_of_work import UnitOfWork
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -163,10 +164,12 @@ class Fixture:
             EventKind("fixture.noted", (FieldSpec("text", "str"),), frozenset({"system"}))
         )
         self.catalog.commands.register(
-            Command("record_note", (FieldSpec("key", "str"), FieldSpec("text", "str")), self._note)
+            Command("record_note", (FieldSpec("key", "str"), FieldSpec("text", "str")), self._note),
+            rules=(WriterRule("orchestrator"), WriterRule("clerk"), WriterRule("worker")),
         )
         self.catalog.commands.register(
-            Command("explode", (FieldSpec("mode", "str"),), self._explode)
+            Command("explode", (FieldSpec("mode", "str"),), self._explode),
+            rules=(WriterRule("orchestrator"), WriterRule("clerk")),
         )
 
     async def _note(self, uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
