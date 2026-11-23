@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "76"
 remote: "https://github.com/mgd43b/plotroom/issues/76"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Tracer: a conflicting claim raises an overlap item
