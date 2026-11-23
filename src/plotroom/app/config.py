@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from plotroom.adapters.claude_desktop import SESSION_ID
 from plotroom.adapters.github import RECONCILE_EVERY, github_secret_name
 from plotroom.adapters.github.ticket_tree import validate_tree_path
+from plotroom.core.briefs import BriefSettings
 from plotroom.core.merge_gate import GatePolicy
 from plotroom.core.roles import role_family
 from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, MIN_BOARD_BUDGET
@@ -117,6 +118,7 @@ class Config:
     github_ticket_trees: Mapping[str, tuple[str, Path]] = field(default_factory=lambda: {})
     github_issue_sources: Mapping[str, GitHubIssuesConfig] = field(default_factory=lambda: {})
     delivery_routes: Mapping[str, Mapping[str, DeliveryRoute]] = field(default_factory=lambda: {})
+    briefs: Mapping[str, BriefSettings] = field(default_factory=lambda: {})
 
     @property
     def url(self) -> str:
@@ -212,6 +214,7 @@ def load_config(
         github=github,
         github_ticket_trees=github_trees,
         github_issue_sources=github_issues,
+        briefs=_brief_settings(projects, raw.get("projects")),
         delivery_routes=_delivery_routes(projects, switchboards, worker_sessions, drain_sessions),
         wait_cap=_integer("wait_cap", raw.get("wait_cap", 240), minimum=1),
         snapshot_budget=_integer(
@@ -603,6 +606,41 @@ def _ticket_trees(
             ).resolve()
             sources[project_id] = tree, installation
     return sources
+
+
+def _brief_settings(projects: tuple[str, ...], table: Any) -> dict[str, BriefSettings]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, BriefSettings] = {}
+    defaults = BriefSettings()
+    for project_id in projects:
+        project = entries.get(project_id, {})
+        if "brief" not in project:
+            continue
+        label = f"projects.{project_id}.brief"
+        settings = project["brief"]
+        if not isinstance(settings, dict):
+            raise ConfigError(f"{label} must be a table")
+        settings = cast("dict[str, Any]", settings)
+        if settings.keys() - {"template", "plan", "result", "standing_rules"}:
+            raise ConfigError(f"{label} supports template, plan, result, and standing_rules")
+        template = settings.get("template", defaults.template)
+        if not isinstance(template, str) or not template.strip():
+            raise ConfigError(f"{label}.template must be a non-empty string")
+        rules = settings.get("standing_rules", [])
+        if not isinstance(rules, list):
+            raise ConfigError(f"{label}.standing_rules must be a list of strings")
+        try:
+            configured[project_id] = BriefSettings(
+                template=template,
+                plan=_string(f"{label}.plan", settings.get("plan", defaults.plan)),
+                result=_string(f"{label}.result", settings.get("result", defaults.result)),
+                standing_rules=tuple(
+                    _string(f"{label}.standing_rules", rule) for rule in cast("list[Any]", rules)
+                ),
+            )
+        except ValueError as exc:
+            raise ConfigError(f"{label}.template {exc}") from None
+    return configured
 
 
 def _github_work_items(

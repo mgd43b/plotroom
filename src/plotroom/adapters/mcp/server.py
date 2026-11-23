@@ -27,6 +27,7 @@ from plotroom.core.snapshot import (
     render_snapshot,
 )
 from plotroom.ports.session_reader import SessionEvent
+from plotroom.ports.work_items import WorkItemSource
 
 _NEXT_PAGE_SIZE = 64
 
@@ -118,6 +119,7 @@ def build_app(
     *,
     ledgers: Mapping[str, Ledger],
     authenticate: Authenticate,
+    work_item_sources: Mapping[str, WorkItemSource] | None = None,
     unavailable: str | None = None,
     snapshot_budget: int = DEFAULT_SNAPSHOT_BUDGET,
     next_budget: int = DEFAULT_SNAPSHOT_BUDGET,
@@ -209,6 +211,25 @@ def build_app(
             return err(exc.code, exc.message)
 
     server.tool(name="next")(next_items)
+
+    @server.tool()
+    async def brief(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], work_item: str, worker: str
+    ) -> dict[str, Any]:
+        """Read a proposed lane brief filled from the ticket and current path claims."""
+        try:
+            caller = board_access(ctx)
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            source = (
+                None
+                if work_item_sources is None
+                else work_item_sources.get(caller.identity.project_id)
+            )
+            text = await caller.ledger.brief(caller.identity.role, work_item, worker, source)
+            return ok({"brief": text})
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
 
     @server.tool()
     async def merge_gate(  # pyright: ignore[reportUnusedFunction]

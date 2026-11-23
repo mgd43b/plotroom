@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import yaml
 
-from plotroom.ports.work_items import WorkItem
+from plotroom.ports.work_items import MAX_WORK_ITEM_BODY_BYTES, WorkItem
 
 _LEAF_TYPES = ("story", "spike", "bug")
 _STATES = ("backlog", "in-progress", "review", "done", "dropped")
@@ -221,6 +221,26 @@ class GitHubIssuesWorkItems:
     async def ready_items(self) -> tuple[WorkItem, ...]:
         rows = await self._read()
         return await asyncio.to_thread(self._classify, rows)
+
+    async def body(self, ref: str) -> str | None:
+        if re.fullmatch(r"[1-9][0-9]{0,18}", ref) is None:
+            return None
+        number = int(ref)
+        matches = [
+            row
+            for row in await self._read()
+            if row.get("resource") == "issue" and _number(row.get("number")) == number
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise GitHubIssuesError("the GitHub issue snapshot has duplicate issues")
+        body = matches[0].get("body")
+        if body is None:
+            return ""
+        if not isinstance(body, str) or len(body.encode("utf-8")) > MAX_WORK_ITEM_BODY_BYTES:
+            raise GitHubIssuesError("the GitHub issue snapshot has an invalid body")
+        return body
 
     def _classify(self, rows: tuple[dict[str, Any], ...]) -> tuple[WorkItem, ...]:
         mapping = _StoreMapping.load(self._starter, self._project_config, self._repository)

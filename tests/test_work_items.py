@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import BRIEF_TICKET_BODY, BRIEF_TICKET_REF, make_brief_ticket
 from fakes import FixedClock
 from plotroom.adapters import work_items_bmad
 from plotroom.adapters.store_sqlite import SqliteStore
@@ -12,7 +13,31 @@ from plotroom.app.runtime import ProjectRuntime
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import LedgerError
 from plotroom.core.ledger import Ledger
-from plotroom.ports.work_items import WorkItem
+from plotroom.ports.work_items import MAX_WORK_ITEM_BODY_BYTES, WorkItem
+
+
+async def test_local_body_preserves_text_and_bounds_ticket_files(tmp_path: Path) -> None:
+    tree, installation = make_brief_ticket(tmp_path)
+    source = BmadTicketTree(tree, installation)
+    assert await source.body(BRIEF_TICKET_REF) == BRIEF_TICKET_BODY
+    assert await source.body("unknown reference") is None
+    assert await source.body("--help") is None
+
+    ticket = tree / "tickets" / "story-fixture-ticket.md"
+    alternating = BRIEF_TICKET_BODY.replace("\n", "\r\n")
+    ticket.write_bytes(alternating.encode())
+    assert await source.body(BRIEF_TICKET_REF) == alternating
+    with ticket.open("ab") as file:
+        file.write(b"a" * MAX_WORK_ITEM_BODY_BYTES)
+    with pytest.raises(TicketTreeError, match="size limit"):
+        await source.body(BRIEF_TICKET_REF)
+
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(BRIEF_TICKET_BODY.encode())
+    ticket.unlink()
+    ticket.symlink_to(outside)
+    with pytest.raises(TicketTreeError, match="configured tree"):
+        await source.body(BRIEF_TICKET_REF)
 
 
 async def test_local_bmad_mirror_follows_plans_and_closes_idle_item(tmp_path: Path) -> None:
@@ -127,6 +152,9 @@ async def test_slow_tick_skips_elapsed_intervals_and_removed_conditions_close(
         async def ready_items(self) -> tuple[WorkItem, ...]:
             clock.advance(8)
             return (WorkItem("1.1", "Ready"),)
+
+        async def body(self, ref: str) -> str | None:
+            return None
 
     try:
         runtime = ProjectRuntime(

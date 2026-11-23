@@ -24,7 +24,7 @@ from plotroom.adapters.store_sqlite.items_sql import (
     open_items,
     open_overlaps,
 )
-from plotroom.adapters.store_sqlite.lanes_sql import board_lanes, lane_counts
+from plotroom.adapters.store_sqlite.lanes_sql import board_lanes, lane_counts, worker_lane
 from plotroom.adapters.store_sqlite.ledger_sql import (
     EVENTS_AFTER,
     HEAD_SEQ,
@@ -223,6 +223,11 @@ class SqliteStore:
         async with self._engine.connect() as connection:
             cursor = int((await connection.execute(HEAD_SEQ)).scalar_one())
             return cursor, await read_claims(connection, role, lane, offset, limit)
+
+    async def read_brief_claims(self, worker: str) -> tuple[str | None, list[Claim]]:
+        async with self._engine.connect() as connection:
+            lane = await worker_lane(connection, worker)
+            return lane.id if lane else None, await read_claims(connection, "orchestrator")
 
     async def read_overlaps(
         self, role: str, lane: str | None, pr: int | None, offset: int, limit: int

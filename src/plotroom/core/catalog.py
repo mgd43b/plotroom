@@ -12,6 +12,7 @@ from plotroom.core.branch_updates import (
     BRANCH_UPDATE_FIELDS,
     BRANCH_UPDATE_STAGED,
 )
+from plotroom.core.briefs import BRIEF
 from plotroom.core.claims import CLAIM_OVERLAP, PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, claim, release
 from plotroom.core.commands import Command, CommandRegistry
 from plotroom.core.deploy_window import freeze, unfreeze
@@ -70,6 +71,8 @@ class Catalog:
     commands: CommandRegistry
     items: dict[str, ItemKind] = field(default_factory=lambda: {})
     trigger_leaves: LeafRegistry | None = None
+    workers: frozenset[str] = frozenset()
+    read_roles: Mapping[str, frozenset[str]] = field(default_factory=lambda: {})
 
     def register_item(self, kind: ItemKind) -> None:
         if kind.name in self.items:
@@ -92,7 +95,13 @@ def build_catalog(
     """Every kind and command the server knows."""
     events = EventRegistry()
     leaves = build_leaf_registry(image_jobs=image_jobs, lane_idle_minutes=lane_idle_minutes)
-    catalog = Catalog(events, CommandRegistry(events), trigger_leaves=leaves)
+    catalog = Catalog(
+        events,
+        CommandRegistry(events),
+        trigger_leaves=leaves,
+        workers=workers,
+        read_roles={BRIEF: frozenset({"orchestrator"})},
+    )
     catalog.commands.register(
         Command(
             "ack",

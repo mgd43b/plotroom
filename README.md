@@ -37,6 +37,29 @@ The Issues source layers that file over the trusted installation's BMad GitHub
 starter. Without a milestone filter it includes open milestones and standalone
 tickets. The daemon preserves the last mirror when a source refresh fails.
 
+## Lane briefs
+
+The orchestrator can call `brief(work_item, worker)` for a configured worker.
+The tool returns a draft with the full text of the referenced ticket or issue,
+the worker's current claims, and the claims of other lanes to avoid. Use the
+source's work-item reference. For a BMad source the ticket must have a story
+file in the configured tree. Before a worker starts a lane, its paths section is
+empty. The orchestrator can edit the returned text before sending it.
+
+The optional project table configures the outline and standing rules. Plotroom
+defaults to a Markdown brief with headings and a short plan and RESULT outline.
+
+```toml
+[projects.example.brief]
+plan = "Scope, implementation steps, and verification."
+result = "Status, changes, verification evidence, and any remaining blockers."
+standing_rules = ["Use fixture data for acceptance tests."]
+```
+
+A custom `template` must use `{source_text}`, `{paths}`, `{dont_touch}`,
+`{plan}`, `{result}`, and `{standing_rules}`. It can also use `{worker}` and
+`{work_item}`. Write literal braces in the template as `{{` and `}}`.
+
 ## Local merge readiness
 
 The orchestrator and clerk can call `merge_gate(pr)` for an advisory verdict

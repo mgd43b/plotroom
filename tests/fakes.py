@@ -568,6 +568,17 @@ class MemoryStore:
         claims = _visible_claims(self._claims, self._lanes, role, lane)
         return self._seq, claims[offset : offset + limit]
 
+    async def read_brief_claims(self, worker: str) -> tuple[str | None, list[Claim]]:
+        lane = next(
+            (
+                lane.id
+                for lane in self._lanes.values()
+                if lane.worker == worker and lane.state != "archived"
+            ),
+            None,
+        )
+        return lane, _visible_claims(self._claims, self._lanes, "orchestrator")
+
     async def read_overlaps(
         self, role: str, lane: str | None, pr: int | None, offset: int, limit: int
     ) -> tuple[int, list[Item]]:

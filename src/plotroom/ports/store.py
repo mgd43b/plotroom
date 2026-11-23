@@ -177,6 +177,10 @@ class Store(Protocol):
         self, role: str, lane: str | None, offset: int, limit: int
     ) -> tuple[int, list[Claim]]: ...
 
+    async def read_brief_claims(self, worker: str) -> tuple[str | None, list[Claim]]:
+        """Read the worker's current lane and all active claims in one snapshot."""
+        ...
+
     async def read_overlaps(
         self, role: str, lane: str | None, pr: int | None, offset: int, limit: int
     ) -> tuple[int, list[Item]]: ...
