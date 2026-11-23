@@ -38,7 +38,7 @@ Refs #101.
 - `core/budgets.py` owns budget records, argument validation, and threshold decisions. Accept a positive finite cap and require a current lane. A run identifies one budget in its project.
 - `app/runtime.py` reads the optional fixture outside the writer and applies the poll within the tick. `app/serve.py` injects a meter per project.
 - `core/catalog.py` registers the writer command and system event kinds. `core/ledger.py` and `adapters/mcp/server.py` expose a fresh, orchestrator-only status query. Use typed MCP parameters and the usual command receipt only for mutations.
-- `ports/store.py`, `core/unit_of_work.py`, and `adapters/store_sqlite/` persist budget state with migration 0018. Migration 0018 follows clerk-import revision 0019 as merged on main.
+- `ports/store.py`, `core/unit_of_work.py`, and `adapters/store_sqlite/` persist budget state with migration 0018. Migration 0018 follows human-queue revision 0021 as merged on main.
 - `UnitOfWork.raise_item` computes keys as kind plus subject. Use kind `budget` and subject `<id>:<percent>`. A unique system threshold event keeps that item once-only after acknowledgment. Avoid lane activity changes for meter events.
 
 ## Tasks & Acceptance
@@ -69,7 +69,7 @@ Refs #101.
 - Medium · Patch. A platform-dependent year below 1000 could fail on the next poll. The meter uses a fixed-width ISO timestamp and tests its round trip.
 - Medium · Patch. A same-time wrong-meter fixture did not challenge grouping solely by run. The wrong meter now reports a newer sample.
 - Low · Out of scope. The provider field is a validated meter label. Source discovery and provider credentials belong to later integration. The stored scope accepts only staging or production.
-- Medium · Gate condition. Revision 0018 follows the merged clerk-import revision 0019. The populated upgrade preserves an existing checklist, imported lane metadata, and an indexed message, and exercises both budget scopes and routing.
+- Medium · Gate condition. Revision 0018 follows the merged human-queue revision 0021. The populated upgrade preserves queue data, an existing checklist, imported lane metadata, and an indexed message, and exercises both budget scopes and routing.
 - Low · Verified. MCP contract tests exercise fresh status and authorization. Daemon and ledger tests exercise the meter and resulting spend and warning items.
 
 ## Verification

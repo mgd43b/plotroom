@@ -7,11 +7,15 @@ from typing import TYPE_CHECKING, Literal
 
 from plotroom.core.events import FieldSpec, NewEvent
 from plotroom.core.github_projection import (
+    ASK_COMMENT_HISTORY,
     COMMENTS,
     FILES,
+    ISSUES,
     GitHubRecord,
     GitHubResource,
     apply_resource,
+    ask_history_version,
+    projected_issues,
 )
 from plotroom.core.lanes import infer_lane, refresh_ready_lanes
 
@@ -215,6 +219,17 @@ async def apply_comments(
 ) -> None:
     if await uow.fetch_cursor(repository, cursor_resource) != baseline:
         return
+    await _apply_comment_records(uow, repository, comments, as_of)
+    await uow.save_fetch_cursor(
+        repository,
+        cursor_resource,
+        FetchCursor(watermark, as_of, baseline.generation + 1 if baseline else 1),
+    )
+
+
+async def _apply_comment_records(
+    uow: UnitOfWork, repository: str, comments: tuple[GitHubRecord, ...], as_of: str
+) -> None:
     for comment in comments:
         prior = await uow.github_resource(repository, COMMENTS, comment.key)
         if prior and prior.records[0].fields["updated_at"] > comment.fields["updated_at"]:
@@ -223,8 +238,30 @@ async def apply_comments(
             await apply_resource(
                 uow, repository, COMMENTS, comment.key, GitHubResource((comment,)), as_of
             )
-    await uow.save_fetch_cursor(
+
+
+async def apply_ask_comment_history(
+    uow: UnitOfWork,
+    repository: str,
+    number: int,
+    version: str,
+    comments: tuple[GitHubRecord, ...],
+    as_of: str,
+) -> None:
+    issue = projected_issues(await uow.github_resource(repository, ISSUES)).get(number)
+    if issue is None or ask_history_version(issue) != (version, len(comments)):
+        return
+    await _apply_comment_records(uow, repository, comments, as_of)
+    await uow.save_github_resource(
         repository,
-        cursor_resource,
-        FetchCursor(watermark, as_of, baseline.generation + 1 if baseline else 1),
+        ASK_COMMENT_HISTORY,
+        str(number),
+        GitHubResource(
+            (),
+            attributes={
+                "version": version,
+                "comment_ids": [row.fields["id"] for row in comments],
+            },
+            as_of=as_of,
+        ),
     )

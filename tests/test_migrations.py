@@ -18,12 +18,19 @@ from plotroom.adapters.store_sqlite import SqliteStore, head_revision, script_he
 from plotroom.adapters.store_sqlite.migrate import MIGRATIONS_DIR, alembic_config, upgrade_to_head
 from plotroom.app.config import GitHubConfig
 from plotroom.app.serve import Daemon
+from plotroom.core.ask_checks import Ask
 from plotroom.core.catalog import build_catalog
 from plotroom.core.checklists import Checklist, ChecklistStep
 from plotroom.core.claims import TICKET_TREE_MOVE
 from plotroom.core.events import NewEvent
-from plotroom.core.github import PR_MERGED, PR_OPENED, ObservedPull
-from plotroom.core.github_projection import FILES, GitHubRecord, GitHubResource
+from plotroom.core.github import PR_MERGED, PR_OPENED, ObservedPull, apply_comments
+from plotroom.core.github_projection import (
+    FILES,
+    ISSUES,
+    GitHubRecord,
+    GitHubResource,
+    apply_resource,
+)
 from plotroom.core.lanes import Lane
 from plotroom.core.ledger import Ledger
 from plotroom.core.unit_of_work import UnitOfWork
@@ -356,6 +363,96 @@ async def test_a_file_with_an_unknown_revision_is_not_migrated(tmp_path: Path) -
         await store.close()
 
 
+async def test_populated_human_queue_upgrade_preserves_projected_comment(tmp_path: Path) -> None:
+    previous = "0019"
+    legacy = _migrations_at(tmp_path / "legacy", previous)
+    repo = "fixture/queue"
+    human = "fixture-human"
+    stamp = "2026-11-22T12:00:00.000000Z"
+    words = "  Café\r\nShip.  "
+    fields = {"id": 900, "number": 1, "author": human, "created_at": stamp, "updated_at": stamp}
+    comment = GitHubRecord("900", "issue_comment", fields, words)
+    lane = Lane(
+        "fixture-lane",
+        "fixture-worker",
+        (),
+        "fixture-branch",
+        imported_channel="fixture-channel",
+        imported_trigger_id="fixture-trigger",
+    )
+    store = SqliteStore("demo", tmp_path)
+    await upgrade_to_head(store._engine, alembic_config(legacy))  # pyright: ignore[reportPrivateUsage]
+    assert await store.revision() == previous
+    ledger = Ledger(store, build_catalog(), FixedClock())
+    ledger.start()
+    try:
+        issue = GitHubRecord(
+            "issue/1",
+            "issue_opened",
+            {"number": 1, "state": "open"},
+            details={"resource": "issue"},
+            fact="open",
+        )
+
+        async def existing_queue_inputs(uow: UnitOfWork) -> None:
+            await uow.save_lane(lane)
+            await apply_resource(uow, repo, ISSUES, "", GitHubResource((issue,)), stamp)
+            await apply_comments(uow, repo, None, (comment,), stamp, stamp)
+
+        await ledger.run("system", existing_queue_inputs)
+        before = await ledger.events_after(0)
+        assert [event.kind for event in before] == ["github.issue_opened", "github.issue_comment"]
+    finally:
+        await ledger.stop()
+        await store.close()
+
+    upgraded = SqliteStore("demo", tmp_path)
+    ledger = Ledger(
+        upgraded,
+        build_catalog(github_repository=repo, human_login=human),
+        FixedClock(),
+        github_repository=repo,
+        human_login=human,
+    )
+    try:
+        await upgraded.migrate()
+        assert await upgraded.revision() == head_revision()
+        assert await upgraded.events_after(0) == before
+        _, _, _, lanes = await upgraded.read_board("orchestrator")
+        assert lanes == [lane]
+        ledger.start()
+        ask = await ledger.execute(
+            "orchestrator",
+            "ask",
+            "post-upgrade-ask",
+            {"issue": 1, "comment_id": 900, "text": words, "options": ["A"]},
+        )
+        await ledger.execute(
+            "orchestrator",
+            "decide",
+            "post-upgrade-decision",
+            {
+                "who": human,
+                "exact_words": words,
+                "where_ref": {
+                    "kind": "github_comment",
+                    "repository": repo,
+                    "issue": 1,
+                    "comment_id": 900,
+                },
+                "governs": [f"{repo}#1"],
+                "settles": [ask.result["ask_id"]],
+            },
+        )
+        [decision] = await ledger.list_decisions("orchestrator", f"{repo}#1")
+        [recorded_ask] = await ledger.list_asks("orchestrator", False)
+        assert decision["exact_words"].encode() == words.encode()
+        assert recorded_ask["settled_by"] == decision["decision_id"]
+    finally:
+        await ledger.stop()
+        await upgraded.close()
+
+
 def test_two_revisions_with_the_same_parent_are_detected(tmp_path: Path) -> None:
     """The check CI relies on: a parallel entry that forgot to re-parent makes a second head."""
     copy = tmp_path / "migrations"
@@ -580,13 +677,13 @@ async def test_guardrail_upgrade_preserves_existing_ledger_and_enables_budgets_a
 ) -> None:
     guardrails = ScriptDirectory.from_config(alembic_config()).get_revision("0018")
     assert guardrails is not None
-    assert guardrails.down_revision == "0019"
-    prior = alembic_config(_migrations_at(tmp_path / "before-guardrails", "0019"))
+    assert guardrails.down_revision == "0021"
+    prior = alembic_config(_migrations_at(tmp_path / "before-guardrails", "0021"))
     store = SqliteStore("demo", tmp_path)
     ledger = Ledger(store, build_catalog(frozenset({"fixture"})), FixedClock(), search=store)
     try:
         await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
-        assert await store.revision() == "0019"
+        assert await store.revision() == "0021"
         ledger.start()
         await ledger.execute(
             "orchestrator",
@@ -621,8 +718,33 @@ async def test_guardrail_upgrade_preserves_existing_ledger_and_enables_budgets_a
                 "migrationneedle",
             ),
         )
+        ask = Ask(
+            "ask_fixture",
+            "fixture/project",
+            7,
+            "Where should the fixture run?",
+            ("local", "defer"),
+            12,
+            "2026-11-23T00:00:00Z",
+            "2026-11-23T00:00:00Z",
+        )
+        await ledger.run("system", lambda uow: uow.save_ask(ask))
+        decision = await ledger.execute(
+            "orchestrator",
+            "decide",
+            "legacy-decision",
+            {
+                "who": "fixture",
+                "exact_words": "Use local fixtures",
+                "where_ref": {"kind": "chat", "ref": "fixture-decision"},
+                "governs": ["fixture-ticket"],
+                "settles": [],
+            },
+        )
+        [saved_decision] = await ledger.list_decisions("orchestrator", "fixture-ticket")
+        assert saved_decision["decision_id"] == decision.result["decision_id"]
         original = await ledger.events_after(0)
-        assert len(original) == 2
+        assert len(original) == 3
         await store.migrate()
         assert await store.revision() == head_revision()
         assert await ledger.events_after(0) == original
@@ -635,6 +757,8 @@ async def test_guardrail_upgrade_preserves_existing_ledger_and_enables_budgets_a
             "switchboard",
             "fixture-trigger",
         )
+        assert await ledger.run("system", lambda uow: uow.find_ask(ask.ask_id)) == ask
+        assert await ledger.list_decisions("orchestrator", "fixture-ticket") == [saved_decision]
         assert await ledger.budget_status("orchestrator") == []
         expected: list[dict[str, Any]] = []
         for scope in ("production", "staging"):

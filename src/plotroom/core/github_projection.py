@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from plotroom.core.events import FieldSpec, NewEvent
+from plotroom.core.events import FieldSpec, LedgerError, NewEvent
 from plotroom.core.lanes import infer_lane
 
 if TYPE_CHECKING:
@@ -23,6 +23,7 @@ PULL_TEXT = "pull_text"
 ISSUES = "issues"
 COMMENTS = "issue_comments"
 COMMENT_BACKFILL = "issue_comments_backfill"
+ASK_COMMENT_HISTORY = "ask_comment_history"
 ISSUE_TREE = "issue_tree"
 
 REPOSITORY = FieldSpec("repository", "str")
@@ -199,6 +200,53 @@ async def apply_resource(
         )
     ):
         uow.pull_overlaps_changed()
+
+
+def projected_issues(resource: GitHubResource | None) -> dict[int, GitHubRecord]:
+    if resource is None or not resource.complete:
+        return {}
+    return {
+        row.fields["number"]: row
+        for row in resource.records
+        if row.details.get("resource") == "issue"
+    }
+
+
+def ask_history_version(issue: GitHubRecord) -> tuple[str, int] | None:
+    count = issue.details.get("comment_count")
+    updated = issue.details.get("updated_at")
+    if (
+        issue.kind == "issue_closed"
+        and type(count) is int
+        and count >= 0
+        and isinstance(updated, str)
+        and updated
+    ):
+        return f"{updated}/{count}", count
+    return None
+
+
+async def projected_comment(
+    uow: UnitOfWork, repository: str, issue: int, comment_id: int
+) -> GitHubRecord:
+    scope = str(comment_id)
+    resource = await uow.github_resource(repository, COMMENTS, scope)
+    if resource is None or not resource.complete or not resource.records:
+        raise LedgerError(
+            "unavailable", "the cited comment is not projected yet; retry after polling"
+        )
+    if len(resource.records) == 1:
+        (comment,) = resource.records
+        if (
+            comment.kind == "issue_comment"
+            and comment.key == scope
+            and type(comment.fields.get("id")) is int
+            and comment.fields["id"] == comment_id
+            and type(comment.fields.get("number")) is int
+            and comment.fields["number"] == issue
+        ):
+            return comment
+    raise LedgerError("invalid", "the projected comment does not match the cited issue and ID")
 
 
 def latest_checks(resource: GitHubResource) -> tuple[GitHubRecord, ...]:

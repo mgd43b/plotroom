@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from plotroom.core.actions import Action
+from plotroom.core.asks import reconcile_asks
 from plotroom.core.budgets import BUDGET_ITEM, BUDGET_THRESHOLD, Budget
 from plotroom.core.claims import Claim, reconcile_claim_pairs
 from plotroom.core.events import (
@@ -27,7 +28,10 @@ from plotroom.core.events import (
 )
 from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, PullRequest
 from plotroom.core.github_projection import (
+    ASK_COMMENT_HISTORY,
     CHECKS,
+    COMMENTS,
+    ISSUES,
     LABELS,
     MAIN,
     MAIN_CI,
@@ -47,7 +51,9 @@ from plotroom.ports.store import Transaction
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
+    from plotroom.core.ask_checks import Ask, IssueComment
     from plotroom.core.checklists import Checklist
+    from plotroom.core.human_queue import Decision
     from plotroom.core.outbox import OutboxLease, OutboxMessage
     from plotroom.core.triggers import Trigger
 
@@ -89,6 +95,8 @@ class UnitOfWork:
         self.merge_pull_numbers: set[int] = set()
         self.merge_check_heads: set[str] = set()
         self.merge_observations: dict[int, tuple[PullRequest, bool]] = {}
+        self._ask_repositories: set[str] = set()
+        self._tick = False
 
     @property
     def role(self) -> str:
@@ -250,6 +258,8 @@ class UnitOfWork:
             self.merge_check_heads.add(scope)
         elif resource in (LABELS, THREADS, PULL_COMPARISON, PULL_TEXT):
             self.merge_pull_numbers.add(int(scope))
+        if resource in {ISSUES, COMMENTS, ASK_COMMENT_HISTORY}:
+            self._ask_repositories.add(repository)
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         return await self._tx.fetch_cursor(repository, resource)
@@ -258,6 +268,35 @@ class UnitOfWork:
         await self._tx.save_fetch_cursor(repository, resource, cursor)
         if resource == PULL_REQUESTS:
             self.all_merge_pulls = True
+
+    async def ask_for_comment(self, repository: str, comment_id: int) -> Ask | None:
+        return await self._tx.ask_for_comment(repository, comment_id)
+
+    async def find_ask(self, ask_id: str) -> Ask | None:
+        return await self._tx.find_ask(ask_id)
+
+    async def save_ask(self, ask: Ask) -> None:
+        await self._tx.save_ask(ask)
+        self._ask_repositories.add(ask.repository)
+
+    async def unsettled_asks(self, repository: str) -> list[Ask]:
+        return await self._tx.unsettled_asks(repository)
+
+    async def ask_comments(
+        self, repository: str, issues: set[int]
+    ) -> dict[int, list[IssueComment]]:
+        return await self._tx.ask_comments(repository, issues)
+
+    async def ask_comment_histories(
+        self, repository: str, issues: set[int]
+    ) -> dict[int, tuple[str, frozenset[int]]]:
+        return await self._tx.ask_comment_histories(repository, issues)
+
+    async def refresh_asks(
+        self, repository: str | None, human_login: str | None, stale_days: int
+    ) -> None:
+        if repository is not None and (self._tick or repository in self._ask_repositories):
+            await reconcile_asks(self, repository, human_login, stale_days)
 
     async def save_fetch_retry(
         self, repository: str, resource: str, retry: FetchRetry | None
@@ -317,6 +356,9 @@ class UnitOfWork:
 
     async def insert_outbox(self, message: OutboxMessage) -> None:
         await self._tx.insert_outbox(message)
+
+    async def insert_decision(self, decision: Decision) -> None:
+        await self._tx.insert_decision(decision)
 
     async def lease_outbox(self, lease_id: str, now: str, expires_at: str) -> OutboxLease | None:
         return await self._tx.lease_outbox(lease_id, now, expires_at)
@@ -421,6 +463,8 @@ class UnitOfWork:
             observed_at=format_time(self._clock.now()),
         )
         await self._tx.insert_event(stored)
+        if event.kind == "core.tick":
+            self._tick = True
         if self._search is not None:
             await self._search.index(self._tx, stored)
         return AppendResult(stored, True)

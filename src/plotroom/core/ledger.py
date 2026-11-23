@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from plotroom.core.actions import ACTION_PAGE_SIZE, Action, QueuedAction
+from plotroom.core.ask_checks import DEFAULT_ASK_STALE_DAYS
 from plotroom.core.briefs import BRIEF, BriefSettings
 from plotroom.core.catalog import Catalog
 from plotroom.core.claims import PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, Claim, sync_items
@@ -76,6 +77,8 @@ class Ledger:
         merge_clerk: Callable[[], Awaitable[bool]] | None = None,
         fixture_merge_enabled: bool = False,
         fixture_branch_updates: bool = False,
+        human_login: str | None = None,
+        ask_stale_days: int = DEFAULT_ASK_STALE_DAYS,
         search: Search | None = None,
     ) -> None:
         if search is not None and search.project_id != store.project_id:
@@ -101,6 +104,8 @@ class Ledger:
         self.session_workers = dict(session_workers or {})
         self._drain_enabled = drain_enabled
         self._brief_settings = brief_settings or BriefSettings()
+        self._human_login = human_login
+        self._ask_stale_days = ask_stale_days
         self._stopping = asyncio.Event()
 
     @property
@@ -231,6 +236,7 @@ class Ledger:
             result = await work(uow)
             await uow.refresh_overlaps(self.github_repository, self._github_tree_path)
             await self._refresh_merge_controller(uow)
+            await uow.refresh_asks(self.github_repository, self._human_login, self._ask_stale_days)
             await self._evaluate_triggers(tx)
             return result
 
@@ -309,6 +315,7 @@ class Ledger:
             if not isinstance(result, dict) or not is_json(result):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise TypeError(f"command {command!r} must return a JSON object")
             await uow.refresh_overlaps(self.github_repository, self._github_tree_path)
+            await uow.refresh_asks(self.github_repository, self._human_login, self._ask_stale_days)
             if registered.record_if is not None and not registered.record_if(result):
                 await tx.insert_noop_receipt(
                     command, upstream_id, {"args": snapshot, "result": result}
@@ -544,6 +551,21 @@ class Ledger:
                 github_unavailable=latest.github_unavailable,
             )
         )
+
+    async def list_decisions(self, role: str, governs: str | None) -> list[dict[str, Any]]:
+        if _check_role(role) != "orchestrator":
+            raise LedgerError("forbidden", "only the orchestrator may list decisions")
+        return [decision.render() for decision in await self._store.list_decisions(governs)]
+
+    async def pending_ask_issues(self, repository: str) -> set[int]:
+        if self._human_login is None or repository != self.github_repository:
+            return set()
+        return await self._store.pending_ask_issues(repository)
+
+    async def list_asks(self, role: str, stale_only: bool) -> list[dict[str, Any]]:
+        if role != "orchestrator":
+            raise LedgerError("forbidden", "only the orchestrator may list asks")
+        return [ask.render() for ask in await self._store.list_asks(stale_only)]
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return await self._store.pull_request(repository, number)

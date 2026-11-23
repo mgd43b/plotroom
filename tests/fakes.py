@@ -18,6 +18,7 @@ from typing import Any
 
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.actions import BRANCH_UPDATE, CONTROLLER_MERGE, Action, QueuedAction
+from plotroom.core.ask_checks import ASK_STALE, Ask, IssueComment, comment_time
 from plotroom.core.budgets import Budget
 from plotroom.core.catalog import Catalog
 from plotroom.core.checklists import Checklist
@@ -26,7 +27,8 @@ from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
 from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, GitHubSummary, PullRequest
-from plotroom.core.github_projection import GitHubResource
+from plotroom.core.github_projection import ASK_COMMENT_HISTORY, COMMENTS, GitHubResource
+from plotroom.core.human_queue import Decision
 from plotroom.core.lanes import Lane, with_projected_pr
 from plotroom.core.ledger import Ledger
 from plotroom.core.merge_gate import GateSnapshot, load_gate_snapshot
@@ -109,6 +111,8 @@ class _MemoryTransaction:
         self.leases: dict[str, OutboxLease] = {}
         self.delivered: set[str] = set()
         self.triggers: dict[str, Trigger] = {}
+        self.decisions: list[Decision] = []
+        self.asks: dict[str, Ask] = {}
         self.lanes: dict[str, Lane] = {}
         self.budgets: dict[str, Budget] = {}
         self.routes: dict[str, str] = {}
@@ -399,6 +403,68 @@ class _MemoryTransaction:
         self._live()
         return copy.deepcopy(self.triggers.get(trigger_id))
 
+    async def insert_decision(self, decision: Decision) -> None:
+        self._live()
+        self.decisions.append(copy.deepcopy(decision))
+
+    async def ask_for_comment(self, repository: str, comment_id: int) -> Ask | None:
+        self._live()
+        return next(
+            (
+                ask
+                for ask in self.asks.values()
+                if (ask.repository, ask.comment_id) == (repository, comment_id)
+            ),
+            None,
+        )
+
+    async def find_ask(self, ask_id: str) -> Ask | None:
+        self._live()
+        return self.asks.get(ask_id)
+
+    async def save_ask(self, ask: Ask) -> None:
+        self._live()
+        self.asks[ask.ask_id] = ask
+
+    async def unsettled_asks(self, repository: str) -> list[Ask]:
+        self._live()
+        return [
+            ask
+            for ask in self.asks.values()
+            if ask.repository == repository and ask.settled_by is None
+        ]
+
+    async def ask_comment_histories(
+        self, repository: str, issues: set[int]
+    ) -> dict[int, tuple[str, frozenset[int]]]:
+        self._live()
+        histories: dict[int, tuple[str, frozenset[int]]] = {}
+        for number in issues:
+            resource = self.github_resources.get((repository, ASK_COMMENT_HISTORY, str(number)))
+            if resource is not None:
+                histories[number] = (
+                    resource.attributes["version"],
+                    frozenset(resource.attributes["comment_ids"]),
+                )
+        return histories
+
+    async def ask_comments(
+        self, repository: str, issues: set[int]
+    ) -> dict[int, list[IssueComment]]:
+        self._live()
+        result: dict[int, list[IssueComment]] = {}
+        for (repo, kind, _), resource in self.github_resources.items():
+            if (repo, kind) != (repository, COMMENTS) or not resource.records:
+                continue
+            fields = resource.records[0].fields
+            if fields["number"] in issues:
+                result.setdefault(fields["number"], []).append(
+                    IssueComment(
+                        fields["id"], fields.get("author"), comment_time(fields["created_at"])
+                    )
+                )
+        return result
+
     async def open_triggers(self) -> list[Trigger]:
         self._live()
         return [copy.deepcopy(t) for t in self.triggers.values() if t.state == "open"]
@@ -522,6 +588,8 @@ class MemoryStore:
         self._leases: dict[str, OutboxLease] = {}
         self._delivered: set[str] = set()
         self._triggers: dict[str, Trigger] = {}
+        self._decisions: list[Decision] = []
+        self._asks: dict[str, Ask] = {}
         self._lanes: dict[str, Lane] = {}
         self._budgets: dict[str, Budget] = {}
         self._routes: dict[str, str] = {}
@@ -562,6 +630,8 @@ class MemoryStore:
         tx.leases = self._leases.copy()
         tx.delivered = self._delivered.copy()
         tx.triggers = copy.deepcopy(self._triggers)
+        tx.decisions = copy.deepcopy(self._decisions)
+        tx.asks = self._asks.copy()
         tx.lanes = self._lanes.copy()
         tx.budgets = self._budgets.copy()
         tx.routes = self._routes.copy()
@@ -587,6 +657,8 @@ class MemoryStore:
             self._actions = tx.actions
             self._outbox, self._leases, self._delivered = tx.outbox, tx.leases, tx.delivered
             self._triggers = tx.triggers
+            self._decisions = tx.decisions
+            self._asks = tx.asks
             self._lanes = tx.lanes
             self._budgets = tx.budgets
             self._routes = tx.routes
@@ -732,6 +804,31 @@ class MemoryStore:
         reader.fetch_cursors = self._fetch_cursors
         reader.freeze_reason = self._freeze_reason
         return await load_gate_snapshot(reader, repository, number)
+
+    async def list_decisions(self, governs: str | None) -> list[Decision]:
+        return [
+            copy.deepcopy(decision)
+            for decision in self._decisions
+            if governs is None or governs in decision.governs
+        ]
+
+    async def pending_ask_issues(self, repository: str) -> set[int]:
+        return {
+            ask.issue
+            for ask in self._asks.values()
+            if ask.repository == repository and ask.settled_by is None
+        }
+
+    async def list_asks(self, stale_only: bool) -> list[Ask]:
+        stale = {
+            item.subject_ref
+            for item in self._items.values()
+            if item.kind == ASK_STALE and item.state != "closed"
+        }
+        return sorted(
+            (ask for ask in self._asks.values() if not stale_only or ask.ask_id in stale),
+            key=lambda ask: (ask.created_at, ask.ask_id),
+        )
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return self._pulls.get((repository, number))

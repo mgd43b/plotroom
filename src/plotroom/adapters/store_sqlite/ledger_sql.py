@@ -12,11 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from plotroom.adapters.store_sqlite import (
     actions_sql,
+    asks_sql,
     budgets_sql,
     checklists_sql,
     claims_sql,
     embedding_sql,
     github_sql,
+    human_queue_sql,
     items_sql,
     lanes_sql,
     outbox_sql,
@@ -26,6 +28,7 @@ from plotroom.adapters.store_sqlite import (
     work_items_sql,
 )
 from plotroom.core.actions import Action
+from plotroom.core.ask_checks import Ask, IssueComment
 from plotroom.core.claims import Claim
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
@@ -38,6 +41,7 @@ from plotroom.ports.work_items import WorkItem
 if TYPE_CHECKING:
     from plotroom.core.budgets import Budget
     from plotroom.core.checklists import Checklist
+    from plotroom.core.human_queue import Decision
     from plotroom.core.outbox import OutboxLease, OutboxMessage
     from plotroom.core.triggers import Trigger
 
@@ -400,6 +404,31 @@ class SqliteTransaction:
 
     async def find_trigger(self, trigger_id: str) -> Trigger | None:
         return await triggers_sql.find_trigger(self._live(), trigger_id)
+
+    async def insert_decision(self, decision: Decision) -> None:
+        await human_queue_sql.insert_decision(self._live(), decision)
+
+    async def ask_for_comment(self, repository: str, comment_id: int) -> Ask | None:
+        return await asks_sql.ask_for_comment(self._live(), repository, comment_id)
+
+    async def find_ask(self, ask_id: str) -> Ask | None:
+        return await asks_sql.find_ask(self._live(), ask_id)
+
+    async def save_ask(self, ask: Ask) -> None:
+        await asks_sql.save_ask(self._live(), ask)
+
+    async def unsettled_asks(self, repository: str) -> list[Ask]:
+        return await asks_sql.unsettled_asks(self._live(), repository)
+
+    async def ask_comment_histories(
+        self, repository: str, issues: set[int]
+    ) -> dict[int, tuple[str, frozenset[int]]]:
+        return await asks_sql.ask_comment_histories(self._live(), repository, issues)
+
+    async def ask_comments(
+        self, repository: str, issues: set[int]
+    ) -> dict[int, list[IssueComment]]:
+        return await asks_sql.ask_comments(self._live(), repository, issues)
 
     async def open_triggers(self) -> list[Trigger]:
         return await triggers_sql.open_triggers(self._live())
