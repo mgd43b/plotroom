@@ -19,6 +19,7 @@ from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from plotroom.adapters.mcp import build_app
 from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.adapters.switchboard import Switchboard
 from plotroom.adapters.work_items_bmad import BmadTicketTree
 from plotroom.app.clock import SystemClock
 from plotroom.app.config import Config, ConfigError
@@ -350,6 +351,12 @@ class Daemon:
                 wait_cap=self._config.wait_cap,
             )
             project.ledger.start()
+            relay = self._config.switchboards.get(project_id)
+            switchboard = (
+                Switchboard(project.ledger, relay.board, relay.command, relay.senders)
+                if relay is not None
+                else None
+            )
             project.runtime = ProjectRuntime(
                 project.ledger,
                 self._clock,
@@ -357,6 +364,7 @@ class Daemon:
                 action_attempts=self._config.action_attempts,
                 workers=workers,
                 work_items=BmadTicketTree(*source) if source is not None else None,
+                inputs=(switchboard.run,) if switchboard is not None else (),
             )
             project.runtime.start()
 

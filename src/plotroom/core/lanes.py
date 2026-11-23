@@ -28,6 +28,12 @@ class Lane:
         return {**asdict(self), "work_items": list(self.work_items)}
 
 
+async def infer_lane(uow: UnitOfWork, *, worker: str | None) -> str | None:
+    """Resolve a provider's worker binding against the current lane in the input transaction."""
+    lane = await uow.worker_lane(worker) if worker is not None else None
+    return lane.id if lane is not None else None
+
+
 async def owns_lane(view: OwnershipView, args: dict[str, Any]) -> bool:
     lane = await view.find_lane(args["lane"])
     return lane is not None and view.role == f"worker:{lane.worker}"

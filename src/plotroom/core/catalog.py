@@ -58,6 +58,9 @@ def build_catalog(workers: frozenset[str] = frozenset()) -> Catalog:
     )
     catalog.register_item(ItemKind(FAILED_ACTION, 10, False, ("Inspect the failed action",)))
     events.register(EventKind("core.tick", (), frozenset({"system"})))
+    events.register(
+        EventKind("switchboard.message", (FieldSpec("sender", "str"),), frozenset({"system"}))
+    )
     for status in ("attempt", "done", "failed"):
         events.register(EventKind(f"core.action_{status}", ACTION_FIELDS, frozenset({"system"})))
     catalog.register_item(ItemKind(LANE_WAITING, 20, True, ("Reply to the worker",)))

@@ -28,6 +28,7 @@ class ProjectRuntime:
         handlers: Mapping[str, ActionHandler] | None = None,
         workers: frozenset[str] = frozenset(),
         work_items: WorkItemSource | None = None,
+        inputs: tuple[Callable[[], Awaitable[None]], ...] = (),
     ) -> None:
         self.ledger = ledger
         self.clock = clock
@@ -37,6 +38,7 @@ class ProjectRuntime:
         self.handlers: Mapping[str, ActionHandler] = handlers if handlers is not None else {}
         self.workers = workers
         self.work_items = work_items
+        self.inputs = inputs
         self._tasks: list[asyncio.Task[None]] = []
 
     async def tick_if_due(self) -> bool:
@@ -96,6 +98,7 @@ class ProjectRuntime:
 
     def start(self) -> None:
         self._tasks = [asyncio.create_task(self._ticks()), asyncio.create_task(self._actions())]
+        self._tasks.extend(asyncio.ensure_future(read()) for read in self.inputs)
 
     async def stop(self) -> None:
         for task in self._tasks:

@@ -45,6 +45,13 @@ class ConfigError(Exception):
 
 
 @dataclass(frozen=True)
+class SwitchboardConfig:
+    board: str
+    command: tuple[str, ...]
+    senders: Mapping[str, str]
+
+
+@dataclass(frozen=True)
 class Config:
     """The validated settings a plotroom process runs with."""
 
@@ -65,6 +72,7 @@ class Config:
     action_attempts: int = 3
     wait_cap: int = 240
     watchers: Mapping[str, tuple[str, ...]] = field(default_factory=lambda: {})
+    switchboards: Mapping[str, SwitchboardConfig] = field(default_factory=lambda: {})
 
     @property
     def url(self) -> str:
@@ -151,6 +159,7 @@ def load_config(
         workers=workers,
         ticket_trees=_ticket_trees(projects, raw.get("projects"), base),
         watchers=_watchers(projects, raw.get("projects"), drain_sessions),
+        switchboards=_switchboards(projects, raw.get("projects")),
         wait_cap=_integer("wait_cap", raw.get("wait_cap", 240), minimum=1),
         snapshot_budget=_integer(
             "snapshot_budget",
@@ -276,6 +285,37 @@ def _workers(projects: tuple[str, ...], table: Any) -> dict[str, frozenset[str]]
                     f"projects.{project_id}.workers.{name}: invalid worker name"
                 ) from exc
         configured[project_id] = frozenset(names)
+    return configured
+
+
+def _switchboards(projects: tuple[str, ...], table: Any) -> dict[str, SwitchboardConfig]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, SwitchboardConfig] = {}
+    boards: set[str] = set()
+    for project_id in projects:
+        project = entries.get(project_id, {})
+        if "switchboard" not in project:
+            continue
+        label = f"projects.{project_id}.switchboard"
+        raw_settings = project["switchboard"]
+        if not isinstance(raw_settings, dict):
+            raise ConfigError(f"{label} must be a table")
+        settings = cast("dict[str, Any]", raw_settings)
+        board = _string(f"{label}.board", settings.get("board"))
+        if not _SLUG.fullmatch(board) or board in boards:
+            raise ConfigError(f"{label}.board must be a unique lowercase slug")
+        boards.add(board)
+        command = _string_list(f"{label}.command", settings.get("command"), ("switchboard-relay",))
+        senders: dict[str, str] = {}
+        for worker, worker_settings in project.get("workers", {}).items():
+            if "switchboard_address" in worker_settings:
+                address = _string(
+                    f"{label} address for {worker}", worker_settings["switchboard_address"]
+                )
+                if address in senders:
+                    raise ConfigError(f"{label} worker addresses must be unique")
+                senders[address] = worker
+        configured[project_id] = SwitchboardConfig(board, command, senders)
     return configured
 
 
