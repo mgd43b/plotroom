@@ -224,8 +224,16 @@ async def record_pull_flakes(
         current is None
         or not current.complete
         or current.state != "open"
-        or current.version != pull.version
-        or current.head_sha != files.attributes.get("head_sha")
+        or (current.head_sha, current.version, current.updated_at)
+        != (pull.head_sha, pull.version, pull.updated_at)
+        or (current.head_sha, current.version, current.updated_at)
+        != (
+            files.attributes.get("head_sha"),
+            files.attributes.get("pull_version"),
+            files.attributes.get("pull_updated_at"),
+        )
+        or not files.attributes.get("base_ref")
+        or not files.attributes.get("base_sha")
     ):
         return
     paths: set[str] = set()
@@ -248,7 +256,8 @@ def main_runs(
     runs = tuple(
         run
         for run in main.records
-        if "workflow_id" in run.details
+        if run.details.get("main_branch_run") is True
+        and "workflow_id" in run.details
         and run.fields["status"] == "completed"
         and any("check_run_id" in job for job in run.fields["jobs"])
     )[:limit]

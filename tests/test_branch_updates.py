@@ -217,7 +217,9 @@ async def observe(
     await ledger.run("system", write)
 
 
-@pytest.mark.parametrize("after", ["unchanged", "moved", "closed"])
+@pytest.mark.parametrize(
+    "after", ["unchanged", "moved", "closed", "main_moved", "main_moved_after_crash"]
+)
 async def test_conflict_survives_lost_response_and_restart(tmp_path: Path, after: str) -> None:
     clock, port = FixedClock(), FixtureWrite(lose_response=True)
     attempts = 1 if after == "moved" else 3
@@ -235,7 +237,20 @@ async def test_conflict_survives_lost_response_and_restart(tmp_path: Path, after
         assert action is not None
         assert action.key == KEY
         assert action.attempts == 0
-        assert await runtime.run_one_action()
+        if after == "main_moved_after_crash":
+            # Process death preempted the local receipt after the fixture effect.
+            with pytest.raises(TimeoutError, match="response lost"):
+                await port.update_branch(
+                    repository=REPO,
+                    number=7,
+                    action_key=KEY,
+                    expected_head_sha=HEAD,
+                    expected_main_sha=TIP,
+                )
+            assert (pending := await ledger.pending_action()) is not None
+            assert pending.attempts == 0
+        else:
+            assert await runtime.run_one_action()
         assert port.effects == {KEY: BranchUpdateReceipt("conflict", TIP)}
         assert not (await ledger.read_board("worker:worker1"))[1]
     finally:
@@ -248,6 +263,11 @@ async def test_conflict_survives_lost_response_and_restart(tmp_path: Path, after
             await observe(ledger, head=NEXT, branch="other", main=NEXT, version=2)
         elif after == "closed":
             await observe(ledger, state="closed", main=NEXT, version=2)
+        elif after in {"main_moved", "main_moved_after_crash"}:
+            port.current_main = NEXT
+            await observe(ledger, main=NEXT, overlap=False)
+            verdict = await ledger.merge_gate("clerk", 7)
+            assert (verdict.verdict, verdict.head_sha) == ("MERGE", HEAD)
         else:
             await observe(ledger)
             assert not await runtime.stage_branch_update(7)
@@ -295,6 +315,7 @@ async def test_live_runtime_skips_fixture_queue_and_frozen_action_resumes(tmp_pa
         await ledger.execute("orchestrator", "freeze", "freeze", {"reason": "fixture deploy"})
         assert not await fixture.run_one_action()
         assert not port.calls
+        assert not port.lookups
 
         async def enqueue_later(uow: UnitOfWork) -> None:
             cause = (await uow.append(NewEvent("core", "core.tick", "later-tick"))).event
@@ -336,6 +357,7 @@ async def test_defer_until_refs_return_to_eligibility(tmp_path: Path, movement: 
         clock.advance(121)
         assert not await runtime.run_one_action()
         assert not port.calls
+        assert port.lookups == [KEY] * 3
         clock.advance(1)
         await observe(ledger)
         port.current_main = NEXT
@@ -353,7 +375,7 @@ async def test_defer_until_refs_return_to_eligibility(tmp_path: Path, movement: 
             assert (pending := await ledger.pending_action()) is not None
             assert pending.key == KEY
             assert port.calls == [KEY]
-            assert port.lookups == [KEY]
+            assert port.lookups == [KEY] * 4
             assert not port.effects
             await observe(ledger, main=NEXT, version=3)
             assert not await runtime.stage_branch_update(7)

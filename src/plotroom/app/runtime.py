@@ -173,20 +173,12 @@ class ProjectRuntime:
         async def dispatch(uow: UnitOfWork) -> None:
             snapshot = await load_gate_snapshot(uow, repository, number)
             pull = snapshot.pull
-            identity_changed = (
-                pull is not None
-                and pull.complete
-                and (
-                    pull.state != "open"
-                    or pull.head_sha != head_sha
-                    or pull.head_repository != repository
-                )
-            )
+            if snapshot.freeze_reason is not None:
+                raise _BranchUpdateDeferred
             update = self._eligible_update(uow, snapshot)
             eligible = update is not None and update.key == action.key
-            if not eligible and not identity_changed:
-                raise _BranchUpdateDeferred
             exhausted = action.attempts >= self.action_attempts
+            # A crash may leave a fixture receipt before any local attempt is committed.
             recovery_only = not eligible or exhausted
             main_sha = update.main_sha if update is not None and not recovery_only else None
             # The fixture call and final guard share the writer turn. A freeze or

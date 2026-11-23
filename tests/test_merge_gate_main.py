@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from fakes import FixedClock
-from plotroom.adapters.github import LocalGitHubCredential
+from plotroom.adapters.github import GitHubUnavailable, LocalGitHubCredential
 from plotroom.adapters.github.ci import fetch_main_ci
 from plotroom.adapters.github.details import GitHubDetailPoller
 from plotroom.adapters.github.pr_details import fetch_labels
@@ -34,7 +34,7 @@ OTHER_SHA = "f" * 40
 BRANCH = "trunk"
 
 
-def run(identifier: int, conclusion: str, sha: str = MAIN_SHA) -> dict[str, Any]:
+def run(identifier: int, conclusion: str | None, sha: str = MAIN_SHA) -> dict[str, Any]:
     return {
         **status(identifier, "Python CI", conclusion),
         "head_sha": sha,
@@ -42,6 +42,9 @@ def run(identifier: int, conclusion: str, sha: str = MAIN_SHA) -> dict[str, Any]
         "run_attempt": 1,
         "created_at": NOW,
         "workflow_id": 123,
+        "event": "push",
+        "repository": {"full_name": REPO},
+        "head_repository": {"full_name": REPO},
     }
 
 
@@ -342,7 +345,6 @@ async def test_provider_workflow_filter_and_failed_jobs_count(
         if path == f"/actions/workflows/{WORKFLOW}/runs":
             assert dict(request.url.params) == {
                 "branch": BRANCH,
-                "status": "completed",
                 "page": "1",
                 "per_page": "100",
             }
@@ -367,6 +369,77 @@ async def test_provider_workflow_filter_and_failed_jobs_count(
     snapshot = GateSnapshot(None, None, main_ci=replace(observed, as_of=NOW))
     verdict = determine_main_verdict(snapshot, POLICY, CHECKED_AT)
     assert verdict.kind == ("unreadable" if incomplete else verdict_kind)
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+async def test_configured_ci_requires_positive_default_branch_attribution(ambiguous: bool) -> None:
+    fork = {**run(15, "success"), "head_repository": {"full_name": "fork/repo"}}
+    same_repo_pr = {**run(14, "success"), "event": "pull_request_target"}
+    candidate = run(13, "startup_failure")
+    if ambiguous:
+        del candidate["head_repository"]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path.endswith(f"/actions/workflows/{WORKFLOW}/runs")
+        runs = [fork, same_repo_pr, candidate, run(12, "success")]
+        return httpx.Response(200, json={"total_count": len(runs), "workflow_runs": runs})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        api = GitHubReadClient(API, REPO)
+        if ambiguous:
+            with pytest.raises(ValueError, match="establish the workflow run's repository"):
+                await fetch_main_ci(api, client, "fixture", WORKFLOW, None, main())
+            return
+        observed = await fetch_main_ci(api, client, "fixture", WORKFLOW, None, main())
+    assert [entry.fields["id"] for entry in observed.records] == [13]
+    snapshot = GateSnapshot(None, None, main_ci=replace(observed, as_of=NOW))
+    assert determine_main_verdict(snapshot, POLICY, CHECKED_AT).kind == "red"
+
+
+@pytest.mark.parametrize("prior_fault", [None, "missing", "different_sha", "different_attempt"])
+async def test_pending_rerun_preserves_the_exact_previous_verdict(prior_fault: str | None) -> None:
+    paths: list[str] = []
+    earlier = run(4, "failure")
+    if prior_fault == "different_sha":
+        earlier["head_sha"] = OTHER_SHA
+    if prior_fault == "different_attempt":
+        earlier["run_attempt"] = 2
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix(f"/repos/{REPO}")
+        paths.append(path)
+        assert request.method == "GET"
+        if path == f"/actions/workflows/{WORKFLOW}/runs":
+            runs = [run(5, None), {**run(4, None), "run_attempt": 2}, run(3, "success")]
+            return httpx.Response(200, json={"total_count": len(runs), "workflow_runs": runs})
+        if path == "/actions/runs/4/attempts/1":
+            return (
+                httpx.Response(404)
+                if prior_fault == "missing"
+                else httpx.Response(200, json=earlier)
+            )
+        assert path == "/actions/runs/4/attempts/1/jobs"
+        return httpx.Response(200, json={"total_count": 1, "jobs": [status(41, "lint", "failure")]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        api = GitHubReadClient(API, REPO)
+        if prior_fault == "missing":
+            with pytest.raises(GitHubUnavailable):
+                await fetch_main_ci(api, client, "fixture", WORKFLOW, None, main())
+            return
+        if prior_fault is not None:
+            with pytest.raises(ValueError, match="establish the prior completed workflow attempt"):
+                await fetch_main_ci(api, client, "fixture", WORKFLOW, None, main())
+            return
+        observed = await fetch_main_ci(api, client, "fixture", WORKFLOW, None, main())
+        refreshed = await fetch_main_ci(api, client, "fixture", WORKFLOW, observed, main())
+    assert observed == refreshed
+    assert [entry.key for entry in observed.records] == ["4/1", "3/1"]
+    assert paths.count("/actions/runs/4/attempts/1") == 1
+    assert paths.count("/actions/runs/4/attempts/1/jobs") == 1
+    snapshot = GateSnapshot(None, None, main_ci=replace(observed, as_of=NOW))
+    assert determine_main_verdict(snapshot, POLICY, CHECKED_AT).kind == "red"
 
 
 async def test_poller_preserves_monitor_while_reading_configured_history(tmp_path: Path) -> None:

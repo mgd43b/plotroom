@@ -52,10 +52,15 @@ Given a fixture for each supported pattern, when evidence is polled again or rep
 - For a cross-commit main candidate, the successful check must publish a GitHub `notice` annotation with message `plotroom:test-outcome=passed`, the exact test ID in `title`, and the same repository-relative `path` as the failed test. The check-level same-head pattern uses the check's terminal pass.
 - Use the existing read adapter and writer hooks. Keep comparisons bounded and reuse complete immutable SHA-pair evidence when available. The main verdict consumer needs to resolve a candidate by failure check identity, so keep that identity available in the event record.
 - Retain the check-failure run link in projection details. For file-based evidence, ignore incomplete reads and require a concrete path. Define a bounded excerpt rather than copying whole annotation bodies.
+- Bind PR file evidence to the observed head, version and update time, and confirm that the base ref and SHA stay fixed through pagination. Probe past full intervening commit-file pages when GitHub omits the next link.
 
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Native review, fixed. PR file collection now confirms the base ref and SHA across pagination, and the writer checks the PR head, version, and update time before recording a candidate.
+- Native review, fixed. When a full intermediate commit file page lacks a next link, the fetcher verifies the terminal page. A reverted change to the test on a later page blocks flake proof.
+- Follow-through on CI attribution. The auxiliary main-run feed can supply flake proof only for positively attributed main runs. A fork's otherwise matching pass cannot discount a main failure.
 
 - High, patch. A later green workflow job can pass while a test is deselected. Require an explicit structured pass for the same test and file before deriving proof across main commits.
 - Medium, patch. Preserve structured evidence without an optional HTML link. The link is required for the check-level fallback.
@@ -65,4 +70,5 @@ Given a fixture for each supported pattern, when evidence is polled again or rep
 
 - `uv run python -m pytest tests/test_merge_flakes.py tests/test_github_details.py` — 20 passed on Python 3.14.10. Fixtures cover all three patterns, a green job without matching test proof, missing run URLs, acknowledgement followed by late annotations, unavailable annotations, incomplete comparisons, renamed or reverted test files, workflow identity, partial proof in a multi-test check, and acknowledgement across restart. The fixture permits only read requests.
 - Ruff and Pyright passed for the changed flake implementation and tests.
+- Flake and claims fixtures passed for the file-binding follow-up. They cover a base ref retarget, base SHA advancement, a same-version PR update before the writer commits, and a changed test file hidden after a full page without a next link.
 - Main proof requires exact workflow and check identities plus a complete SHA comparison. Each poll considers at most 12 recent workflow runs and starts at most four comparisons. Each comparison inspects at most 10 commits and refuses an ambiguous file count at the provider cap. Completed comparison evidence persists across restart.

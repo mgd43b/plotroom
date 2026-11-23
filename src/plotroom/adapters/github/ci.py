@@ -22,6 +22,9 @@ from plotroom.core.merge_flakes import is_failure
 
 MAX_EXCERPT = 500
 MAX_FAILURE_HISTORY = 100
+PENDING_WORKFLOW_STATUSES = frozenset(
+    {"expected", "in_progress", "pending", "queued", "requested", "waiting"}
+)
 TEST_PASSED = "plotroom:test-outcome=passed"
 
 
@@ -196,7 +199,11 @@ async def fetch_comparison(
             sha = string(commit["sha"])
             files: list[Row] = []
             async for file in api.pages(
-                client, token, f"/commits/{quote(sha, safe='')}", key="files"
+                client,
+                token,
+                f"/commits/{quote(sha, safe='')}",
+                key="files",
+                verify_terminal=True,
             ):
                 files.append(file)
                 if len(files) >= 300:
@@ -227,15 +234,17 @@ async def fetch_main(
         run_id = fields["id"]
         key = f"{run_id}/{attempt}"
         cached = old.get(key)
+        main_branch_run = _main_run_attribution(row, api.repository.lower(), branch) is True
         if (
             cached is not None
             and fields["status"] == "completed"
             and cached.fact == _state(fields)
             and cached.details.get("workflow_id") == row.get("workflow_id")
+            and cached.details.get("main_branch_run") is main_branch_run
         ):
             runs[key] = cached
         else:
-            runs[key] = await _workflow_run(api, client, token, row)
+            runs[key] = await _workflow_run(api, client, token, row, main_branch_run)
         preceding = f"{run_id}/{attempt - 1}"
         if attempt > 1 and fields["status"] != "completed" and preceding not in old:
             try:
@@ -246,7 +255,10 @@ async def fetch_main(
                 continue
             if number(earlier["id"]) != run_id or number(earlier["run_attempt"]) != attempt - 1:
                 raise ValueError("GitHub returned a different workflow attempt")
-            runs[preceding] = await _workflow_run(api, client, token, earlier)
+            earlier_on_main = _main_run_attribution(earlier, api.repository.lower(), branch)
+            runs[preceding] = await _workflow_run(
+                api, client, token, earlier, earlier_on_main is True
+            )
     # A rerun replaces the provider's list row for the previous attempt. Keep a bounded
     # recent history so a pending rerun cannot erase the previous completed verdict.
     merged = sorted(
@@ -268,10 +280,11 @@ async def fetch_main(
 
 
 async def _workflow_run(
-    api: GitHubReadClient, client: httpx.AsyncClient, token: str, row: Row
+    api: GitHubReadClient, client: httpx.AsyncClient, token: str, row: Row, main_branch_run: bool
 ) -> GitHubRecord:
     jobs = await _workflow_jobs(api, client, token, number(row["id"]), number(row["run_attempt"]))
-    return _workflow_record(row, jobs)
+    record = _workflow_record(row, jobs)
+    return replace(record, details={**record.details, "main_branch_run": main_branch_run})
 
 
 async def _main_head(
@@ -298,6 +311,7 @@ async def fetch_main_ci(
     )
     if not branch or not sha:
         raise ValueError("GitHub returned an invalid default branch")
+    repository = api.repository.lower()
     old = (
         {row.key: row for row in previous.records}
         if previous is not None
@@ -308,30 +322,45 @@ async def fetch_main_ci(
     )
     records: dict[str, GitHubRecord] = {}
     workflow_ids: set[int] = set()
+    seen_runs: set[int] = set()
     async for row in api.pages(
         client,
         token,
         f"/actions/workflows/{quote(workflow, safe='')}/runs",
         key="workflow_runs",
-        params={"branch": branch, "status": "completed"},
+        params={"branch": branch},
         verify_total=True,
     ):
+        record = _configured_run(row, repository, branch)
+        if record is None:
+            continue
         run_id, attempt = number(row["id"]), number(row["run_attempt"])
-        key = f"{run_id}/{attempt}"
         workflow_id = number(row["workflow_id"])
         workflow_ids.add(workflow_id)
         if (
-            row["status"] != "completed"
-            or row["head_branch"] != branch
-            or not string(row["head_sha"])
-            or not string(row["conclusion"])
-            or key in records
+            run_id in seen_runs
             or len(workflow_ids) != 1
             or (workflow.isdecimal() and int(workflow) != workflow_id)
         ):
             raise ValueError("GitHub returned inconsistent workflow evidence")
-        record = _workflow_record(row, [])
-        conclusion = row["conclusion"]
+        seen_runs.add(run_id)
+        if record.fields["status"] != "completed":
+            if attempt == 1:
+                continue
+            # The list replaces a run's last attempt as soon as its rerun is queued.
+            # Recover the prior completed attempt before considering any older run.
+            attempt -= 1
+            earlier = old.get(f"{run_id}/{attempt}")
+            if not _same_completed_attempt(earlier, record, attempt):
+                prior = obj(
+                    await api.get(client, token, f"/actions/runs/{run_id}/attempts/{attempt}")
+                )
+                earlier = _configured_run(prior, repository, branch)
+            if earlier is None or not _same_completed_attempt(earlier, record, attempt):
+                raise ValueError("GitHub could not establish the prior completed workflow attempt")
+            record = earlier
+        key = record.key
+        conclusion = record.fields["conclusion"]
         if conclusion in {"success", "startup_failure"}:
             records[key] = record
             break
@@ -339,8 +368,7 @@ async def fetch_main_ci(
         if (
             cached is not None
             and cached.fact == record.fact
-            and cached.fields["head_sha"] == record.fields["head_sha"]
-            and cached.details["workflow_id"] == workflow_id
+            and _same_completed_attempt(cached, record, attempt)
             and cached.details.get("jobs_complete") is True
         ):
             record = cached
@@ -352,14 +380,86 @@ async def fetch_main_ci(
             except GitHubUnavailable, httpx.RequestError, KeyError, TypeError, ValueError:
                 record = replace(record, details={**record.details, "jobs_complete": False})
             else:
-                record = _workflow_record(row, jobs)
-                record = replace(record, details={**record.details, "jobs_complete": True})
+                record = replace(
+                    record,
+                    fields={**record.fields, "jobs": jobs},
+                    details={**record.details, "jobs_complete": True},
+                )
         records[key] = record
         if len(records) == MAIN_CI_WINDOW:
             break
     return GitHubResource(
         tuple(records.values()),
         attributes={"branch": branch, "head_sha": sha, "workflow": workflow},
+    )
+
+
+def _main_run_attribution(row: Row, repository: str, branch: str) -> bool | None:
+    event = row.get("event")
+    if isinstance(event, str) and (event.startswith("pull_request") or event == "merge_group"):
+        return False
+    observed_branch = row.get("head_branch")
+    if isinstance(observed_branch, str) and observed_branch and observed_branch != branch:
+        return False
+    repositories: list[str | None] = []
+    for key in ("repository", "head_repository"):
+        value = row.get(key)
+        name = obj(value).get("full_name") if isinstance(value, dict) else None
+        repositories.append(name.lower() if isinstance(name, str) and name else None)
+    if any(name is not None and name != repository for name in repositories):
+        return False
+    if (
+        not isinstance(event, str)
+        or not event.isascii()
+        or not event.isidentifier()
+        or event != event.lower()
+        or observed_branch != branch
+        or None in repositories
+    ):
+        return None
+    return True
+
+
+def _configured_run(row: Row, repository: str, branch: str) -> GitHubRecord | None:
+    attribution = _main_run_attribution(row, repository, branch)
+    if attribution is False:
+        return None
+    if attribution is None or not string(row["head_sha"]):
+        raise ValueError("GitHub could not establish the workflow run's repository and trigger")
+    status, conclusion = string(row["status"]), row["conclusion"]
+    if not (
+        isinstance(conclusion, str) and bool(conclusion)
+        if status == "completed"
+        else status in PENDING_WORKFLOW_STATUSES and conclusion is None
+    ):
+        raise ValueError("GitHub returned invalid workflow attempt status")
+    record = _workflow_record(row, [])
+    return replace(
+        record,
+        details={
+            **record.details,
+            "repository": repository,
+            "event": row["event"],
+            "main_branch_run": True,
+        },
+    )
+
+
+def _same_completed_attempt(
+    earlier: GitHubRecord | None, current: GitHubRecord, attempt: int
+) -> bool:
+    return (
+        earlier is not None
+        and earlier.fields.get("status") == "completed"
+        and isinstance(earlier.fields.get("conclusion"), str)
+        and bool(earlier.fields["conclusion"])
+        and earlier.fields.get("attempt") == attempt
+        and earlier.fields.get("id") == current.fields["id"]
+        and earlier.fields.get("head_sha") == current.fields["head_sha"]
+        and type(earlier.details.get("workflow_id")) is int
+        and earlier.details["workflow_id"] == current.details["workflow_id"]
+        and earlier.details.get("repository") == current.details["repository"]
+        and earlier.details.get("event") == current.details["event"]
     )
 
 

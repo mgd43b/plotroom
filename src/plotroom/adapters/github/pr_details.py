@@ -38,16 +38,22 @@ async def fetch_threads(
 async def fetch_files(
     api: GitHubReadClient, client: httpx.AsyncClient, token: str, pr: PullRequest
 ) -> GitHubResource:
-    async def confirm_head() -> int:
+    async def confirm_pull() -> tuple[str, str, int]:
         current = obj(await api.get(client, token, f"/pulls/{pr.number}"))
-        if string(obj(current["head"])["sha"]) != pr.head_sha:
-            raise ValueError("PR head moved during file poll")
+        if string(obj(current["head"])["sha"]) != pr.head_sha or datetime.fromisoformat(
+            string(current["updated_at"])
+        ) != datetime.fromisoformat(pr.updated_at):
+            raise ValueError("PR changed during file poll")
+        base = obj(current["base"])
+        ref, sha = string(base["ref"]), string(base["sha"])
+        if not ref or not sha:
+            raise ValueError("PR base is unknown during file poll")
         count: Any = current["changed_files"]
         if type(count) is not int or not 0 <= count <= 3000:
             raise ValueError("invalid or unbounded PR file list")
-        return count
+        return ref, sha, count
 
-    expected = await confirm_head()
+    base_ref, base_sha, expected = await confirm_pull()
     records: list[GitHubRecord] = []
     async for row in api.pages(client, token, f"/pulls/{pr.number}/files"):
         path = string(row["filename"])
@@ -60,9 +66,20 @@ async def fetch_files(
         if "previous_filename" in row:
             fields["previous_path"] = string(row["previous_filename"])
         records.append(GitHubRecord(path, "pull_file", fields))
-    if expected != len({record.key for record in records}) or expected != await confirm_head():
+    if (base_ref, base_sha, expected) != await confirm_pull():
+        raise ValueError("PR base or changed file count moved during file poll")
+    if expected != len(records) or expected != len({record.key for record in records}):
         raise ValueError("incomplete PR file list")
-    return GitHubResource(tuple(records), attributes={"head_sha": pr.head_sha})
+    return GitHubResource(
+        tuple(records),
+        attributes={
+            "head_sha": pr.head_sha,
+            "base_ref": base_ref,
+            "base_sha": base_sha,
+            "pull_version": pr.version,
+            "pull_updated_at": pr.updated_at,
+        },
+    )
 
 
 async def fetch_labels(

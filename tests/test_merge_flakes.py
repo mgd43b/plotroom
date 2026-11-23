@@ -1,7 +1,9 @@
 """Exercise flake evidence through the read poller and the durable project writer."""
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import create_autospec
 
 import httpx
 import pytest
@@ -12,8 +14,11 @@ from plotroom.adapters.github.details import GitHubDetailPoller
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.catalog import build_catalog
+from plotroom.core.github import PullRequest
+from plotroom.core.github_projection import GitHubRecord, GitHubResource
 from plotroom.core.ledger import Ledger
-from plotroom.core.merge_flakes import FLAKE_EVENT, MAIN_FLAKE_EVENT
+from plotroom.core.merge_flakes import FLAKE_EVENT, MAIN_FLAKE_EVENT, record_pull_flakes
+from plotroom.core.unit_of_work import UnitOfWork
 from test_github_details import API, FIRST, LATER, MAIN_SHA, NOW, REPO, Fixture, status
 
 FAILED_MAIN = "4" * 40
@@ -51,9 +56,37 @@ class FlakeFixture(Fixture):
         super().__init__()
         self.fault = fault
         self.late_annotation = False
+        self.pr_reads = 0
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix(f"/repos/{REPO}")
+        if path == "/pulls/4" and self.fault in {"base_retargeted", "base_advanced"}:
+            response = super().handle(request)
+            current: dict[str, Any] = response.json()
+            self.pr_reads += 1
+            # The second read has an unchanged head, timestamp and file count.
+            if self.pr_reads % 2 == 0:
+                if self.fault == "base_retargeted":
+                    current["base"]["ref"] = "release"
+                else:
+                    current["base"]["sha"] = INTERMEDIATE
+            return httpx.Response(200, json=current)
+        if self.fault == "omitted_intervening_files_link" and path.startswith("/commits/"):
+            page = request.url.params.get("page")
+            if path == f"/commits/{INTERMEDIATE}":
+                self.requests.append(f"{path}?page={page}")
+                assert request.method == "GET"
+                files = (
+                    [
+                        {"filename": f"unrelated/{index}", "status": "modified"}
+                        for index in range(100)
+                    ]
+                    if page == "1"
+                    else [{"filename": "tests/test_main.py", "status": "modified"}]
+                )
+                return httpx.Response(200, json={"files": files})
+            if path == f"/commits/{MAIN_SHA}":
+                return httpx.Response(200, json={"files": []})
         main_annot = [annotation("tests/test_main.py", "test_main")]
         main_passed = [passed_test("tests/test_main.py", "test_main")]
         if self.fault == "mixed_main_failures":
@@ -90,6 +123,10 @@ class FlakeFixture(Fixture):
             **status(201, "ci", "success"),
             "workflow_id": 40,
             "head_sha": MAIN_SHA,
+            "head_branch": "trunk",
+            "repository": {"full_name": REPO},
+            "head_repository": {"full_name": REPO},
+            "event": "push",
             "run_attempt": 1,
             "created_at": LATER,
         }
@@ -100,6 +137,9 @@ class FlakeFixture(Fixture):
             "head_sha": FAILED_MAIN,
             "created_at": NOW,
         }
+        if self.fault == "foreign_main_success":
+            main_run["head_repository"] = {"full_name": "contributor/fork"}
+            main_run["event"] = "pull_request"
         responses = {
             f"/commits/{FIRST}/check-runs": {
                 "check_runs": pr_checks,
@@ -124,10 +164,20 @@ class FlakeFixture(Fixture):
                 "base_commit": {"sha": FAILED_MAIN},
                 "merge_base_commit": {"sha": FAILED_MAIN},
                 "total_commits": 2
-                if self.fault in {"incomplete_comparison", "test_changed_and_reverted"}
+                if self.fault
+                in {
+                    "incomplete_comparison",
+                    "test_changed_and_reverted",
+                    "omitted_intervening_files_link",
+                }
                 else 1,
                 "commits": [
-                    *([{"sha": INTERMEDIATE}] if self.fault == "test_changed_and_reverted" else []),
+                    *(
+                        [{"sha": INTERMEDIATE}]
+                        if self.fault
+                        in {"test_changed_and_reverted", "omitted_intervening_files_link"}
+                        else []
+                    ),
                     {"sha": MAIN_SHA},
                 ],
                 "files": [changed],
@@ -165,13 +215,17 @@ class FlakeFixture(Fixture):
         ("", {101, 103, 104}, True),
         ("absent_run_url", {101, 103, 104}, True),
         ("late_annotations", {101, 103, 104}, True),
+        ("base_retargeted", {101, 104}, True),
+        ("base_advanced", {101, 104}, True),
         ("green_without_pass_evidence", {101, 103}, False),
         ("green_with_different_test", {101, 103}, False),
         ("annotations_unavailable", {103, 104}, True),
         ("incomplete_comparison", {101, 103}, False),
         ("test_changed_and_reverted", {101, 103}, False),
+        ("omitted_intervening_files_link", {101, 103}, False),
         ("renamed_main_test", {101, 103}, False),
         ("other_workflow", {101, 103}, False),
+        ("foreign_main_success", {101, 103}, False),
         ("mixed_main_failures", {101, 103, 104}, False),
     ],
 )
@@ -228,9 +282,10 @@ async def test_flake_patterns_are_durable_and_read_only(
             assert fallback.fields["run_url"] == f"https://github.com/{REPO}/runs/101"
             assert fallback.fields["check_name"] == "same-head"
             assert "test_id" not in fallback.fields
-        assert candidates[103].fields["test_id"] == "test_outside"
-        assert candidates[103].fields["pattern"] == "pr_unchanged_test"
-        assert len(candidates[103].body) == 500
+        if 103 in candidates:
+            assert candidates[103].fields["test_id"] == "test_outside"
+            assert candidates[103].fields["pattern"] == "pr_unchanged_test"
+            assert len(candidates[103].body) == 500
         if 104 in candidates:
             assert candidates[104].fields["test_id"] == "test_main"
             assert candidates[104].fields["pattern"] == "main_unchanged_test_pass"
@@ -240,8 +295,42 @@ async def test_flake_patterns_are_durable_and_read_only(
             assert "run_url" not in candidates[104].fields
         if fault == "late_annotations":
             assert "/check-runs/101/annotations" in fixture.requests
+        if fault == "omitted_intervening_files_link":
+            assert f"/commits/{INTERMEDIATE}?page=2" in fixture.requests
         assert sum(event.kind == MAIN_FLAKE_EVENT for event in events) == int(main_proven)
         if fault != "incomplete_comparison":
-            assert fixture.requests.count(COMPARE) == int(fault != "other_workflow")
+            assert fixture.requests.count(COMPARE) == int(
+                fault not in {"other_workflow", "foreign_main_success"}
+            )
     finally:
         await store.close()
+
+
+async def test_pr_flake_writer_refuses_an_updated_pull_with_the_same_version() -> None:
+    observed = PullRequest(REPO, 4, "worker", FIRST, REPO, "open", NOW, NOW, True, 1)
+    uow = create_autospec(UnitOfWork, instance=True)
+    uow.pull_request.return_value = replace(observed, updated_at=LATER)
+    checks = GitHubResource(
+        (
+            GitHubRecord(
+                "103",
+                "check_run",
+                {**status(103, "test", "failure"), "head_sha": FIRST},
+                details={
+                    "annotations": [{"path": "test.py", "test_id": "test", "excerpt": "failed"}],
+                },
+            ),
+        )
+    )
+    files = GitHubResource(
+        (),
+        attributes={
+            "head_sha": FIRST,
+            "base_ref": "trunk",
+            "base_sha": MAIN_SHA,
+            "pull_version": observed.version,
+            "pull_updated_at": observed.updated_at,
+        },
+    )
+    await record_pull_flakes(uow, REPO, observed, checks, files)
+    uow.append.assert_not_awaited()

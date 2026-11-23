@@ -65,6 +65,7 @@ class Repository:
                 "sha": f"{number * 100 + version:040x}",
                 "repo": {"full_name": repository},
             },
+            "base": {"ref": "main", "sha": "a" * 40, "repo": {"full_name": REPO}},
             "changed_files": len(rows),
         }
 

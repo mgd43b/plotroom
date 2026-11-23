@@ -64,6 +64,8 @@ Given two overlapping-file observations for the same head, including across rest
 
 ## Review Triage Log
 
+- Native review, fixed. A recovery-only fixture lookup can reconcile a recorded conflict after main advances on the same PR head, including when the process exited before recording a local attempt. A deploy freeze defers all dispatch.
+
 - Medium, fixed. Compare provider repository names case-insensitively.
 - High, fixed. Recover a known fixture conflict after PR identity changes without applying another update. Keep the originally checked main SHA and routing information.
 - High, fixed. Preserve an unexecuted head key through closure or movement and resume after a matching eligible observation.

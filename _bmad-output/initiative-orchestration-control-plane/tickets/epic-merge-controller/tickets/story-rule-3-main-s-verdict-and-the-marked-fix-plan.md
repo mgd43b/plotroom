@@ -56,6 +56,9 @@ Given startup failures, failed jobs, cancellations, unreadable jobs, unrelated w
 
 ## Review Triage Log
 
+- Native review, fixed. Configured main CI requires the default branch, same-repository head attribution and a non-PR event. Fork PR runs with the same branch name cannot clear main.
+- Native review, fixed. A pending rerun preserves the exact preceding completed attempt or refuses with unreadable evidence. The gate cannot fall through to older green while a known failure is being retried.
+
 - Medium, fixed. Configured CI ends at a decisive success or startup failure, and those states do not need job reads.
 - High, fixed. Incomplete job states cannot clear a failed workflow or expose an older green verdict.
 - High, fixed. Provenance polling checks beyond a full page when pagination metadata omits its successor. The late removal and reapplication fixture proves that the replacement actor wins.

@@ -154,6 +154,7 @@ class Fixture:
             "state": "open",
             "updated_at": LATER if self.step >= 2 else NOW,
             "head": {"ref": "worker", "sha": self.sha, "repo": {"full_name": REPO}},
+            "base": {"ref": "trunk", "sha": MAIN_SHA, "repo": {"full_name": REPO}},
             "merged_at": None,
             "body": "",
             "changed_files": 1,
@@ -454,7 +455,7 @@ async def test_details_stage_and_dispatch_pinned_fixture_update(tmp_path: Path) 
         path = request.url.path.removeprefix(f"/repos/{REPO}")
         if path == "/pulls/4":
             pull: dict[str, Any] = provider.handle(request).json()
-            pull["base"] = {"ref": "trunk", "repo": {"full_name": REPO}}
+            pull["base"] = {"ref": "trunk", "sha": MAIN_SHA, "repo": {"full_name": REPO}}
             return httpx.Response(200, json=pull)
         if path == "/actions/workflows/ci.yml/runs":
             run = {
@@ -464,6 +465,9 @@ async def test_details_stage_and_dispatch_pinned_fixture_update(tmp_path: Path) 
                 "run_attempt": 1,
                 "created_at": NOW,
                 "workflow_id": 20,
+                "event": "push",
+                "repository": {"full_name": REPO},
+                "head_repository": {"full_name": REPO},
             }
             return httpx.Response(200, json={"total_count": 1, "workflow_runs": [run]})
         if path == "/actions/runs/50/attempts/1/jobs":
