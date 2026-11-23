@@ -45,6 +45,7 @@ TOOL_NAMES = {
     "lane_update",
     "lane_ready",
     "lane_archive",
+    "checklist_done",
     "deploy_report",
     "run_report",
     "claim",
@@ -68,6 +69,7 @@ WRITER_TOOLS = {
     "lane_update",
     "lane_ready",
     "lane_archive",
+    "checklist_done",
     "deploy_report",
     "run_report",
     "trigger",
@@ -305,7 +307,7 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         called: set[str] = set()
         request_ids = count(21)
 
-        async def call(name: str, **args: Any) -> dict[str, Any]:
+        async def call(name: str, *, error: str | None = None, **args: Any) -> dict[str, Any]:
             called.add(name)
             number = next(request_ids)
             if name in WRITER_TOOLS:
@@ -314,6 +316,9 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             assert "result" in reply, reply
             assert not reply["result"].get("isError", False), reply
             payload = json.loads(reply["result"]["content"][0]["text"])
+            if error is not None:
+                assert payload["error"]["code"] == error, payload
+                return {}
             assert payload["ok"], payload
             return payload["data"]
 
@@ -372,6 +377,7 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         assert (await call("wait", cursor=0, timeout=0))["item"] == item
         assert (await call("ack", item=item["id"]))["state"] == "snoozed"
         assert (await call("lane_ready", lane="lane", pr=1, head_sha="a" * 40))["state"] == "ready"
+        await call("checklist_done", lane="lane", step="fixture", error="conflict")
         assert (await call("claim", lane="lane", globs=["src/**"], reason="fixture"))["changed"]
         assert (await call("claims", lane="lane"))["claims"][0]["reason"] == "fixture"
         assert (await call("overlaps", lane="lane"))["items"] == []
@@ -443,6 +449,7 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             "lane_update": {"lane": "fixture", "waiting_on": None},
             "lane_ready": {"lane": "fixture", "pr": 1, "head_sha": "a" * 40},
             "lane_archive": {"lane": "fixture"},
+            "checklist_done": {"lane": "fixture", "step": "fixture"},
             "ingest": {"kind": "claude.session_message", "session_id": "fixture", "body": "test"},
             "trigger": {
                 "predicate": {"pr_merged": {"number": 1}},

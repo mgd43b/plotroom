@@ -335,9 +335,11 @@ class Ledger:
         return board, github
 
     async def snapshot_summary(
-        self, role: str
+        self, role: str, *, checklist_lane: str | None = None
     ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
-        return await self._store.read_snapshot(role, self.github_repository)
+        return await self._store.read_snapshot(
+            role, self.github_repository, checklist_lane=checklist_lane
+        )
 
     async def snapshot_with_triggers(
         self, role: str

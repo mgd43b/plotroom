@@ -35,6 +35,7 @@ from plotroom.ports.store import Transaction
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
+    from plotroom.core.checklists import Checklist
     from plotroom.core.outbox import OutboxLease, OutboxMessage
     from plotroom.core.triggers import Trigger
 
@@ -124,6 +125,9 @@ class UnitOfWork:
     async def branch_lane(self, branch: str) -> Lane | None:
         return await self._tx.branch_lane(branch)
 
+    async def branch_lanes(self, branch: str) -> list[Lane]:
+        return await self._tx.branch_lanes(branch)
+
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return await self._tx.pull_request(repository, number)
 
@@ -188,6 +192,12 @@ class UnitOfWork:
 
     async def save_lane(self, lane: Lane) -> None:
         await self._tx.save_lane(lane)
+
+    async def find_checklist(self, lane: str) -> Checklist | None:
+        return await self._tx.find_checklist(lane)
+
+    async def save_checklist(self, checklist: Checklist) -> None:
+        await self._tx.save_checklist(checklist)
 
     async def enqueue_action(
         self,

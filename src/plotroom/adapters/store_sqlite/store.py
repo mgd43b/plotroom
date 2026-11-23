@@ -15,7 +15,7 @@ from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import ConnectionPoolEntry
 
-from plotroom.adapters.store_sqlite import github_sql, outbox_sql, triggers_sql
+from plotroom.adapters.store_sqlite import checklists_sql, github_sql, outbox_sql, triggers_sql
 from plotroom.adapters.store_sqlite.actions_sql import pending_actions
 from plotroom.adapters.store_sqlite.claims_sql import count_claims, read_claims
 from plotroom.adapters.store_sqlite.items_sql import (
@@ -193,7 +193,7 @@ class SqliteStore:
             return await self._board(connection, role)
 
     async def read_snapshot(
-        self, role: str, repository: str | None
+        self, role: str, repository: str | None, *, checklist_lane: str | None = None
     ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
         async with self._engine.connect() as connection:
             board, github = (
@@ -201,6 +201,13 @@ class SqliteStore:
                 if repository is None
                 else await self._github_board(connection, role, repository)
             )
+            if checklist_lane is not None:
+                _, _, _, lanes = board
+                for index, lane in enumerate(lanes):
+                    if lane.id == checklist_lane:
+                        checklist = await checklists_sql.find_checklist(connection, lane.id)
+                        lanes[index] = lane.with_checklist(checklist)
+                        break
             trigger_counts = await triggers_sql.trigger_counts(connection)
             claim_count = await count_claims(connection, role)
             freeze_reason = await SqliteTransaction(connection).deploy_freeze()

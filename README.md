@@ -60,6 +60,20 @@ A custom `template` must use `{source_text}`, `{paths}`, `{dont_touch}`,
 `{plan}`, `{result}`, and `{standing_rules}`. It can also use `{worker}` and
 `{work_item}`. Write literal braces in the template as `{{` and `}}`.
 
+## Post-merge checklists
+
+Pass `checklist` to `lane_ready` as an ordered array of records with `step`,
+`owner`, and `ref`. The named lane snapshot shows the declared version and
+the PR and head it belongs to. The checklist becomes active when that exact
+PR and head merge.
+
+The owning worker or orchestrator can call `checklist_done` with the lane and
+step name. An optional `ref` records completion evidence. If omitted, the
+tool uses the declared ref. Open active steps block `lane_archive`. The last
+completion opens one archive proposal and emits a `checklist_empty` event
+that an orchestrator trigger can match. An explicitly empty checklist opens
+an archive proposal as soon as its PR merges.
+
 ## Local merge readiness
 
 The orchestrator and clerk can call `merge_gate(pr)` for an advisory verdict

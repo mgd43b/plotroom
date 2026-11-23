@@ -13,6 +13,7 @@ from plotroom.core.branch_updates import (
     BRANCH_UPDATE_STAGED,
 )
 from plotroom.core.briefs import BRIEF
+from plotroom.core.checklists import CHECKLIST_ARG, CHECKLIST_EMPTY, CHECKLIST_EMPTY_FIELDS
 from plotroom.core.claims import CLAIM_OVERLAP, PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, claim, release
 from plotroom.core.commands import Command, CommandRegistry
 from plotroom.core.deploy_window import freeze, unfreeze
@@ -30,6 +31,7 @@ from plotroom.core.intake import (
 from plotroom.core.lanes import (
     LANE_WAITING,
     archive_lane,
+    checklist_done,
     owns_lane,
     ready_lane,
     start_lane,
@@ -122,6 +124,7 @@ def build_catalog(
     )
     events.register(EventKind(BRANCH_UPDATE_STAGED, BRANCH_UPDATE_FIELDS, frozenset({"system"})))
     events.register(EventKind("core.tick", (), frozenset({"system"})))
+    events.register(EventKind(CHECKLIST_EMPTY, CHECKLIST_EMPTY_FIELDS, frozenset({"system"})))
     events.register(EventKind(FLAKE_EVENT, FLAKE_FIELDS, frozenset({"system"})))
     events.register(EventKind(MAIN_FLAKE_EVENT, FAILURE_FIELDS, frozenset({"system"})))
     catalog.register_item(ItemKind(FLAKE_CANDIDATE, 10, False, ("Investigate the flaky check",)))
@@ -211,13 +214,22 @@ def build_catalog(
     catalog.commands.register(
         Command(
             "lane_ready",
-            (lane, FieldSpec("pr", "int"), FieldSpec("head_sha", "str")),
+            (lane, FieldSpec("pr", "int"), FieldSpec("head_sha", "str"), CHECKLIST_ARG),
             partial(ready_lane, repository=github_repository),
         ),
         rules=owner,
     )
     catalog.commands.register(
         Command("lane_archive", (lane,), partial(archive_lane, workers=workers)), rules=orchestrator
+    )
+    catalog.commands.register(
+        Command(
+            "checklist_done",
+            (lane, FieldSpec("step", "str"), FieldSpec("ref", "str", required=False)),
+            checklist_done,
+            record_if=lambda result: bool(result["changed"]),
+        ),
+        rules=owner,
     )
     events.register(EventKind(RUN_STATUS, RUN_FIELDS, frozenset({"system"})))
     catalog.commands.register(

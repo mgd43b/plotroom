@@ -19,9 +19,21 @@ from plotroom.core.claims import TICKET_TREE_MOVE
 from plotroom.core.events import NewEvent
 from plotroom.core.github import ObservedPull, apply_pull_poll
 from plotroom.core.github_projection import FILES, GitHubRecord, GitHubResource, apply_resource
+from plotroom.core.lanes import Lane
 from plotroom.core.ledger import Ledger
 from plotroom.core.unit_of_work import UnitOfWork
 from test_daemon import bearer, make_config, run_daemon, stop
+
+
+def _migrations_at(destination: Path, revision: str) -> Path:
+    shutil.copytree(MIGRATIONS_DIR, destination, ignore=shutil.ignore_patterns("__pycache__"))
+    script = ScriptDirectory.from_config(alembic_config(destination))
+    keep = {item.revision for item in script.walk_revisions(head=revision)}
+    for path in (destination / "versions").glob("[0-9]*_*.py"):
+        if path.name.split("_", 1)[0] not in keep:
+            path.unlink()
+    assert head_revision(alembic_config(destination)) == revision
+    return destination
 
 
 def test_history_has_exactly_one_head() -> None:
@@ -61,19 +73,35 @@ async def test_migrating_twice_changes_nothing(tmp_path: Path) -> None:
         await store.close()
 
 
+async def test_checklist_upgrade_preserves_existing_ready_lane(tmp_path: Path) -> None:
+    revision = ScriptDirectory.from_config(alembic_config()).get_revision("0017")
+    assert revision is not None
+    predecessor = revision.down_revision
+    assert isinstance(predecessor, str)
+    prior = alembic_config(_migrations_at(tmp_path / "before-checklists", predecessor))
+    store = SqliteStore("demo", tmp_path)
+    lane = Lane(
+        "existing", "fixture", ("ticket.1",), "fixture-branch", "ready", pr=7, head_sha="abc"
+    )
+    try:
+        await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
+        async with store.transaction() as tx:
+            await tx.save_lane(lane)
+        await store.migrate()
+        assert await store.revision() == head_revision()
+        board, *_ = await store.read_snapshot("orchestrator", None, checklist_lane=lane.id)
+        assert board[3] == [lane]
+        assert "checklist" not in board[3][0].render()
+    finally:
+        await store.close()
+
+
 async def test_populated_claims_upgrade_reconciles_existing_tree_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Opening a populated predecessor preserves its rows and derives conflicts immediately."""
-    legacy = tmp_path / "predecessor"
-    shutil.copytree(
-        MIGRATIONS_DIR,
-        legacy,
-        ignore=shutil.ignore_patterns(
-            "__pycache__", "0013_lane_claims.py", "0015_recurring_triggers.py"
-        ),
-    )
-    previous = head_revision(alembic_config(legacy))
+    previous = "0012"
+    legacy = _migrations_at(tmp_path / "predecessor", previous)
     config = make_config(tmp_path)
     config.data_dir.mkdir()
     repo = "fixture/repo"
@@ -152,18 +180,14 @@ async def test_populated_claims_upgrade_reconciles_existing_tree_move(
             assert result["data"]["cursor"] > observed[-1]["data"]["cursor"]
     finally:
         await stop(disabled, task)
-    assert script_heads() == ["0015"]
     with sqlite3.connect(store.path) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0015",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            head_revision(),
+        )
 
 
 async def test_recurring_upgrade_keeps_populated_once_trigger_state(tmp_path: Path) -> None:
-    legacy = tmp_path / "pre-recurring"
-    shutil.copytree(
-        MIGRATIONS_DIR,
-        legacy,
-        ignore=shutil.ignore_patterns("__pycache__", "0015_recurring_triggers.py"),
-    )
+    legacy = _migrations_at(tmp_path / "pre-recurring", "0013")
     prior = alembic_config(legacy)
     assert head_revision(prior) == "0013"
     store = SqliteStore("demo", tmp_path)
@@ -186,7 +210,7 @@ async def test_recurring_upgrade_keeps_populated_once_trigger_state(tmp_path: Pa
             )
             db.execute("UPDATE project_seq SET value = 3")
         await store.migrate()
-        assert await store.revision() == "0015"
+        assert await store.revision() == head_revision()
         first, second = await store.list_triggers(None)
         assert (first.mode, first.state, first.was_true) == ("once", "open", False)
         assert (second.mode, second.state, second.fired_seq, second.action_key) == (
@@ -298,13 +322,7 @@ async def test_a_migration_that_fails_after_its_first_ddl_leaves_nothing_behind(
 
 async def test_a_file_at_the_first_revision_is_upgraded_in_place(tmp_path: Path) -> None:
     """The event log arrives by migration: an existing 0001 file gains its tables and counter."""
-    first = tmp_path / "migrations"
-    shutil.copytree(MIGRATIONS_DIR, first, ignore=shutil.ignore_patterns("__pycache__"))
-    for later in (first / "versions").glob("*.py"):
-        if not later.name.startswith("0001_"):
-            later.unlink()
-    cfg = alembic_config()
-    cfg.set_main_option("script_location", str(first))
+    cfg = alembic_config(_migrations_at(tmp_path / "migrations", "0001"))
     store = SqliteStore("demo", tmp_path)
     try:
         await upgrade_to_head(store._engine, cfg)  # pyright: ignore[reportPrivateUsage]
@@ -324,12 +342,7 @@ async def test_trigger_migration_preserves_projected_prs_and_pending_actions(
     tmp_path: Path,
     prior: str,
 ) -> None:
-    original = tmp_path / "before-triggers"
-    shutil.copytree(MIGRATIONS_DIR, original, ignore=shutil.ignore_patterns("__pycache__"))
-    for path in (original / "versions").glob("[0-9]*_*.py"):
-        if path.name.split("_", 1)[0] > prior:
-            path.unlink()
-    config = alembic_config(original)
+    config = alembic_config(_migrations_at(tmp_path / "before-triggers", prior))
     repo = "fixture/project"
     store = SqliteStore("demo", tmp_path)
     catalog = replace(build_catalog(github_repository=repo), trigger_leaves=None)

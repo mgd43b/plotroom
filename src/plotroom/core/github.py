@@ -13,7 +13,7 @@ from plotroom.core.github_projection import (
     GitHubResource,
     apply_resource,
 )
-from plotroom.core.lanes import infer_lane, refresh_ready_lane
+from plotroom.core.lanes import infer_lane, refresh_ready_lanes
 
 if TYPE_CHECKING:
     from plotroom.core.unit_of_work import UnitOfWork
@@ -94,7 +94,7 @@ async def apply_pull_poll(
     for observed in pulls:
         await _project_pull(uow, repository, observed, as_of, branches)
     for branch in sorted(branches):
-        await refresh_ready_lane(uow, repository, branch)
+        await refresh_ready_lanes(uow, repository, branch)
     watermark = max((pull.updated_at for pull in pulls), default="")
     if baseline is not None:
         watermark = max(baseline.watermark, watermark)

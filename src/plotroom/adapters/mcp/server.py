@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import BaseModel, ConfigDict
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.requests import Request
@@ -32,6 +33,14 @@ from plotroom.ports.work_items import WorkItemSource
 _NEXT_PAGE_SIZE = 64
 
 type Authenticate = Callable[[str], Awaitable[Identity | None]]
+
+
+class ReadyChecklistEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    step: str
+    owner: str
+    ref: str
 
 
 @dataclass(frozen=True)
@@ -153,7 +162,7 @@ def build_app(
             (cursor, items, lanes, details), github, trigger_counts, claim_count, freeze_reason = (
                 ((0, [], {}, []), None, {}, 0, None)
                 if caller.ledger is None
-                else await caller.ledger.snapshot_summary(caller.identity.role)
+                else await caller.ledger.snapshot_summary(caller.identity.role, checklist_lane=lane)
             )
             if lane is not None:
                 for detail in details:
@@ -409,14 +418,13 @@ def build_app(
         pr: int,
         head_sha: str,
         request_id: str,
+        checklist: list[ReadyChecklistEntry] | None = None,
     ) -> dict[str, Any]:
-        """Report the pull request and head ready for review."""
-        return await execute_command(
-            ctx,
-            "lane_ready",
-            request_id,
-            {"lane": lane, "pr": pr, "head_sha": head_sha},
-        )
+        """Report the pull request and head ready for review with optional post-merge steps."""
+        args: dict[str, Any] = {"lane": lane, "pr": pr, "head_sha": head_sha}
+        if checklist is not None:
+            args["checklist"] = [entry.model_dump() for entry in checklist]
+        return await execute_command(ctx, "lane_ready", request_id, args)
 
     @server.tool()
     async def lane_archive(  # pyright: ignore[reportUnusedFunction]
@@ -443,6 +451,20 @@ def build_app(
             request_id,
             {"lane": lane, "environment": environment, "sha": sha, "state": state},
         )
+
+    @server.tool()
+    async def checklist_done(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        lane: str,
+        step: str,
+        request_id: str,
+        ref: str | None = None,
+    ) -> dict[str, Any]:
+        """Complete an active checklist step. With no ref, use the step's declared ref."""
+        args = {"lane": lane, "step": step}
+        if ref is not None:
+            args["ref"] = ref
+        return await execute_command(ctx, "checklist_done", request_id, args)
 
     @server.tool()
     async def freeze(  # pyright: ignore[reportUnusedFunction]
@@ -494,6 +516,7 @@ def build_app(
     ) -> dict[str, Any]:
         """Register a once or every trigger. A predicate can be {"pr_merged":{"number":42}} or use
         branch_glob instead of number. all_of and any_of take arrays of predicates.
+        Use {"checklist_empty":{"lane":"name"}} to react when the last active step closes.
         An action object names one of notify_orchestrator (text), send (worker, text),
         mark (lane, state), or propose_archive (lane).
         """

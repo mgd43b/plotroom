@@ -28,7 +28,8 @@ from plotroom.app.tokens import IssuedToken, TokenRegistry
 CHILD_TIMEOUT = 60.0
 BRIEF_TICKET_REF = "1"
 BRIEF_TICKET_BODY = (
-    "---\nid: 1\ntype: story\n---\n# Fixture ticket\n\nKeep {source_text} literal.\n"
+    "---\nid: 1\ntype: story\ntitle: Fixture ticket\nrefined: true\n---\n"
+    "# Fixture ticket\n\nKeep {source_text} literal.\n"
 )
 
 

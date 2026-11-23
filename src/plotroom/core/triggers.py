@@ -9,6 +9,7 @@ from datetime import datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from plotroom.core.checklists import CHECKLIST_EMPTY
 from plotroom.core.events import FieldSpec, LedgerError, NewEvent, validate_fields
 from plotroom.core.github_projection import (
     CHECKS,
@@ -365,6 +366,13 @@ def _validate_lane(args: dict[str, Any]) -> None:
     validate_identity(args["lane"], "lane")
 
 
+async def _checklist_empty(evaluation: Evaluation, path: str, args: dict[str, Any]) -> bool:
+    lane = await evaluation.uow.find_lane(args["lane"])
+    if lane is None or lane.state == "archived":
+        return False
+    return await evaluation.pending_event(path, CHECKLIST_EMPTY, {"lane": lane.id})
+
+
 async def _lane_idle(
     evaluation: Evaluation, _path: str, args: dict[str, Any], *, idle_minutes: int
 ) -> bool:
@@ -408,6 +416,9 @@ def build_leaf_registry(
     )
     registry.register(
         LeafSpec("deploy_finished", (_ENV, _SHA), "event", _validate_deploy, _deploy_finished)
+    )
+    registry.register(
+        LeafSpec("checklist_empty", (_LANE,), "event", _validate_lane, _checklist_empty)
     )
     registry.register(
         LeafSpec(

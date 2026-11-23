@@ -16,6 +16,7 @@ from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
+    from plotroom.core.checklists import Checklist
     from plotroom.core.merge_gate import GateSnapshot
     from plotroom.core.outbox import OutboxLease, OutboxMessage, OutboxReadiness
     from plotroom.core.triggers import Trigger
@@ -94,7 +95,13 @@ class Transaction(Protocol):
 
     async def branch_lane(self, branch: str) -> Lane | None: ...
 
+    async def branch_lanes(self, branch: str) -> list[Lane]: ...
+
     async def save_lane(self, lane: Lane) -> None: ...
+
+    async def find_checklist(self, lane: str) -> Checklist | None: ...
+
+    async def save_checklist(self, checklist: Checklist) -> None: ...
 
     async def lane_claims(self, lane: str | None = None) -> list[Claim]: ...
 
@@ -170,7 +177,7 @@ class Store(Protocol):
     async def read_board(self, role: str) -> Board: ...
 
     async def read_snapshot(
-        self, role: str, repository: str | None
+        self, role: str, repository: str | None, *, checklist_lane: str | None = None
     ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]: ...
 
     async def read_claims(

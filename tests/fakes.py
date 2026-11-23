@@ -19,6 +19,7 @@ from typing import Any
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.actions import BRANCH_UPDATE, Action, QueuedAction
 from plotroom.core.catalog import Catalog
+from plotroom.core.checklists import Checklist
 from plotroom.core.claims import OVERLAP_KINDS, Claim
 from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
@@ -98,6 +99,7 @@ class _MemoryTransaction:
         self.delivered: set[str] = set()
         self.triggers: dict[str, Trigger] = {}
         self.lanes: dict[str, Lane] = {}
+        self.checklists: dict[str, Checklist] = {}
         self.claims: dict[tuple[str, str], Claim] = {}
         self.work_items: tuple[WorkItem, ...] = ()
         self.claude_turns: dict[tuple[str, str], set[str]] = {}
@@ -178,13 +180,19 @@ class _MemoryTransaction:
         )
 
     async def branch_lane(self, branch: str) -> Lane | None:
-        self._live()
-        lanes = [
-            lane
-            for lane in self.lanes.values()
-            if lane.branch == branch and lane.state != "archived"
-        ]
+        lanes = await self.branch_lanes(branch)
         return lanes[0] if len(lanes) == 1 else None
+
+    async def branch_lanes(self, branch: str) -> list[Lane]:
+        self._live()
+        return sorted(
+            (
+                lane
+                for lane in self.lanes.values()
+                if lane.branch == branch and lane.state != "archived"
+            ),
+            key=lambda lane: lane.id,
+        )
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         self._live()
@@ -264,6 +272,14 @@ class _MemoryTransaction:
     async def save_lane(self, lane: Lane) -> None:
         self._live()
         self.lanes[lane.id] = lane
+
+    async def find_checklist(self, lane: str) -> Checklist | None:
+        self._live()
+        return self.checklists.get(lane)
+
+    async def save_checklist(self, checklist: Checklist) -> None:
+        self._live()
+        self.checklists[checklist.lane] = checklist
 
     async def insert_action(self, action: Action) -> None:
         self._live()
@@ -424,6 +440,7 @@ class MemoryStore:
         self._delivered: set[str] = set()
         self._triggers: dict[str, Trigger] = {}
         self._lanes: dict[str, Lane] = {}
+        self._checklists: dict[str, Checklist] = {}
         self._claims: dict[tuple[str, str], Claim] = {}
         self._work_items: tuple[WorkItem, ...] = ()
         self._claude_turns: dict[tuple[str, str], set[str]] = {}
@@ -461,6 +478,7 @@ class MemoryStore:
         tx.delivered = self._delivered.copy()
         tx.triggers = copy.deepcopy(self._triggers)
         tx.lanes = self._lanes.copy()
+        tx.checklists = self._checklists.copy()
         tx.claims = self._claims.copy()
         tx.work_items = self._work_items
         tx.claude_turns = {key: ids.copy() for key, ids in self._claude_turns.items()}
@@ -483,6 +501,7 @@ class MemoryStore:
             self._outbox, self._leases, self._delivered = tx.outbox, tx.leases, tx.delivered
             self._triggers = tx.triggers
             self._lanes = tx.lanes
+            self._checklists = tx.checklists
             self._claims = tx.claims
             self._work_items = tx.work_items
             self._claude_turns = tx.claude_turns
@@ -535,13 +554,19 @@ class MemoryStore:
         return self._work_items
 
     async def read_snapshot(
-        self, role: str, repository: str | None
+        self, role: str, repository: str | None, *, checklist_lane: str | None = None
     ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
         board, github = (
             (await self.read_board(role), None)
             if repository is None
             else await self.read_github_board(role, repository)
         )
+        if checklist_lane is not None:
+            _, _, _, lanes = board
+            for index, lane in enumerate(lanes):
+                if lane.id == checklist_lane:
+                    lanes[index] = lane.with_checklist(self._checklists.get(checklist_lane))
+                    break
         trigger_counts = dict(Counter(t.state for t in self._triggers.values()))
         claim_count = len(_visible_claims(self._claims, self._lanes, role))
         return board, github, trigger_counts, claim_count, self._freeze_reason
