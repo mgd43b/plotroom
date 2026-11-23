@@ -37,6 +37,7 @@ An orchestrator can bring supported clerk ledger rows into the same local import
 
 ## Implementation Notes
 
+- [Built in PR #163](https://github.com/mgd43b/plotroom/pull/163).
 - The parsed ledger declares its repository. The writer checks that declaration before applying any part of the batch. Lane metadata records the imported channel and optional exact trigger ID. Unresolved references remain in the checklist.
 - Nullable metadata in 0019 preserves prior lane and trigger rows. The branch and head still come from the selected project’s projection.
 
@@ -56,3 +57,4 @@ An orchestrator can bring supported clerk ledger rows into the same local import
 
 - `uv run --locked python -m pytest -q tests/test_clerk_import.py tests/test_migrations.py`
 - Check the populated prior revision upgrades to one head and preserves prior records.
+- On the reviewed opening tree, 841 local Python 3.14 tests passed. The 40 affected tests passed on Python 3.14 and 3.15.

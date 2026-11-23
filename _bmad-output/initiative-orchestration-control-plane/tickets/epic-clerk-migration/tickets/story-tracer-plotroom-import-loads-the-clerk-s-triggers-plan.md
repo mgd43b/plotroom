@@ -40,6 +40,7 @@ An orchestrator can import the clerk trigger template locally through the runnin
 
 ## Implementation Notes
 
+- [Built in PR #163](https://github.com/mgd43b/plotroom/pull/163).
 - A private Unix listener request runs the orchestrator command. The CLI uses a stored local token and requires an existing verified daemon. Stable batch and row receipts preserve replay across overlapping files.
 - Imported notifications use static text. An exact worker message with a companion coordinator notice queues one of each from the same ordinary fire. Historical fires allocate no effect.
 
@@ -58,3 +59,4 @@ An orchestrator can import the clerk trigger template locally through the runnin
 
 - `uv run --locked python -m pytest -q tests/test_clerk_import.py` for import, auth and replay.
 - Run Ruff and Pyright for changes and the existing trigger suite.
+- On the reviewed opening tree, 841 local Python 3.14 tests passed. The 40 affected tests passed on Python 3.14 and 3.15.

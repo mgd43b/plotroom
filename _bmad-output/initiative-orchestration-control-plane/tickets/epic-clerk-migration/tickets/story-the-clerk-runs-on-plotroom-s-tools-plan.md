@@ -36,6 +36,7 @@ Provide an opt-in clerk goal and an offline rehearsal for the owner. The owner r
 
 ## Implementation Notes
 
+- [Preparation built in PR #163](https://github.com/mgd43b/plotroom/pull/163). Owner acceptance for the one-working-day pilot remains pending.
 - The offline run uses fixture credentials and mock provider reads. A fixture stand-in enforces both pins, and the owner procedure describes which pin the manually executed command enforces.
 - Owner acceptance remains pending. The live sweep pause, private copies, named drain, manual command policy and working-day reconciliation are owner steps.
 
@@ -50,3 +51,4 @@ Provide an opt-in clerk goal and an offline rehearsal for the owner. The owner r
 
 - `uv run --locked python -m pytest -q tests/test_clerk_pilot.py`
 - The owner alone verifies the one-day record for #110. #111–113 remain downstream.
+- On the reviewed opening tree, 841 local Python 3.14 tests passed. The 40 affected tests passed on Python 3.14 and 3.15.
