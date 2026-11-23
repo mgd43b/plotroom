@@ -52,7 +52,7 @@ Keep the stateless MCP surface, catalog validation, duplicate semantics, daemon 
 - [x] `src/plotroom/app/` — add locked atomic token file mutations, private local storage, reload, config, and CLI wiring.
 - [x] `src/plotroom/adapters/mcp/` — resolve the authenticated project and role per request and attach the bearer in the proxy.
 - [x] `tests/` — prove both projects, role checks, deny by default, reload, file permissions, Host precedence, bare 401, and startup and logging compatibility.
-- [ ] Story file — record implementation status and Built link. Hand off the real-client check and epic Notes.
+- [x] Story file — record implementation status and Built link. Hand off the real-client check and epic Notes.
 
 Given a running two-project daemon, when each token calls snapshot, then the result identifies only its own project. Given a test tool backed by the real command path and two project ledgers, when a worker calls it, then neither project is changed. Given an already-running daemon and a revoked token, when a new proxy request arrives, then the original daemon is still serving and the request fails with a 401-derived JSON-RPC error.
 
