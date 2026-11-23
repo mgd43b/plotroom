@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "66"
 remote: "https://github.com/mgd43b/plotroom/issues/66"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Rule 3: main's verdict and the marked fix

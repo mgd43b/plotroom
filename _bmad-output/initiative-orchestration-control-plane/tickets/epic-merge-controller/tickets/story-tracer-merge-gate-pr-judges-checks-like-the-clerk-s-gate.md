@@ -9,7 +9,7 @@ hitl: false
 risk: high
 tracker_id: "63"
 remote: "https://github.com/mgd43b/plotroom/issues/63"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Tracer: merge_gate(pr) judges checks like the clerk's gate
