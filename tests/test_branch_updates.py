@@ -42,8 +42,9 @@ POLICY = GatePolicy(
 
 
 class FixtureWrite(FixtureGitHubWrite):
-    def __init__(self, *, lose_response: bool = False) -> None:
+    def __init__(self, *, lose_response: bool = False, fail_lookup: bool = False) -> None:
         self.lose_response = lose_response
+        self.fail_lookup = fail_lookup
         self.current_head = HEAD
         self.current_main = TIP
         self.calls: list[str] = []
@@ -64,6 +65,9 @@ class FixtureWrite(FixtureGitHubWrite):
         if recovery_only:
             assert expected_main_sha is None
             self.lookups.append(action_key)
+            if self.fail_lookup:
+                self.fail_lookup = False
+                raise TimeoutError("temporary receipt lookup failure")
             return self.effects.get(action_key)
         self.calls.append(action_key)
         if action_key in self.effects:
@@ -335,6 +339,28 @@ async def test_live_runtime_skips_fixture_queue_and_frozen_action_resumes(tmp_pa
         assert [(item.kind, item.context["lane"]) for item in items] == [
             (BRANCH_UPDATE_CONFLICT, None)
         ]
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+async def test_lookup_failure_preserves_the_write_attempt(tmp_path: Path) -> None:
+    port = FixtureWrite(fail_lookup=True)
+    store, ledger, runtime = await setup(tmp_path, FixedClock(), port, attempts=1)
+    try:
+        await observe(ledger)
+        assert await runtime.stage_branch_update(7)
+        await observe(ledger, overlap=False)
+        assert not await runtime.run_one_action()
+        assert (pending := await ledger.pending_action()) is not None
+        assert pending.attempts == 0
+        assert not port.calls
+        assert port.lookups == [KEY]
+
+        await observe(ledger)
+        assert await runtime.run_one_action()
+        assert await ledger.pending_action() is None
+        assert port.calls == [KEY]
     finally:
         await ledger.stop()
         await store.close()

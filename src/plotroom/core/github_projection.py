@@ -191,7 +191,11 @@ async def apply_resource(
     if (
         resource == FILES
         and result.complete
-        and (current is None or current.attributes != attributes or previous != fresh)
+        and (
+            current is None
+            or current.attributes.get("head_sha") != attributes.get("head_sha")
+            or previous != fresh
+        )
     ):
         uow.pull_overlaps_changed()
 

@@ -183,14 +183,20 @@ class ProjectRuntime:
             main_sha = update.main_sha if update is not None and not recovery_only else None
             # The fixture call and final guard share the writer turn. A freeze or
             # projection change cannot commit between the guard and this effect.
-            receipt = await port.update_branch(
-                repository=repository,
-                number=number,
-                action_key=action.key,
-                expected_head_sha=head_sha,
-                expected_main_sha=main_sha,
-                recovery_only=recovery_only,
-            )
+            try:
+                receipt = await port.update_branch(
+                    repository=repository,
+                    number=number,
+                    action_key=action.key,
+                    expected_head_sha=head_sha,
+                    expected_main_sha=main_sha,
+                    recovery_only=recovery_only,
+                )
+            except Exception as exc:
+                if not recovery_only:
+                    raise
+                log.warning("fixture branch update receipt lookup failed")
+                raise _BranchUpdateDeferred from exc
             if receipt is None:
                 if exhausted and eligible:
                     await finish_action(uow, action, "failed")

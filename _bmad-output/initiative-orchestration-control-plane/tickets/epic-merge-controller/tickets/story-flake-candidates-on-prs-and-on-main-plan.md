@@ -61,6 +61,7 @@ Given a fixture for each supported pattern, when evidence is polled again or rep
 - Native review, fixed. PR file collection now confirms the base ref and SHA across pagination, and the writer checks the PR head, version, and update time before recording a candidate.
 - Native review, fixed. When a full intermediate commit file page lacks a next link, the fetcher verifies the terminal page. A reverted change to the test on a later page blocks flake proof.
 - Follow-through on CI attribution. The auxiliary main-run feed can supply flake proof only for positively attributed main runs. A fork's otherwise matching pass cannot discount a main failure.
+- Native follow-up, fixed. Persisting file provenance alone leaves the claims overlap reconciliation idle. Changed records or head bindings still trigger it.
 
 - High, patch. A later green workflow job can pass while a test is deselected. Require an explicit structured pass for the same test and file before deriving proof across main commits.
 - Medium, patch. Preserve structured evidence without an optional HTML link. The link is required for the check-level fallback.
