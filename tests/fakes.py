@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from plotroom.adapters.store_sqlite import SqliteStore
-from plotroom.core.actions import Action
+from plotroom.core.actions import BRANCH_UPDATE, Action
 from plotroom.core.catalog import Catalog
 from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
@@ -25,6 +25,7 @@ from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, GitHubS
 from plotroom.core.github_projection import GitHubResource
 from plotroom.core.lanes import Lane, with_projected_pr
 from plotroom.core.ledger import Ledger
+from plotroom.core.merge_gate import GateSnapshot, load_gate_snapshot
 from plotroom.core.next_items import Item, visible
 from plotroom.core.outbox import OutboxLease, OutboxMessage, OutboxReadiness
 from plotroom.core.roles import WriterRule
@@ -87,6 +88,7 @@ class _MemoryTransaction:
         self.github_resources: dict[tuple[str, str, str], GitHubResource] = {}
         self.fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
         self.fetch_retries: dict[tuple[str, str], FetchRetry] = {}
+        self.freeze_reason: str | None = None
         self.seq = seq
         self.expired = False
         self._on_allocate = on_allocate
@@ -173,6 +175,14 @@ class _MemoryTransaction:
     async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None:
         self._live()
         return _branch_pull(self.pulls, repository, branch)
+
+    async def deploy_freeze(self) -> str | None:
+        self._live()
+        return self.freeze_reason
+
+    async def set_deploy_freeze(self, reason: str | None) -> None:
+        self._live()
+        self.freeze_reason = reason
 
     async def save_pull_request(self, pull: PullRequest) -> None:
         self._live()
@@ -341,6 +351,7 @@ class MemoryStore:
         self._github_resources: dict[tuple[str, str, str], GitHubResource] = {}
         self._fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
         self._fetch_retries: dict[tuple[str, str], FetchRetry] = {}
+        self._freeze_reason: str | None = None
         self._open = False
         self.commits = 0
         self.on_allocate: Callable[[], None] | None = None
@@ -376,6 +387,7 @@ class MemoryStore:
         tx.github_resources = copy.deepcopy(self._github_resources)
         tx.fetch_cursors = self._fetch_cursors.copy()
         tx.fetch_retries = self._fetch_retries.copy()
+        tx.freeze_reason = self._freeze_reason
         try:
             yield tx
         except BaseException:
@@ -396,6 +408,7 @@ class MemoryStore:
             self._github_resources = tx.github_resources
             self._fetch_cursors = tx.fetch_cursors
             self._fetch_retries = tx.fetch_retries
+            self._freeze_reason = tx.freeze_reason
             self.commits += 1
         finally:
             tx.expired = True
@@ -456,16 +469,25 @@ class MemoryStore:
 
     async def read_snapshot_board(
         self, role: str, repository: str | None
-    ) -> tuple[Board, GitHubSummary | None, dict[str, int]]:
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], str | None]:
         board, github = (
             (await self.read_board(role), None)
             if repository is None
             else await self.read_github_board(role, repository)
         )
-        return board, github, dict(Counter(t.state for t in self._triggers.values()))
+        counts = dict(Counter(t.state for t in self._triggers.values()))
+        return board, github, counts, self._freeze_reason
 
     async def list_triggers(self, lane: str | None) -> list[Trigger]:
         return [copy.deepcopy(t) for t in self._triggers.values() if lane is None or t.lane == lane]
+
+    async def read_merge_gate(self, repository: str | None, number: int) -> GateSnapshot:
+        reader = _MemoryTransaction(self._events, self._seq)
+        reader.pulls = self._pulls
+        reader.github_resources = self._github_resources
+        reader.fetch_cursors = self._fetch_cursors
+        reader.freeze_reason = self._freeze_reason
+        return await load_gate_snapshot(reader, repository, number)
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return self._pulls.get((repository, number))
@@ -502,9 +524,20 @@ class MemoryStore:
         found = next((i for i in self._changes if i.seq > cursor and visible(i, role)), None)
         return self._seq, asdict(found) if found is not None else None
 
-    async def pending_action(self) -> Action | None:
+    async def pending_action(
+        self, *, skip_keys: tuple[str, ...] = (), skip_branch_updates: bool = False
+    ) -> Action | None:
         return copy.deepcopy(
-            next((a for a in self._actions.values() if a.state == "pending"), None)
+            next(
+                (
+                    action
+                    for action in self._actions.values()
+                    if action.state == "pending"
+                    and action.key not in skip_keys
+                    and (not skip_branch_updates or action.kind != BRANCH_UPDATE)
+                ),
+                None,
+            )
         )
 
     async def close(self) -> None:

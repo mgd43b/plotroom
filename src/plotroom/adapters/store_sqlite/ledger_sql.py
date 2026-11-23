@@ -65,6 +65,12 @@ EVENTS_AFTER = text(
     "SELECT seq, id, source, kind, upstream_id, lane_id, fields, body, observed_at "
     "FROM events WHERE seq > :seq ORDER BY seq LIMIT max(:limit, 0)"
 )
+DEPLOY_FREEZE = text("SELECT value FROM project_meta WHERE key = 'merge.deploy_freeze'")
+SAVE_DEPLOY_FREEZE = text("""
+    INSERT INTO project_meta (key, value) VALUES ('merge.deploy_freeze', :reason)
+    ON CONFLICT (key) DO UPDATE SET value = excluded.value
+""")
+CLEAR_DEPLOY_FREEZE = text("DELETE FROM project_meta WHERE key = 'merge.deploy_freeze'")
 
 
 def event_from_row(row: Row[Any]) -> Event:
@@ -104,6 +110,16 @@ class SqliteTransaction:
         )
         row = result.first()
         return None if row is None else event_from_row(row)
+
+    async def deploy_freeze(self) -> str | None:
+        return (await self._live().execute(DEPLOY_FREEZE)).scalar_one_or_none()
+
+    async def set_deploy_freeze(self, reason: str | None) -> None:
+        connection = self._live()
+        if reason is None:
+            await connection.execute(CLEAR_DEPLOY_FREEZE)
+        else:
+            await connection.execute(SAVE_DEPLOY_FREEZE, {"reason": reason})
 
     async def insert_event(self, event: Event) -> None:
         await self._live().execute(

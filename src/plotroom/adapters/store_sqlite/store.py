@@ -31,6 +31,7 @@ from plotroom.core.actions import Action
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
 from plotroom.core.github_projection import GitHubResource
+from plotroom.core.merge_gate import GateSnapshot, load_gate_snapshot
 from plotroom.core.next_items import Item
 from plotroom.ports.store import Board
 from plotroom.ports.work_items import WorkItem
@@ -197,18 +198,24 @@ class SqliteStore:
 
     async def read_snapshot_board(
         self, role: str, repository: str | None
-    ) -> tuple[Board, GitHubSummary | None, dict[str, int]]:
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], str | None]:
         async with self._engine.connect() as connection:
             board, github = (
                 (await self._board(connection, role), None)
                 if repository is None
                 else await self._github_board(connection, role, repository)
             )
-            return board, github, await triggers_sql.trigger_counts(connection)
+            counts = await triggers_sql.trigger_counts(connection)
+            freeze_reason = await SqliteTransaction(connection).deploy_freeze()
+            return board, github, counts, freeze_reason
 
     async def list_triggers(self, lane: str | None) -> list[Trigger]:
         async with self._engine.connect() as connection:
             return await triggers_sql.list_triggers(connection, lane)
+
+    async def read_merge_gate(self, repository: str | None, number: int) -> GateSnapshot:
+        async with self._engine.connect() as connection, connection.begin():
+            return await load_gate_snapshot(SqliteTransaction(connection), repository, number)
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         async with self._engine.connect() as connection:
@@ -250,9 +257,13 @@ class SqliteStore:
         async with self._engine.connect() as connection:
             return await ready_work_items(connection)
 
-    async def pending_action(self) -> Action | None:
+    async def pending_action(
+        self, *, skip_keys: tuple[str, ...] = (), skip_branch_updates: bool = False
+    ) -> Action | None:
         async with self._engine.connect() as connection:
-            return await pending_action(connection)
+            return await pending_action(
+                connection, skip_keys=skip_keys, skip_branch_updates=skip_branch_updates
+            )
 
     async def outbox_readiness(self, now: str) -> OutboxReadiness:
         async with self._engine.connect() as connection:

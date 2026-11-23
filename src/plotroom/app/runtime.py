@@ -6,9 +6,22 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import timedelta
 
-from plotroom.core.actions import SWITCHBOARD_SEND, Action, finish_action, record_attempt
+from plotroom.core.actions import (
+    BRANCH_UPDATE,
+    SWITCHBOARD_SEND,
+    Action,
+    finish_action,
+    record_attempt,
+)
+from plotroom.core.branch_updates import (
+    BranchUpdate,
+    complete_branch_update,
+    eligible_branch_update,
+    stage_branch_update,
+)
 from plotroom.core.events import NewEvent, format_time
 from plotroom.core.ledger import Ledger
+from plotroom.core.merge_gate import GateSnapshot, load_gate_snapshot
 from plotroom.core.outbox import OutboxMessage
 from plotroom.core.trigger_actions import (
     MARK,
@@ -21,10 +34,15 @@ from plotroom.core.trigger_actions import (
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.work_items import refresh_idle_workers
 from plotroom.ports.clock import Clock
+from plotroom.ports.github_write import FixtureGitHubWrite
 from plotroom.ports.work_items import WorkItem, WorkItemSource
 
 type ActionHandler = Callable[[Action], Awaitable[None]]
 log = logging.getLogger("plotroom.runtime")
+
+
+class _BranchUpdateDeferred(Exception):
+    """Roll back a no-op without waking the action runner again."""
 
 
 class ProjectRuntime:
@@ -40,6 +58,7 @@ class ProjectRuntime:
         workers: frozenset[str] = frozenset(),
         work_items: WorkItemSource | None = None,
         inputs: tuple[Callable[[], Awaitable[None]], ...] = (),
+        fixture_github_write: FixtureGitHubWrite | None = None,
     ) -> None:
         self.ledger = ledger
         self.clock = clock
@@ -51,6 +70,8 @@ class ProjectRuntime:
         self.workers = workers
         self.work_items = work_items
         self.inputs = inputs
+        self.fixture_github_write = fixture_github_write
+        self._action_lock = asyncio.Lock()
         self._tasks: list[asyncio.Task[None]] = []
 
     async def tick_if_due(self) -> bool:
@@ -84,9 +105,19 @@ class ProjectRuntime:
         return True
 
     async def run_one_action(self) -> bool:
-        action = await self.ledger.pending_action()
-        if action is None:
-            return False
+        async with self._action_lock:
+            skipped: list[str] = []
+            while True:
+                action = await self.ledger.pending_action(
+                    skip_keys=tuple(skipped), skip_branch_updates=self.fixture_github_write is None
+                )
+                if action is None:
+                    return False
+                if await self._run_action(action):
+                    return True
+                skipped.append(action.key)
+
+    async def _run_action(self, action: Action) -> bool:
         if action.attempts >= self.action_attempts:
             await self.ledger.run("system", lambda uow: finish_action(uow, action, "failed"))
             return True
@@ -94,6 +125,8 @@ class ProjectRuntime:
         try:
             if await self._dispatch(action):
                 return True
+        except _BranchUpdateDeferred:
+            return False
         except Exception:
             # Action payloads and exception text may be sensitive. The item points to the key.
             log.warning("action attempt failed", extra={"kind": action.kind})
@@ -109,8 +142,70 @@ class ProjectRuntime:
         await self.ledger.run("system", commit_attempt)
         return True
 
+    def _eligible_update(self, uow: UnitOfWork, snapshot: GateSnapshot) -> BranchUpdate | None:
+        if self.ledger.github_error is not None:
+            return None
+        return eligible_branch_update(snapshot, self.ledger.merge_gate_policy, uow.now())
+
+    async def stage_branch_update(self, number: int) -> bool:
+        """Queue an eligible action using the same snapshot and policy as the dry gate."""
+        if self.fixture_github_write is None:
+            return False
+
+        async def stage(uow: UnitOfWork) -> bool:
+            snapshot = await load_gate_snapshot(uow, self.ledger.github_repository, number)
+            update = self._eligible_update(uow, snapshot)
+            return update is not None and await stage_branch_update(uow, update)
+
+        return await self.ledger.run("system", stage)
+
+    async def _dispatch_branch_update(self, action: Action) -> None:
+        port = self.fixture_github_write
+        if port is None:
+            raise _BranchUpdateDeferred
+
+        async def dispatch(uow: UnitOfWork) -> None:
+            snapshot = await load_gate_snapshot(
+                uow, self.ledger.github_repository, action.payload["number"]
+            )
+            pull = snapshot.pull
+            if (
+                pull is not None
+                and pull.complete
+                and (pull.state != "open" or pull.head_sha != action.payload["head_sha"])
+            ):
+                await finish_action(uow, action, "done")
+                return
+            update = self._eligible_update(uow, snapshot)
+            if (
+                update is None
+                or update.key != action.key
+                or update.repository != action.payload["repository"]
+                or update.head_sha != action.payload["head_sha"]
+            ):
+                raise _BranchUpdateDeferred
+            # The fixture call and final guard share the writer turn. A freeze or
+            # projection change cannot commit between the guard and this effect.
+            outcome = await port.update_branch(
+                repository=update.repository,
+                number=update.number,
+                action_key=action.key,
+                expected_head_sha=update.head_sha,
+                expected_main_sha=update.main_sha,
+            )
+            if outcome == "moved":
+                raise _BranchUpdateDeferred
+            if outcome not in {"updated", "conflict"}:
+                raise ValueError("invalid fixture branch update outcome")
+            await complete_branch_update(uow, action, update, conflict=outcome == "conflict")
+
+        await self.ledger.run("system", dispatch)
+
     async def _dispatch(self, action: Action) -> bool:
         """Dispatch the effect. Local effects record their attempt in the same commit."""
+        if action.kind == BRANCH_UPDATE:
+            await self._dispatch_branch_update(action)
+            return True
         if action.kind == SEND:
             worker = action.payload["worker"]
             route = self.delivery_routes[worker]

@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 
 CHECKS = "checks"
 MAIN = "main_runs"
+MAIN_CI = "main_ci"
+MAIN_CI_WINDOW = 30
 THREADS = "review_threads"
 FILES = "pull_files"
 LABELS = "pull_labels"
@@ -139,7 +141,9 @@ async def apply_resource(
         bindings[number] = (
             await infer_lane(uow, branch=pr.branch) if pr.head_repository == repository else None
         )
-    for row in fresh.values():
+    # The gate's workflow-scoped history is a read model. Workflow events still
+    # come from the existing all-workflow monitor.
+    for row in () if resource == MAIN_CI else fresh.values():
         prior = previous.get(row.key)
         if prior is not None and (
             row.fact == prior.fact

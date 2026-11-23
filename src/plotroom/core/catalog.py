@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 from functools import partial
 
 from plotroom.core.actions import ACTION_FIELDS, FAILED_ACTION
+from plotroom.core.branch_updates import (
+    BRANCH_UPDATE_CONFLICT,
+    BRANCH_UPDATE_FIELDS,
+    BRANCH_UPDATE_STAGED,
+)
 from plotroom.core.commands import Command, CommandRegistry
+from plotroom.core.deploy_window import freeze, unfreeze
 from plotroom.core.events import EventKind, EventRegistry, FieldSpec
 from plotroom.core.github import PR_FIELDS, PR_KINDS
 from plotroom.core.github_projection import GITHUB_FIELDS, REPOSITORY
@@ -26,6 +32,13 @@ from plotroom.core.lanes import (
     ready_lane,
     start_lane,
     update_lane,
+)
+from plotroom.core.merge_flakes import (
+    FAILURE_FIELDS,
+    FLAKE_CANDIDATE,
+    FLAKE_EVENT,
+    FLAKE_FIELDS,
+    MAIN_FLAKE_EVENT,
 )
 from plotroom.core.next_items import ItemKind, ack, owns_ack
 from plotroom.core.outbox import complete_outbox, lease_outbox
@@ -90,7 +103,14 @@ def build_catalog(
         ),
     )
     catalog.register_item(ItemKind(FAILED_ACTION, 10, False, ("Inspect the failed action",)))
+    catalog.register_item(
+        ItemKind(BRANCH_UPDATE_CONFLICT, 10, False, ("Resolve the branch update conflict",))
+    )
+    events.register(EventKind(BRANCH_UPDATE_STAGED, BRANCH_UPDATE_FIELDS, frozenset({"system"})))
     events.register(EventKind("core.tick", (), frozenset({"system"})))
+    events.register(EventKind(FLAKE_EVENT, FLAKE_FIELDS, frozenset({"system"})))
+    events.register(EventKind(MAIN_FLAKE_EVENT, FAILURE_FIELDS, frozenset({"system"})))
+    catalog.register_item(ItemKind(FLAKE_CANDIDATE, 10, False, ("Investigate the flaky check",)))
     for name, fields in GITHUB_FIELDS.items():
         events.register(EventKind(f"github.{name}", (REPOSITORY, *fields), frozenset({"system"})))
     for kind in PR_KINDS:
@@ -112,6 +132,10 @@ def build_catalog(
     )
     lane = FieldSpec("lane", "str")
     orchestrator = (WriterRule("orchestrator"),)
+    catalog.commands.register(
+        Command("freeze", (FieldSpec("reason", "str"),), freeze), rules=orchestrator
+    )
+    catalog.commands.register(Command("unfreeze", (), unfreeze), rules=orchestrator)
     owner = (*orchestrator, WriterRule("worker", owns_lane))
     catalog.commands.register(
         Command(

@@ -1,10 +1,11 @@
 """Read review resolution, changed files and label history for a pull request."""
 
+from datetime import datetime
 from typing import Any
 
 import httpx
 
-from plotroom.adapters.github.read import GitHubReadClient, number, obj, string
+from plotroom.adapters.github.read import GitHubReadClient, Row, number, obj, string
 from plotroom.core.github import PullRequest
 from plotroom.core.github_projection import GitHubRecord, GitHubResource
 
@@ -13,7 +14,7 @@ async def fetch_threads(
     api: GitHubReadClient, client: httpx.AsyncClient, token: str, pr: PullRequest
 ) -> GitHubResource:
     records: list[GitHubRecord] = []
-    async for row in api.review_threads(client, token, pr.number):
+    async for row in api.review_threads(client, token, pr.number, pr.head_sha):
         identifier = string(row["id"])
         resolved: Any = row["isResolved"]
         if type(resolved) is not bool:
@@ -29,7 +30,9 @@ async def fetch_threads(
         records.append(
             GitHubRecord(identifier, "review_thread", fields, fact=str(resolved).lower())
         )
-    return GitHubResource(tuple(records))
+    return GitHubResource(
+        tuple(records), attributes={"head_sha": pr.head_sha, "pull_version": pr.version}
+    )
 
 
 async def fetch_files(
@@ -65,8 +68,12 @@ async def fetch_files(
 async def fetch_labels(
     api: GitHubReadClient, client: httpx.AsyncClient, token: str, pr: PullRequest
 ) -> GitHubResource:
+    active = [
+        string(row["name"]) async for row in api.pages(client, token, f"/issues/{pr.number}/labels")
+    ]
     records: list[GitHubRecord] = []
-    async for row in api.pages(client, token, f"/issues/{pr.number}/events"):
+    provenance: dict[str, Row] = {}
+    async for row in api.pages(client, token, f"/issues/{pr.number}/events", verify_terminal=True):
         action = row.get("event")
         if action not in ("labeled", "unlabeled"):
             continue
@@ -79,18 +86,45 @@ async def fetch_labels(
         }
         if row["actor"] is not None:
             fields["actor"] = string(obj(row["actor"])["login"])
-        records.append(GitHubRecord(str(identifier), "pull_label", fields, fact=str(identifier)))
+        details: Row = {}
+        if row["actor"] is not None and obj(row["actor"]).get("type") is not None:
+            details["actor_type"] = string(obj(row["actor"])["type"])
+        records.append(
+            GitHubRecord(
+                str(identifier), "pull_label", fields, details=details, fact=str(identifier)
+            )
+        )
     records.sort(key=lambda record: record.fields["id"])
-    active = [
-        string(row["name"]) async for row in api.pages(client, token, f"/issues/{pr.number}/labels")
-    ]
+    if len({record.key for record in records}) != len(records) or len(set(active)) != len(active):
+        raise ValueError("GitHub returned duplicate label evidence")
     actors: dict[str, str | None] = {}
     for record in records:
         name = record.fields["name"]
         if record.fields["action"] == "labeled":
             actors[name] = record.fields.get("actor")
+            provenance[name] = {
+                "event_id": record.fields["id"],
+                "login": record.fields.get("actor"),
+                "actor_type": record.details.get("actor_type"),
+            }
         else:
             actors.pop(name, None)
+            provenance.pop(name, None)
+    if any(label in provenance for label in active):
+        current = obj(await api.get(client, token, f"/pulls/{pr.number}"))
+        if string(obj(current["head"])["sha"]) != pr.head_sha or datetime.fromisoformat(
+            string(current["updated_at"])
+        ) != datetime.fromisoformat(pr.updated_at):
+            raise ValueError("PR changed during label poll")
     return GitHubResource(
-        tuple(records), attributes={"labels": {label: actors.get(label) for label in active}}
+        tuple(records),
+        attributes={
+            "labels": {label: actors.get(label) for label in active},
+            "label_provenance": {
+                label: provenance[label] for label in active if label in provenance
+            },
+            "head_sha": pr.head_sha,
+            "pull_version": pr.version,
+            "pull_updated_at": pr.updated_at,
+        },
     )

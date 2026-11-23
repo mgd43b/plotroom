@@ -10,13 +10,15 @@ import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
 
 from plotroom.adapters.claude_desktop import SESSION_ID
-from plotroom.adapters.github import github_secret_name
+from plotroom.adapters.github import RECONCILE_EVERY, github_secret_name
 from plotroom.adapters.github.ticket_tree import validate_tree_path
+from plotroom.core.merge_gate import GatePolicy
 from plotroom.core.roles import role_family
 from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, MIN_BOARD_BUDGET
 from plotroom.core.trigger_actions import DeliveryRoute
@@ -30,6 +32,8 @@ DEFAULT_LOG_BACKUPS = 5
 _WILDCARD_TO_LOOPBACK = {"0.0.0.0": "127.0.0.1", "::": "::1"}  # noqa: S104
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 _REPOSITORY = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+")
+_WORKFLOW = re.compile(r"[A-Za-z0-9_.-]+\.ya?ml|[1-9][0-9]{0,18}")
+_GITHUB_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
 GITHUB_API = "https://api.github.com"
 _TOP_LEVEL_KEYS = {
     "data_dir",
@@ -73,6 +77,7 @@ class GitHubConfig:
     api_url: str
     poll_seconds: int
     image_jobs: tuple[str, ...] = ()
+    merge_gate_policy: GatePolicy = field(default_factory=GatePolicy)
 
 
 @dataclass(frozen=True)
@@ -480,14 +485,62 @@ def _github_projects(projects: tuple[str, ...], table: Any, base: Path) -> dict[
                 local = False
             if not local:
                 raise ConfigError(f"{label}.api_url must be the GitHub API or a loopback fixture")
+        poll_seconds = _integer(
+            f"{label}.poll_seconds", settings.get("poll_seconds", 60), minimum=1
+        )
         configured[project_id] = GitHubConfig(
             repository,
             token_file,
             api_url,
-            _integer(f"{label}.poll_seconds", settings.get("poll_seconds", 60), minimum=1),
+            poll_seconds,
             _string_list(f"{label}.image_jobs", settings.get("image_jobs"), ()),
+            _merge_gate_policy(label, settings, poll_seconds),
         )
     return configured
+
+
+def _merge_gate_policy(label: str, settings: dict[str, Any], poll_seconds: int) -> GatePolicy:
+    minimum = (
+        _integer(f"{label}.min_checks", settings["min_checks"], minimum=1)
+        if "min_checks" in settings
+        else None
+    )
+    ignored = settings.get("ignore_checks", [])
+    if not isinstance(ignored, list) or not all(
+        isinstance(name, str) and name for name in cast("list[Any]", ignored)
+    ):
+        raise ConfigError(f"{label}.ignore_checks must be a list of nonempty check names")
+    workflow = None
+    if "ci_workflow" in settings:
+        raw_workflow = settings["ci_workflow"]
+        workflow = _string(
+            f"{label}.ci_workflow", str(raw_workflow) if type(raw_workflow) is int else raw_workflow
+        )
+        if not _WORKFLOW.fullmatch(workflow) or (
+            workflow.isdecimal() and int(workflow) > 2**63 - 1
+        ):
+            raise ConfigError(f"{label}.ci_workflow must be a workflow filename or positive ID")
+    fix_label = (
+        _string(f"{label}.fix_label", settings["fix_label"]) if "fix_label" in settings else None
+    )
+    raw_logins = settings.get("authorized_label_logins", [])
+    if not isinstance(raw_logins, list) or not all(
+        isinstance(login, str) and _GITHUB_LOGIN.fullmatch(login)
+        for login in cast("list[Any]", raw_logins)
+    ):
+        raise ConfigError(f"{label}.authorized_label_logins must be a list of GitHub logins")
+    try:
+        return GatePolicy(
+            minimum,
+            tuple(cast("list[str]", ignored)),
+            max_age=timedelta(seconds=2 * poll_seconds),
+            pull_max_age=timedelta(seconds=(RECONCILE_EVERY + 2) * poll_seconds),
+            ci_workflow=workflow,
+            fix_label=fix_label,
+            authorized_label_logins=tuple(login.lower() for login in cast("list[str]", raw_logins)),
+        )
+    except OverflowError:
+        raise ConfigError(f"{label}.poll_seconds is too large for the merge gate") from None
 
 
 def _watchers(

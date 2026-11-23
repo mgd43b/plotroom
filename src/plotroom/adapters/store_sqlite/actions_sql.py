@@ -2,10 +2,10 @@
 
 import json
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from plotroom.core.actions import Action
+from plotroom.core.actions import BRANCH_UPDATE, Action
 
 _INSERT = text(
     "INSERT INTO actions (action_key, kind, cause_id, payload, attempts, state) "
@@ -13,7 +13,10 @@ _INSERT = text(
     "ON CONFLICT(action_key) DO NOTHING"
 )
 _UPDATE = text("UPDATE actions SET attempts = :attempts, state = :state WHERE action_key = :key")
-_PENDING = text("SELECT * FROM actions WHERE state = 'pending' ORDER BY rowid LIMIT 1")
+_PENDING = text(
+    "SELECT * FROM actions WHERE state = 'pending' AND action_key NOT IN :skip_keys "
+    "AND (:skip_branch_updates = 0 OR kind != :branch_update) ORDER BY rowid LIMIT 1"
+).bindparams(bindparam("skip_keys", expanding=True))
 
 
 async def insert_action(connection: AsyncConnection, action: Action) -> None:
@@ -34,8 +37,22 @@ async def update_action(connection: AsyncConnection, action: Action) -> None:
     )
 
 
-async def pending_action(connection: AsyncConnection) -> Action | None:
-    row = (await connection.execute(_PENDING)).first()
+async def pending_action(
+    connection: AsyncConnection,
+    *,
+    skip_keys: tuple[str, ...] = (),
+    skip_branch_updates: bool = False,
+) -> Action | None:
+    row = (
+        await connection.execute(
+            _PENDING,
+            {
+                "skip_keys": skip_keys,
+                "skip_branch_updates": skip_branch_updates,
+                "branch_update": BRANCH_UPDATE,
+            },
+        )
+    ).first()
     if row is None:
         return None
     return Action(

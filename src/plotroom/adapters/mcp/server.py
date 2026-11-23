@@ -143,10 +143,10 @@ def build_app(
             caller = board_access(ctx)
             if lane_offset < 0:
                 return err("invalid", "lane_offset must be nonnegative")
-            (cursor, items, lanes, details), github, trigger_counts = (
-                ((0, [], {}, []), None, {})
+            (cursor, items, lanes, details), github, trigger_counts, freeze_reason = (
+                ((0, [], {}, []), None, {}, None)
                 if caller.ledger is None
-                else await caller.ledger.snapshot_with_triggers(caller.identity.role)
+                else await caller.ledger.snapshot_summary(caller.identity.role)
             )
             if lane is not None:
                 for detail in details:
@@ -165,6 +165,7 @@ def build_app(
                     github=github,
                     github_error=None if caller.ledger is None else caller.ledger.github_error,
                     trigger_counts=trigger_counts,
+                    freeze_reason=freeze_reason,
                 )
             )
         except LedgerError as exc:
@@ -202,6 +203,19 @@ def build_app(
             return err(exc.code, exc.message)
 
     server.tool(name="next")(next_items)
+
+    @server.tool()
+    async def merge_gate(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], pr: int
+    ) -> dict[str, Any]:
+        """Read the current merge readiness, checked head, and observation watermark for a PR."""
+        try:
+            caller = board_access(ctx)
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            return ok(asdict(await caller.ledger.merge_gate(caller.identity.role, pr)))
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
 
     @server.tool()
     async def ingest(  # pyright: ignore[reportUnusedFunction]
@@ -321,6 +335,20 @@ def build_app(
     ) -> dict[str, Any]:
         """Archive the lane and release its worker."""
         return await execute_command(ctx, "lane_archive", request_id, {"lane": lane})
+
+    @server.tool()
+    async def freeze(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], reason: str, request_id: str
+    ) -> dict[str, Any]:
+        """Set this project's deploy window and give the reason shown by the merge gate."""
+        return await execute_command(ctx, "freeze", request_id, {"reason": reason})
+
+    @server.tool()
+    async def unfreeze(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], request_id: str
+    ) -> dict[str, Any]:
+        """Clear this project's deploy window."""
+        return await execute_command(ctx, "unfreeze", request_id, {})
 
     @server.tool()
     async def trigger(  # pyright: ignore[reportUnusedFunction]

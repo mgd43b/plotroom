@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime
 from itertools import count
 from pathlib import Path
 from typing import Any
@@ -15,11 +16,13 @@ import pytest
 
 from conftest import write_config
 from drain_standin import DrainStandIn
+from fakes import FixedClock
 from plotroom.adapters.github import GitHubPoller
 from plotroom.app.config import load_config
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import IssuedToken, TokenRegistry
 from plotroom.core.github import ObservedPull, apply_pull_poll
+from plotroom.core.github_projection import CHECKS, GitHubRecord, GitHubResource, apply_resource
 from plotroom.core.snapshot import estimate_tokens
 from plotroom.core.watchers import Watchers
 from rawproxy import ERAS, MODERN, initialize_request, modern_call, spawn_proxy
@@ -27,9 +30,13 @@ from rawproxy import ERAS, MODERN, initialize_request, modern_call, spawn_proxy
 LEGACY = "2025-06-18"
 FIXTURE_REPO = "fixture/project"
 FIXTURE_TIME = "2026-11-23T12:00:00.000000Z"
+CHECK_TIME = "2026-11-23T11:59:59.000000Z"
 TOOL_NAMES = {
     "next",
     "snapshot",
+    "merge_gate",
+    "freeze",
+    "unfreeze",
     "ack",
     "wait",
     "lane_start",
@@ -45,6 +52,8 @@ TOOL_NAMES = {
 }
 WRITER_TOOLS = {
     "ack",
+    "freeze",
+    "unfreeze",
     "lane_start",
     "lane_update",
     "lane_ready",
@@ -75,7 +84,8 @@ async def endpoint(
     config = write_config(tmp_path)
     config.write_text(
         config.read_text() + 'drain_session = "fixture-drain"\n[projects.demo.workers.fixture]\n'
-        'claude_session = "fixture-session"\n[projects.demo.github]\nrepository = "fixture/project"\n',
+        'claude_session = "fixture-session"\n[projects.demo.github]\n'
+        'repository = "fixture/project"\nmin_checks = 1\n',
         encoding="utf-8",
     )
     options = load_config(config, {})
@@ -83,7 +93,7 @@ async def endpoint(
     token = registry.issue("demo", "orchestrator", local=True)
     drain_token = registry.issue("demo", "drain", local=True)
     worker_token = registry.issue("demo", "worker:fixture", local=True)
-    daemon = Daemon(options)
+    daemon = Daemon(options, clock=FixedClock(datetime.fromisoformat(FIXTURE_TIME)))
     departed: asyncio.Queue[str] = asyncio.Queue()
     waiting = Watchers.waiting
 
@@ -112,10 +122,25 @@ async def endpoint(
             ObservedPull(1, "demo", "a" * 40, FIXTURE_REPO, "open", FIXTURE_TIME, ""),
             ObservedPull(2, "merged", "b" * 40, FIXTURE_REPO, "merged", FIXTURE_TIME, ""),
         )
-        await daemon.ledgers["demo"].run(
+        ledger = daemon.ledgers["demo"]
+        await ledger.run(
             "system",
             lambda uow: apply_pull_poll(uow, FIXTURE_REPO, None, projections, FIXTURE_TIME),
         )
+        head = projections[0].head_sha
+        check = GitHubRecord(
+            "1",
+            "check_run",
+            {"id": 1, "name": "fixture", "status": "in_progress", "head_sha": head},
+            details={"pull_numbers": [1]},
+        )
+        await ledger.run(
+            "system",
+            lambda uow: apply_resource(
+                uow, FIXTURE_REPO, CHECKS, head, GitHubResource((check,)), CHECK_TIME
+            ),
+        )
+        ledger.github_error = None
         yield Endpoint(
             f"http://127.0.0.1:{port}/mcp", config, token, drain_token, worker_token, departed
         )
@@ -238,6 +263,24 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             return payload["data"]
 
         assert (await call("snapshot"))["lanes"] == {}
+        gate = await call("merge_gate", pr=1)
+        assert gate["verdict"] == "REFUSE"
+        assert (gate["head_sha"], gate["as_of"]) == ("a" * 40, CHECK_TIME)
+        assert (gate["reasons"][0]["code"], gate["exit_class"]) == ("checks_pending", 2)
+        assert await call("freeze", reason="local deploy window") == {
+            "frozen": True,
+            "reason": "local deploy window",
+        }
+        frozen = await call("merge_gate", pr=1)
+        assert frozen["verdict"] == "REFUSE"
+        assert (frozen["head_sha"], frozen["as_of"]) == (gate["head_sha"], gate["as_of"])
+        assert frozen["reasons"] == [
+            {"code": "deploy_window", "detail": "local deploy window", "exit_class": 2}
+        ]
+        assert (await call("snapshot"))["freezes"] == {"deploy": {"reason": "local deploy window"}}
+        assert await call("unfreeze") == {"frozen": False, "reason": None}
+        assert await call("merge_gate", pr=1) == gate
+        assert "freezes" not in await call("snapshot")
         await call("lane_start", lane="lane", worker="fixture", branch="demo", work_items=[])
         await call("lane_update", lane="lane", waiting_on="orchestrator")
         item = (await call("next"))["items"][0]
@@ -295,6 +338,8 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         }
         arguments: dict[str, dict[str, Any]] = {
             "ack": {"item": "fixture"},
+            "merge_gate": {"pr": 1},
+            "freeze": {"reason": "fixture"},
             "lane_start": {
                 "lane": "fixture",
                 "worker": "fixture",
@@ -341,6 +386,16 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
                 args["act_id"] = "fixture"
             else:
                 args["consumer_id"] = str(uuid4())
+            reply = await send(message(era, number, "tools/call", name=name, arguments=args))
+            payload = json.loads(reply["result"]["content"][0]["text"])
+            assert payload["error"]["code"] == "forbidden"
+        for number, (name, args) in enumerate(
+            (
+                ("freeze", {"request_id": "freeze", "reason": "fixture"}),
+                ("unfreeze", {"request_id": "unfreeze"}),
+            ),
+            start=3,
+        ):
             reply = await send(message(era, number, "tools/call", name=name, arguments=args))
             payload = json.loads(reply["result"]["content"][0]["text"])
             assert payload["error"]["code"] == "forbidden"

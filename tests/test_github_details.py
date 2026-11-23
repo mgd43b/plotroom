@@ -7,9 +7,15 @@ import httpx
 import pytest
 
 from fakes import FixedClock
-from plotroom.adapters.github import GitHubPoller, LocalGitHubCredential, PullRequestFetcher
+from plotroom.adapters.github import (
+    GitHubPoller,
+    GitHubUnavailable,
+    LocalGitHubCredential,
+    PullRequestFetcher,
+)
 from plotroom.adapters.github.ci import fetch_main
 from plotroom.adapters.github.details import GitHubDetailPoller
+from plotroom.adapters.github.pr_details import fetch_threads
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.adapters.work_items_github_issues import GitHubIssuesWorkItems
@@ -17,7 +23,7 @@ from plotroom.app.config import ConfigError, load_config
 from plotroom.app.runtime import ProjectRuntime
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import LedgerError
-from plotroom.core.github import DETAILS
+from plotroom.core.github import DETAILS, PullRequest
 from plotroom.core.github_projection import (
     CHECKS,
     COMMENT_BACKFILL,
@@ -32,6 +38,7 @@ from plotroom.core.github_projection import (
     unresolved_threads,
 )
 from plotroom.core.ledger import Ledger
+from plotroom.core.merge_gate import GatePolicy
 
 REPO = "fixture/repo"
 API = "https://api.github.com"
@@ -57,6 +64,12 @@ class Fixture:
     def __init__(self) -> None:
         self.step = 0
         self.break_threads = False
+        self.move_thread_head = False
+        self.change_thread_count = False
+        self.duplicate_thread_id = False
+        self.overstate_thread_count = False
+        self.resolve_last_thread = False
+        self.first_thread_page_size = 1
         self.limit = False
         self.extra_comment = False
         self.reset_check = False
@@ -75,17 +88,38 @@ class Fixture:
         after = query["variables"]["after"]
         if after and self.break_threads:
             return httpx.Response(503)
-        nodes = [
+        all_nodes = [
             {
-                "id": "second" if after else "first",
-                "isResolved": self.step > 0 and not after,
+                "id": "first" if i == 0 else f"extra-{i}",
+                "isResolved": self.step > 0,
                 "path": "old.py",
                 "line": None,
             }
+            for i in range(self.first_thread_page_size)
         ]
-        connection = {"nodes": nodes, "pageInfo": {"endCursor": "next", "hasNextPage": not after}}
+        all_nodes.append(
+            {
+                "id": "first" if self.duplicate_thread_id else "second",
+                "isResolved": self.resolve_last_thread,
+                "path": "old.py",
+                "line": None,
+            }
+        )
+        connection = {
+            "nodes": all_nodes[-1:] if after else all_nodes[:-1],
+            "totalCount": len(all_nodes)
+            + int(self.overstate_thread_count)
+            + int(bool(after) and self.change_thread_count),
+            "pageInfo": {"endCursor": "next", "hasNextPage": not after},
+        }
+        head = SECOND if after and self.move_thread_head else self.sha
         return httpx.Response(
-            200, json={"data": {"repository": {"pullRequest": {"reviewThreads": connection}}}}
+            200,
+            json={
+                "data": {
+                    "repository": {"pullRequest": {"headRefOid": head, "reviewThreads": connection}}
+                }
+            },
         )
 
     @staticmethod
@@ -203,6 +237,25 @@ class Fixture:
         return httpx.Response(200, json=result[path])
 
 
+@pytest.mark.parametrize(
+    ("fault", "error"),
+    [
+        ("move_thread_head", "PR head moved"),
+        ("change_thread_count", "inconsistent review thread count"),
+        ("duplicate_thread_id", "invalid review thread ID"),
+        ("overstate_thread_count", "incomplete review thread list"),
+    ],
+)
+async def test_thread_pages_require_consistent_head_and_exact_count(fault: str, error: str) -> None:
+    fixture = Fixture()
+    setattr(fixture, fault, True)
+    pull = PullRequest(REPO, 4, "worker", FIRST, REPO, "open", NOW, NOW, True, 1)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handle)) as client:
+        with pytest.raises(GitHubUnavailable, match=error):
+            await fetch_threads(GitHubReadClient(API, REPO), client, "fixture", pull)
+    assert fixture.requests == ["/graphql", "/graphql"]
+
+
 async def test_github_transitions_and_pagination_are_durable(tmp_path: Path) -> None:
     provider = Fixture()
     clock = FixedClock()
@@ -214,7 +267,9 @@ async def test_github_transitions_and_pagination_are_durable(tmp_path: Path) -> 
     await store.migrate()
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider.handle)) as client:
-        ledger = Ledger(store, catalog, clock, github_repository=REPO)
+        ledger = Ledger(
+            store, catalog, clock, github_repository=REPO, merge_gate_policy=GatePolicy(1)
+        )
         ledger.start()
         puller = GitHubPoller(ledger, clock, REPO, credential, PullRequestFetcher(API, REPO), 1)
         details = GitHubDetailPoller(
@@ -232,6 +287,8 @@ async def test_github_transitions_and_pagination_are_durable(tmp_path: Path) -> 
             partial_fixture = await ledger.github_resource(REPO, THREADS, "4")
             assert partial_fixture is not None
             assert partial_fixture.complete
+            assert partial_fixture.attributes["head_sha"] == FIRST
+            assert (await store.read_merge_gate(REPO, 4)).threads == partial_fixture
             assert len(unresolved_threads(partial_fixture)) == 2
             provider.step = 1
             provider.break_threads = True
@@ -239,6 +296,8 @@ async def test_github_transitions_and_pagination_are_durable(tmp_path: Path) -> 
             partial = await ledger.github_resource(REPO, THREADS, "4")
             assert partial is not None
             assert not partial.complete
+            assert partial.records == partial_fixture.records
+            assert (await store.read_merge_gate(REPO, 4)).threads == partial
             assert len(unresolved_threads(partial)) == 2
             provider.break_threads = False
             provider.extra_comment = True
@@ -303,9 +362,15 @@ async def test_github_transitions_and_pagination_are_durable(tmp_path: Path) -> 
                 for event in events
                 if event.fields.get("number") == 4 and event.source == "github"
             )
+            check_evidence = await ledger.github_resource(REPO, CHECKS, SECOND)
+            assert check_evidence is not None
+            assert check_evidence.complete
+            assert ledger.github_error is None
             provider.limit = True
             await details.poll(client)
             assert await ledger.fetch_retry(REPO, DETAILS) is not None
+            assert (await ledger.merge_gate("clerk", 4)).reasons[0].code == "pr_unavailable"
+            assert await ledger.github_resource(REPO, CHECKS, SECOND) == check_evidence
             final_seq = await store.head_seq()
         finally:
             await ledger.stop()
@@ -350,6 +415,87 @@ def test_remote_work_item_config_requires_one_source(tmp_path: Path) -> None:
     path.write_text(base + '[projects.demo.github_issues]\nstore_config = "store.toml"\n' + github)
     config = load_config(path, {})
     assert config.github_issue_sources["demo"].store_config == tmp_path / "store.toml"
+
+
+async def test_details_publish_pinned_overlap_before_fixture_callback(tmp_path: Path) -> None:
+    provider = Fixture()
+    provider.step = 1
+    provider.resolve_last_thread = True
+    base_sha = "4" * 40
+    clock = FixedClock()
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    ledger = Ledger(
+        store,
+        build_catalog(),
+        clock,
+        github_repository=REPO,
+        merge_gate_policy=GatePolicy(1, ci_workflow="ci.yml"),
+    )
+    ledger.start()
+    credential = LocalGitHubCredential("TOKEN", {"TOKEN": "fixture"}, None)
+    observations: list[str] = []
+    comparisons: list[str] = []
+
+    async def observe(number: int) -> None:
+        verdict = await ledger.merge_gate("clerk", number)
+        observations.append(verdict.reasons[0].code)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix(f"/repos/{REPO}")
+        if path == "/pulls/4":
+            pull: dict[str, Any] = provider.handle(request).json()
+            pull["base"] = {"ref": "trunk", "repo": {"full_name": REPO}}
+            return httpx.Response(200, json=pull)
+        if path == "/actions/workflows/ci.yml/runs":
+            run = {
+                **status(50, "ci", "success"),
+                "head_sha": MAIN_SHA,
+                "head_branch": "trunk",
+                "run_attempt": 1,
+                "created_at": NOW,
+                "workflow_id": 20,
+            }
+            return httpx.Response(200, json={"total_count": 1, "workflow_runs": [run]})
+        if path == "/actions/runs/50/attempts/1/jobs":
+            jobs = [status(70, "image", "success")]
+            return httpx.Response(200, json={"total_count": 1, "jobs": jobs})
+        if path == f"/commits/{FIRST}/check-runs":
+            return httpx.Response(200, json={"check_runs": [status(15, "lint", "success")]})
+        if path.startswith("/compare/"):
+            comparisons.append(path)
+            left, _, right = path.removeprefix("/compare/").partition("...")
+            assert (left, right) in {(FIRST, MAIN_SHA), (base_sha, FIRST), (base_sha, MAIN_SHA)}
+            return httpx.Response(
+                200,
+                json={
+                    "base_commit": {"sha": left},
+                    "merge_base_commit": {"sha": base_sha},
+                    "status": "ahead" if left == base_sha else "diverged",
+                    "files": [{"filename": "old.py", "status": "modified"}],
+                },
+            )
+        return provider.handle(request)
+
+    try:
+        pulls = GitHubPoller(ledger, clock, REPO, credential, PullRequestFetcher(API, REPO), 1)
+        details = GitHubDetailPoller(
+            ledger,
+            clock,
+            GitHubReadClient(API, REPO),
+            credential,
+            ci_workflow="ci.yml",
+            on_merge_evidence=observe,
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            await pulls.poll(client)
+            await details.poll(client)
+            await details.poll(client)
+        assert observations == ["stale_ci", "stale_ci"]
+        assert len(comparisons) == 3
+    finally:
+        await ledger.stop()
+        await store.close()
 
 
 async def test_github_issues_flow_through_the_runtime_tick(

@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from plotroom.core.unit_of_work import UnitOfWork
 
 FAILED_ACTION = "failed_action"
+BRANCH_UPDATE = "branch_update"
 SWITCHBOARD_SEND = "switchboard.send"
 ACTION_FIELDS = (FieldSpec("action_key", "str"), FieldSpec("attempt", "int"))
 
