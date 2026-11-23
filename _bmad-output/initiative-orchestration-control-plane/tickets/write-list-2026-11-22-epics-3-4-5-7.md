@@ -1,8 +1,8 @@
-# Write-list: tree pass 2026-11-22, epics 3, 4, 5 and 7 (branch tree/epic-2-slice, PR #47)
+# Write-list: tree pass 2026-11-22, epics 3, 4, 5 and 7 (branch tree/epics-3-4-5-7; its PR opens from main after #47 merges)
 
 Status: HELD, waiting for mgd43b's go-ahead, typed in the ticketer's session. Nothing below has been done.
 
-Summary: 38 new issues, 13 body edits, 38 parent links, 110 blocked-by relations on new issues and 3 on existing epics, 1 label removal, 1 comment and 1 close (#13).
+Summary: 38 new issues, 16 body edits, 38 parent links, 110 blocked-by relations on new issues and 3 on existing epics, 1 label removal, 1 comment and 1 close (#13).
 
 ## Creates (in this order; milestone "Orchestration control plane"; no assignee)
 | # | Entry | Type | Title | Parent | Blocked by | Labels |
@@ -49,19 +49,22 @@ Summary: 38 new issues, 13 body edits, 38 parent links, 110 blocked-by relations
 ## Body edits (existing issues; body from the entry's or epic's file; each read first for tracker-side changes)
 | Issue | Entry | What changed | Open PR touching the file? |
 |---|---|---|---|
-| #3 | epic-triggers | Refined: requirements, constraints, decisions; whole-epic gate dropped | #47 (this pass) |
-| #4 | epic-merge-controller | Refined: requirements, constraints, decisions (clerk's gate as reference); gate dropped | #47 |
-| #5 | epic-claims-and-overlaps | Refined: requirements, two Done-when lines, decisions; gate dropped | #47 |
-| #7 | epic-human-queue | Refined: requirements, a Done-when line, decisions; gate dropped | #47 |
-| #2 | epic-one-inbox | Review fixes: one work-item source per project (R8), a lane-inference Done-when line | #47 |
-| #31 | 2.1 | The spike unblocks or drops entry 18 | #47 |
-| #32 | 2.14 | Closes and reopens; per-PR fetcher completeness and as_of for the gate | #47 |
-| #33 | 2.3 | Job conclusions per run; latest run per check name | #47 |
-| #34 | 2.4 | Full pagination; an incomplete thread list is marked | #47 |
-| #35 | 2.15 | Rename status and previous path; hands on to epics 4 and 5 | #47 |
-| #36 | 2.5 | Comment authors and creation times; hands on to epic 7 | #47 |
-| #37 | 2.10 | One work-item source per project | #47 |
-| #38 | 2.16 | One work-item source per project | #47 |
+| #3 | epic-triggers | Refined: requirements, constraints, decisions; whole-epic gate dropped | this pass |
+| #4 | epic-merge-controller | Refined: requirements, constraints, decisions (clerk's gate as reference); gate dropped | this pass |
+| #5 | epic-claims-and-overlaps | Refined: requirements, two Done-when lines, decisions; gate dropped | this pass |
+| #7 | epic-human-queue | Refined: requirements, a Done-when line, decisions; gate dropped | this pass |
+| #2 | epic-one-inbox | Review fixes: one work-item source per project (R8), a lane-inference Done-when line | this pass |
+| #31 | 2.1 | The spike unblocks or drops entry 18 | this pass |
+| #32 | 2.14 | Closes and reopens; per-PR fetcher completeness and as_of for the gate | this pass |
+| #33 | 2.3 | Job conclusions per run; latest run per check name | this pass |
+| #34 | 2.4 | Full pagination; an incomplete thread list is marked | this pass |
+| #35 | 2.15 | Rename status and previous path; hands on to epics 4 and 5 | this pass |
+| #36 | 2.5 | Comment authors and creation times; hands on to epic 7 | this pass |
+| #37 | 2.10 | One work-item source per project | this pass |
+| #38 | 2.16 | One work-item source per project | this pass |
+| #29 | 2.2 | How a daemon started on demand reads its PAT (secret file), from lane #14 | none after #47 merges |
+| #42 | 2.8 | Note on real clients' protocol eras and cancellation, from lane #14 | none after #47 merges |
+| #24 | 1.15 | Note on real clients' protocol eras and cancellation, from lane #14 | none |
 
 ## Relations
 - Each new issue: parent is its epic's issue (#3, #4, #5 or #7).

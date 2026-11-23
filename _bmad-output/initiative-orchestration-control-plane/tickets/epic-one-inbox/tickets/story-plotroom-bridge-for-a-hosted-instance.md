@@ -26,3 +26,7 @@ Verify: With the compose stack as the hosted instance, the scripted participant'
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
 - architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-10
+
+## Notes
+
+- Real clients seen by entry 1.3 (lane #14): Claude Code 2.1.323 speaks the 2026 era (server/discover, a long-lived subscriptions/listen) and Codex 0.169 the 2025-06-18 handshake era; both send notifications/cancelled. The bridge's HTTP calls and the Codex side must work with both.

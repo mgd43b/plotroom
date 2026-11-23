@@ -25,3 +25,7 @@ Verify: The contract test passes in CI for every registered tool in both transpo
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md
+
+## Notes
+
+- Real clients seen by entry 3 (lane #14): Claude Code 2.1.323 speaks the 2026 era (server/discover, a long-lived subscriptions/listen) and Codex 0.169 the 2025-06-18 handshake era; both send notifications/cancelled. The contract test covers both eras, a long-lived subscriptions/listen, and cancellation.
