@@ -9,6 +9,7 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, GitHubSummary, PullRequest
+from plotroom.core.github_projection import GitHubRecord, GitHubResource
 from plotroom.core.lanes import Lane, with_projected_pr
 
 PULL = text(
@@ -159,3 +160,74 @@ async def summary(connection: AsyncConnection, repository: str) -> GitHubSummary
     opened = (await connection.execute(OPEN_COUNT, {"repository": repository})).scalar_one()
     cursor = await fetch_cursor(connection, repository, PULL_REQUESTS)
     return GitHubSummary(int(opened), cursor.as_of if cursor is not None else None)
+
+
+RESOURCE = text("""
+    SELECT * FROM github_resources
+    WHERE repository = :repository AND resource = :resource AND scope = :scope
+""")
+SAVE_RESOURCE = text("""
+    INSERT INTO github_resources
+      (repository, resource, scope, records, attributes, complete, generation, as_of)
+    VALUES
+      (:repository, :resource, :scope, :records, :attributes, :complete, :generation, :as_of)
+    ON CONFLICT (repository, resource, scope) DO UPDATE SET records = excluded.records,
+      attributes = excluded.attributes, complete = excluded.complete,
+      generation = excluded.generation, as_of = excluded.as_of
+""")
+PULL_TARGETS = text("""
+    SELECT pr.* FROM github_pull_requests AS pr
+    LEFT JOIN github_fetch_cursors AS cursor
+      ON cursor.repository = pr.repository AND cursor.resource = 'pull_details/' || pr.number
+    WHERE pr.repository = :repository AND pr.complete
+      AND (
+        pr.state = 'open' OR cursor.watermark IS NULL
+        OR cursor.watermark != (pr.updated_at || ':' || pr.version)
+      )
+    ORDER BY COALESCE(cursor.as_of, ''), pr.updated_at DESC, pr.number
+    LIMIT 8
+""")
+
+
+async def github_resource(
+    connection: AsyncConnection, repository: str, resource: str, scope: str
+) -> GitHubResource | None:
+    row = (
+        await connection.execute(
+            RESOURCE, {"repository": repository, "resource": resource, "scope": scope}
+        )
+    ).first()
+    if row is None:
+        return None
+    return GitHubResource(
+        tuple(GitHubRecord(**record) for record in json.loads(row.records)),
+        bool(row.complete),
+        json.loads(row.attributes),
+        row.generation,
+        row.as_of,
+    )
+
+
+async def save_github_resource(
+    connection: AsyncConnection, repository: str, resource: str, scope: str, result: GitHubResource
+) -> None:
+    await connection.execute(
+        SAVE_RESOURCE,
+        {
+            "repository": repository,
+            "resource": resource,
+            "scope": scope,
+            "records": json.dumps([asdict(record) for record in result.records]),
+            "attributes": json.dumps(result.attributes),
+            "complete": result.complete,
+            "generation": result.generation,
+            "as_of": result.as_of,
+        },
+    )
+
+
+async def github_pull_targets(
+    connection: AsyncConnection, repository: str
+) -> tuple[PullRequest, ...]:
+    rows = await connection.execute(PULL_TARGETS, {"repository": repository})
+    return tuple(_pull_from_row(row) for row in rows)

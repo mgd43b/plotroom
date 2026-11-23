@@ -25,3 +25,4 @@ Verify: Opening, commenting on, assigning and closing an issue on the test repos
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
+- Built: https://github.com/mgd43b/plotroom/pull/147

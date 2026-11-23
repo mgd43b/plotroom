@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from plotroom.core.actions import Action
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
+from plotroom.core.github_projection import GitHubResource
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
@@ -70,7 +71,15 @@ class Transaction(Protocol):
 
     async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None: ...
 
+    async def save_github_resource(
+        self, repository: str, resource: str, scope: str, result: GitHubResource
+    ) -> None: ...
+
     async def save_pull_request(self, pull: PullRequest) -> None: ...
+
+    async def github_resource(
+        self, repository: str, resource: str, scope: str = ""
+    ) -> GitHubResource | None: ...
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None: ...
 
@@ -84,6 +93,8 @@ class Transaction(Protocol):
 
 
 class Store(Protocol):
+    async def github_pull_targets(self, repository: str) -> tuple[PullRequest, ...]: ...
+
     """One project's ledger storage (AD-4: a store is opened for exactly one project)."""
 
     @property
@@ -116,6 +127,10 @@ class Store(Protocol):
     ) -> tuple[Board, GitHubSummary]: ...
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None: ...
+
+    async def github_resource(
+        self, repository: str, resource: str, scope: str = ""
+    ) -> GitHubResource | None: ...
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None: ...
 

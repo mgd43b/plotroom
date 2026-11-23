@@ -11,6 +11,7 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -25,10 +26,14 @@ from plotroom.adapters.github import (
     PullRequestFetcher,
     github_secret_name,
 )
+from plotroom.adapters.github.details import GitHubDetailPoller
+from plotroom.adapters.github.read import GitHubReadClient
+from plotroom.adapters.github.ticket_tree import GitHubTicketTree
 from plotroom.adapters.mcp import build_app
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.adapters.switchboard import Switchboard
-from plotroom.adapters.work_items_bmad import BmadTicketTree
+from plotroom.adapters.work_items_bmad import BmadTicketTree, read_ticket_tree
+from plotroom.adapters.work_items_github_issues import GitHubIssuesWorkItems
 from plotroom.app.clock import SystemClock
 from plotroom.app.config import Config, ConfigError
 from plotroom.app.lock import DataDirLock
@@ -52,6 +57,7 @@ from plotroom.core.actions import SWITCHBOARD_SEND
 from plotroom.core.catalog import build_catalog
 from plotroom.core.ledger import Ledger
 from plotroom.ports import Clock
+from plotroom.ports.work_items import WorkItemSource
 
 log = logging.getLogger("plotroom.serve")
 
@@ -353,6 +359,9 @@ class Daemon:
             )
             workers = self._config.workers.get(project_id, frozenset())
             source = self._config.ticket_trees.get(project_id)
+            work_items: WorkItemSource | None = (
+                BmadTicketTree(*source) if source is not None else None
+            )
             github = self._config.github.get(project_id)
             desktop = self._config.session_readers.get(project_id)
             repository = github.repository if github is not None else None
@@ -382,17 +391,46 @@ class Daemon:
                 )
                 inputs.append(intake.run)
             if github is not None:
+                credential = LocalGitHubCredential(
+                    github_secret_name(project_id), os.environ, github.token_file
+                )
+                api = GitHubReadClient(github.api_url, github.repository)
                 poller = GitHubPoller(
                     project.ledger,
                     self._clock,
                     github.repository,
-                    LocalGitHubCredential(
-                        github_secret_name(project_id), os.environ, github.token_file
-                    ),
+                    credential,
                     PullRequestFetcher(github.api_url, github.repository),
                     github.poll_seconds,
                 )
-                inputs.append(poller.run)
+                issue_source = self._config.github_issue_sources.get(project_id)
+                details = GitHubDetailPoller(
+                    project.ledger,
+                    self._clock,
+                    api,
+                    credential,
+                    github.image_jobs,
+                    include_issue_tree=issue_source is not None,
+                )
+                inputs.append(partial(poller.run, details.poll))
+                if remote_tree := self._config.github_ticket_trees.get(project_id):
+                    tree, installation = remote_tree
+                    work_items = GitHubTicketTree(
+                        api,
+                        credential,
+                        tree,
+                        partial(read_ticket_tree, installation),
+                        cooling_down=details.cooling_down,
+                        report_rate_limit=details.record_rate_limit,
+                    )
+                if issue_source is not None:
+                    work_items = GitHubIssuesWorkItems(
+                        details.issue_tree,
+                        issue_source.starter,
+                        issue_source.store_config,
+                        github.repository,
+                        issue_source.milestone,
+                    )
             project.runtime = ProjectRuntime(
                 project.ledger,
                 self._clock,
@@ -400,7 +438,7 @@ class Daemon:
                 action_attempts=self._config.action_attempts,
                 handlers={SWITCHBOARD_SEND: switchboard.send} if switchboard is not None else {},
                 workers=workers,
-                work_items=BmadTicketTree(*source) if source is not None else None,
+                work_items=work_items,
                 inputs=tuple(inputs),
             )
             project.runtime.start()

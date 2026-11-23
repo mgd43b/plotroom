@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -13,7 +13,7 @@ from typing import Any, cast
 import httpx
 
 from plotroom.core.events import format_time
-from plotroom.core.github import PULL_REQUESTS, FetchRetry, ObservedPull, apply_pull_poll
+from plotroom.core.github import DETAILS, PULL_REQUESTS, FetchRetry, ObservedPull, apply_pull_poll
 from plotroom.core.ledger import Ledger
 from plotroom.ports.clock import Clock
 
@@ -55,7 +55,7 @@ class GitHubRateLimited(GitHubUnavailable):
         return now + timedelta(seconds=fallback)
 
 
-def _rate_limited(response: httpx.Response) -> bool:
+def is_rate_limited(response: httpx.Response) -> bool:
     if response.status_code == 429:
         return True
     if response.status_code != 403:
@@ -165,7 +165,7 @@ class PullRequestFetcher:
                     "X-GitHub-Api-Version": "2026-03-10",
                 },
             )
-            if _rate_limited(response):
+            if is_rate_limited(response):
                 raise GitHubRateLimited(response.headers)
             if response.status_code in (401, 403, 404):
                 raise GitHubUnavailable("GitHub denied access to the configured repository")
@@ -224,7 +224,11 @@ class GitHubPoller:
 
     async def poll(self, client: httpx.AsyncClient) -> bool:
         retry = await self._ledger.fetch_retry(self._repo, PULL_REQUESTS)
-        self._retry_at = datetime.fromisoformat(retry.until) if retry is not None else None
+        detail_retry = await self._ledger.fetch_retry(self._repo, DETAILS)
+        self._retry_at = max(
+            (datetime.fromisoformat(row.until) for row in (retry, detail_retry) if row),
+            default=None,
+        )
         if self._retry_at is not None and self._clock.now() < self._retry_at:
             self._ledger.github_error = "GitHub rate limit reached"
             return False
@@ -259,10 +263,14 @@ class GitHubPoller:
             self._retry_at = None
         return committed
 
-    async def run(self) -> None:
+    async def run(
+        self, after_pull: Callable[[httpx.AsyncClient], Awaitable[None]] | None = None
+    ) -> None:
         async with httpx.AsyncClient(timeout=15, follow_redirects=False, trust_env=False) as client:
             while True:
-                await self.poll(client)
+                committed = await self.poll(client)
+                if committed and after_pull is not None:
+                    await after_pull(client)
                 if self._retry_at is None:
                     delay = self._seconds
                 else:

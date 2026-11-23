@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 from plotroom.adapters.claude_desktop import SESSION_ID
 from plotroom.adapters.github import github_secret_name
+from plotroom.adapters.github.ticket_tree import validate_tree_path
 from plotroom.core.roles import role_family
 from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, MIN_BOARD_BUDGET
 
@@ -70,6 +71,14 @@ class GitHubConfig:
     token_file: Path | None
     api_url: str
     poll_seconds: int
+    image_jobs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class GitHubIssuesConfig:
+    starter: Path
+    store_config: Path
+    milestone: int | None
 
 
 @dataclass(frozen=True)
@@ -96,6 +105,9 @@ class Config:
     switchboards: Mapping[str, SwitchboardConfig] = field(default_factory=lambda: {})
     session_readers: Mapping[str, SessionReaderConfig] = field(default_factory=lambda: {})
     github: Mapping[str, GitHubConfig] = field(default_factory=lambda: {})
+
+    github_ticket_trees: Mapping[str, tuple[str, Path]] = field(default_factory=lambda: {})
+    github_issue_sources: Mapping[str, GitHubIssuesConfig] = field(default_factory=lambda: {})
 
     @property
     def url(self) -> str:
@@ -170,6 +182,8 @@ def load_config(
         env.get("PLOTROOM_LOG_BACKUPS", raw.get("log_backups", DEFAULT_LOG_BACKUPS)),
         minimum=0,
     )
+    github = _github_projects(projects, raw.get("projects"), base)
+    github_trees, github_issues = _github_work_items(projects, raw.get("projects"), base, github)
     return Config(
         data_dir=data_dir,
         host=host,
@@ -184,7 +198,9 @@ def load_config(
         watchers=_watchers(projects, raw.get("projects"), drain_sessions),
         switchboards=_switchboards(projects, raw.get("projects")),
         session_readers=_session_readers(projects, raw.get("projects"), base),
-        github=_github_projects(projects, raw.get("projects"), base),
+        github=github,
+        github_ticket_trees=github_trees,
+        github_issue_sources=github_issues,
         wait_cap=_integer("wait_cap", raw.get("wait_cap", 240), minimum=1),
         snapshot_budget=_integer(
             "snapshot_budget",
@@ -430,6 +446,7 @@ def _github_projects(projects: tuple[str, ...], table: Any, base: Path) -> dict[
             token_file,
             api_url,
             _integer(f"{label}.poll_seconds", settings.get("poll_seconds", 60), minimum=1),
+            _string_list(f"{label}.image_jobs", settings.get("image_jobs"), ()),
         )
     return configured
 
@@ -489,3 +506,57 @@ def _ticket_trees(
             ).resolve()
             sources[project_id] = tree, installation
     return sources
+
+
+def _github_work_items(
+    projects: tuple[str, ...], table: Any, base: Path, github: Mapping[str, GitHubConfig]
+) -> tuple[dict[str, tuple[str, Path]], dict[str, GitHubIssuesConfig]]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    trees: dict[str, tuple[str, Path]] = {}
+    issues: dict[str, GitHubIssuesConfig] = {}
+    for project_id in projects:
+        project = entries.get(project_id, {})
+        configured = project.keys() & {"ticket_tree", "github_ticket_tree", "github_issues"}
+        label = f"projects.{project_id}"
+        if len(configured) > 1:
+            raise ConfigError(f"{label} must select one work-item source")
+        if not configured or "ticket_tree" in configured:
+            continue
+        if project_id not in github:
+            raise ConfigError(f"{label} needs GitHub configuration for its work-item source")
+        installation = (
+            base
+            / Path(
+                _string(f"{label}.bmad_installation", project.get("bmad_installation"))
+            ).expanduser()
+        ).resolve()
+        if "github_ticket_tree" in configured:
+            tree = _string(f"{label}.github_ticket_tree", project["github_ticket_tree"])
+            try:
+                validate_tree_path(tree)
+            except ValueError:
+                raise ConfigError(
+                    f"{label}.github_ticket_tree must be a repository-relative path"
+                ) from None
+            trees[project_id] = tree, installation
+            continue
+        settings = project["github_issues"]
+        if not isinstance(settings, dict):
+            raise ConfigError(f"{label}.github_issues must be a table")
+        settings = cast("dict[str, Any]", settings)
+        if settings.keys() - {"store_config", "milestone"}:
+            raise ConfigError(f"{label}.github_issues supports store_config and milestone")
+        store = (
+            base
+            / Path(
+                _string(f"{label}.github_issues.store_config", settings.get("store_config"))
+            ).expanduser()
+        ).resolve()
+        milestone = (
+            _integer(f"{label}.github_issues.milestone", settings["milestone"], minimum=1)
+            if "milestone" in settings
+            else None
+        )
+        starter = installation / ".agents/skills/bmad-agent-po/config/github-ticketing.toml"
+        issues[project_id] = GitHubIssuesConfig(starter, store, milestone)
+    return trees, issues

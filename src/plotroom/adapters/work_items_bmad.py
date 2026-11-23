@@ -24,15 +24,16 @@ class BmadTicketTree:
     Ticket files themselves are inputs to the read-only next command.
     """
 
-    def __init__(self, tree: Path, installation: Path) -> None:
+    def __init__(self, tree: Path, installation: Path, *, project_root: Path | None = None) -> None:
         self.tree = tree
         self.installation = installation
         self.reader = installation / "_bmad" / "method" / "scripts" / "tickets.py"
+        self.project_root = project_root
 
     async def ready_items(self) -> tuple[WorkItem, ...]:
         if not self.tree.is_dir():
             raise TicketTreeError("configured ticket_tree directory does not exist")
-        root = next(
+        root = self.project_root or next(
             (p for p in (self.tree, *self.tree.parents) if (p / "_bmad").is_dir()), self.tree
         )
         reader = self.reader.resolve()
@@ -94,3 +95,9 @@ class BmadTicketTree:
             return tuple(items.values())
         except (KeyError, TypeError, ValueError) as exc:
             raise TicketTreeError("the BMad reader returned no ready-to-start view") from exc
+
+
+async def read_ticket_tree(
+    installation: Path, tree: Path, project_root: Path
+) -> tuple[WorkItem, ...]:
+    return await BmadTicketTree(tree, installation, project_root=project_root).ready_items()

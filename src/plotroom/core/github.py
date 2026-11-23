@@ -6,12 +6,20 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from plotroom.core.events import FieldSpec, NewEvent
+from plotroom.core.github_projection import (
+    COMMENTS,
+    FILES,
+    GitHubRecord,
+    GitHubResource,
+    apply_resource,
+)
 from plotroom.core.lanes import infer_lane, refresh_ready_lane
 
 if TYPE_CHECKING:
     from plotroom.core.unit_of_work import UnitOfWork
 
 PULL_REQUESTS = "pull_requests"
+DETAILS = "details"
 PR_OPENED = "github.pr_opened"
 PR_MERGED = "github.pr_merged"
 PR_CLOSED = "github.pr_closed"
@@ -142,6 +150,17 @@ async def _project_pull(
         True,
         previous_version + len(changes),
     )
+    if current is not None and current.head_sha != projected.head_sha:
+        files = await uow.github_resource(repository, FILES, str(projected.number))
+        if files is not None and files.complete:
+            await apply_resource(
+                uow,
+                repository,
+                FILES,
+                str(projected.number),
+                GitHubResource((), complete=False),
+                as_of,
+            )
     if not changes:
         if current != projected:
             await uow.save_pull_request(projected)
@@ -169,3 +188,30 @@ async def _project_pull(
         uid = f"{repository}#{projected.number}@{version}:{projected.updated_at}"
         await uow.append(NewEvent("github", kind, uid, fields, observed.body, lane_id))
     await uow.save_pull_request(projected)
+
+
+async def apply_comments(
+    uow: UnitOfWork,
+    repository: str,
+    baseline: FetchCursor | None,
+    comments: tuple[GitHubRecord, ...],
+    watermark: str,
+    as_of: str,
+    *,
+    cursor_resource: str = COMMENTS,
+) -> None:
+    if await uow.fetch_cursor(repository, cursor_resource) != baseline:
+        return
+    for comment in comments:
+        prior = await uow.github_resource(repository, COMMENTS, comment.key)
+        if prior and prior.records[0].fields["updated_at"] > comment.fields["updated_at"]:
+            continue
+        if prior is None or prior.records != (comment,):
+            await apply_resource(
+                uow, repository, COMMENTS, comment.key, GitHubResource((comment,)), as_of
+            )
+    await uow.save_fetch_cursor(
+        repository,
+        cursor_resource,
+        FetchCursor(watermark, as_of, baseline.generation + 1 if baseline else 1),
+    )

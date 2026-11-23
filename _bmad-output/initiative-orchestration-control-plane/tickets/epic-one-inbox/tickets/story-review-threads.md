@@ -25,3 +25,4 @@ Verify: Opening a review thread on the test repository and resolving it each app
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
+- Built: https://github.com/mgd43b/plotroom/pull/147
