@@ -3,10 +3,13 @@ title: 'Trigger once on the last completed checklist step'
 type: feature
 ticket: 4
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '65ed0835eeab89276f197f375cc1ebdcd87dfc54'
 route: full
 route_source: auto
+review: thorough
+review_source: pinned
+lenses_ran: [acceptance, lifecycle, integration]
 risk: low
 context: [AGENTS.md]
 ---
@@ -30,8 +33,8 @@ Given a trigger for a lane without an active checklist, when it is created, then
 ## Code Map and Tasks
 
 - [x] `core/checklists.py` appends a typed `core.checklist_empty` event keyed by lane and READY version only on the last open step transition. Empty READY activation opens its archive item independently.
-- [x] `core/catalog.py` registers the event for the system. `core/triggers.py` adds a lane-validated event leaf using the existing sequence floor, stable action keys and transaction.
-- [x] `tests/test_checklists.py` exercises restart and event/action receipts without external delivery.
+- [x] `core/catalog.py` registers the event for the system. `core/triggers.py` checks the current active checklist with the existing durable trigger state and action keys.
+- [x] `tests/test_checklist_lifecycle.py` exercises restart and event/action receipts without external delivery.
 
 ## Implementation Notes
 
@@ -40,6 +43,8 @@ The versioned last-step event, action and trigger fire commit together. A focuse
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Medium, patch. Acceptance identified a difference between the canonical state condition and event-only late registration. The durable completion event still records the transition once. The predicate reads the current completed checklist and can fire when registered after that transition.
 
 ## Verification
 

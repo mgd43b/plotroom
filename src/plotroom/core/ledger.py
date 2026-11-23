@@ -297,6 +297,7 @@ class Ledger:
                             "args": copy.deepcopy(snapshot),
                             "result": result,
                         },
+                        lane_id=snapshot["lane"] if registered.lane_scoped else None,
                     )
                 )
             await self._refresh_merge_controller(uow)

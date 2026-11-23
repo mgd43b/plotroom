@@ -138,7 +138,10 @@ async def test_merged_ready_checklist_guards_archive_and_proposes_it_when_empty(
         active = await call("snapshot", lane=lane)
         assert active["checklist"] == {**pending, "state": "active"}
         assert (active["pr"], active["head_sha"]) == (1, f"{1:040x}")
-        await call("lane_archive", request_id="blocked", lane=lane, error="conflict")
+        refusal = await call("lane_archive", request_id="blocked", lane=lane, error="conflict")
+        assert refusal["message"] == (
+            "the lane has open checklist steps: 'Check smoke', 'Verify main', 'Record evidence'"
+        )
         for index, row in enumerate(steps[:-1]):
             await worker("checklist_done", request_id=f"step-{index}", lane=lane, step=row["step"])
         assert not any(item["kind"] == "archive_lane" for item in (await call("next"))["items"])

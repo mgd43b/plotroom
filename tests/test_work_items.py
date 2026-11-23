@@ -40,6 +40,58 @@ async def test_local_body_preserves_text_and_bounds_ticket_files(tmp_path: Path)
         await source.body(BRIEF_TICKET_REF)
 
 
+async def test_compact_body_requires_a_bounded_regular_breakdown(tmp_path: Path) -> None:
+    tree, installation = make_brief_ticket(tmp_path)
+    source = BmadTicketTree(tree, installation)
+    breakdown = tree / "tickets" / "tickets.toml"
+    compact = '[[entry]]\nid = 2\ntype = "story"\ntitle = "Compact"\n'
+    breakdown.write_text(compact + "#" * MAX_WORK_ITEM_BODY_BYTES, encoding="utf-8")
+    with pytest.raises(TicketTreeError, match="size limit"):
+        await source.body("2")
+
+    outside = tmp_path / "outside.toml"
+    outside.write_text(compact, encoding="utf-8")
+    breakdown.unlink()
+    breakdown.symlink_to(outside)
+    with pytest.raises(TicketTreeError, match="configured tree"):
+        await source.body("2")
+
+
+@pytest.mark.parametrize(
+    ("ref", "original_id", "new_id"), [("2", "2", '"002"'), ("2a", '"2a"', '"2a"')]
+)
+async def test_compact_body_uses_confined_breakdown_contents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ref: str, original_id: str, new_id: str
+) -> None:
+    tree, installation = make_brief_ticket(tmp_path)
+    breakdown = tree / "tickets" / "tickets.toml"
+    breakdown.write_text(
+        f'[[entry]]\nid = {original_id}\ntype = "story"\ntitle = "Stale subprocess text"\n',
+        encoding="utf-8",
+    )
+    replacement = breakdown.with_suffix(".new")
+    replacement.write_bytes(
+        (
+            f'[[entry]]\nid = {new_id}\ntype = "story"\ntitle = "Current file text"\r\n'
+            'description = """first\r\nsecond"""\r\nverify = 7\r\n'
+            'references = ["fixture.md", 23]\r\nnotes = ["Check the file.", true]\r\n'
+        ).encode("utf-8-sig")
+    )
+    read_source_file = work_items_bmad._read_source_file  # pyright: ignore[reportPrivateUsage]
+
+    def read_after_replacement(scope: Path, path: Path) -> str:
+        assert path == breakdown
+        replacement.replace(path)
+        return read_source_file(scope, path)
+
+    monkeypatch.setattr(work_items_bmad, "_read_source_file", read_after_replacement)
+    assert await BmadTicketTree(tree, installation).body(ref) == (
+        "# Current file text\n\n## Description\n\nfirst\nsecond\n\n"
+        "## Requirements\n\nVerify: 7\n\n## References\n\n- fixture.md\n- 23\n\n"
+        "## Notes\n\n- Check the file.\n- True\n"
+    )
+
+
 async def test_local_bmad_mirror_follows_plans_and_closes_idle_item(tmp_path: Path) -> None:
     reader = Path("_bmad/method/scripts/tickets.py")
     installation = tmp_path / "trusted"
@@ -57,6 +109,10 @@ async def test_local_bmad_mirror_follows_plans_and_closes_idle_item(tmp_path: Pa
 id = 1
 type = "story"
 title = "Ready"
+description = "Keep {worker} literal.\\nPreserve the next line."
+verify = "Read the ready reference."
+references = ["fixture/one.md", "fixture/two.md"]
+notes = ["First note.", "Second note."]
 [[entry]]
 id = 2
 type = "story"
@@ -106,6 +162,14 @@ title = "In progress"
         mirror = await ledger.ready_work_items()
         assert len(mirror) == 1
         assert mirror[0] == WorkItem(mirror[0].ref, "Ready")
+        brief = await ledger.brief("orchestrator", mirror[0].ref, "fixture", adapter)
+        assert brief.startswith(
+            "# Lane brief for fixture\n\n## Work item 1\n\n"
+            "# Ready\n\n## Description\n\nKeep {worker} literal.\nPreserve the next line.\n\n"
+            "## Requirements\n\nVerify: Read the ready reference.\n\n"
+            "## References\n\n- fixture/one.md\n- fixture/two.md\n\n"
+            "## Notes\n\n- First note.\n- Second note.\n\n\n## Paths\n"
+        )
         opened = (await ledger.read_board("orchestrator"))[1]
         assert len(opened) == 1
         assert opened[0].kind == "idle_worker"

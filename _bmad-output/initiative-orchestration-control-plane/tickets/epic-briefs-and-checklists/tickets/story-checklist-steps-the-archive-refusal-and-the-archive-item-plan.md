@@ -3,10 +3,13 @@ title: 'Track checklist completion and archive proposals'
 type: feature
 ticket: 3
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '65ed0835eeab89276f197f375cc1ebdcd87dfc54'
 route: full
 route_source: auto
+review: thorough
+review_source: pinned
+lenses_ran: [acceptance, lifecycle, integration]
 risk: medium
 context: [AGENTS.md]
 ---
@@ -31,7 +34,7 @@ Given an active checklist with open steps, when the orchestrator tries to archiv
 
 - [x] `core/checklists.py`, `core/catalog.py` and `adapters/mcp/server.py` add checklist_done with a completion ref and an idempotent no-op for repeat completion. Keep mutation and consequences in the current unit of work.
 - [x] `core/lanes.py` guards archive before mutation and preserves release and existing item clear. Share the exact archive proposal item identity and context with `core/trigger_actions.py`, including when a trigger and checklist reach it in either order.
-- [x] `tests/test_checklists.py` exercises denied ownership, named refusal, ref, replay, archive-item reuse, zero-step merge, and local archive cleanup. No session archive is performed.
+- [x] `tests/test_checklist_lifecycle.py` exercises denied ownership, named refusal, ref, replay, archive-item reuse, zero-step merge, and local archive cleanup.
 
 ## Implementation Notes
 
@@ -40,6 +43,9 @@ Completion uses the declared ref unless the caller supplies a completion ref. Ow
 ## Plan Change Log
 
 ## Review Triage Log
+
+- High, patch. All three lenses identified an archive proposal that stayed snoozed when its checklist became actionable. The shared context changes when a completed version becomes eligible. Tests cover early proposals before a last-step completion and before an empty READY merge.
+- Medium, patch. Integration found that a completed nonfinal step left the idle predicate looking at older activity. The command receipt now records the lane after a real update. A duplicate step leaves its activity sequence unchanged.
 
 ## Verification
 

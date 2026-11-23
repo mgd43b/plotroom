@@ -49,10 +49,13 @@ class Command:
     args: tuple[FieldSpec, ...]
     handler: CommandHandler
     record_if: Callable[[dict[str, Any]], bool] | None = None
+    lane_scoped: bool = False
 
     def __post_init__(self) -> None:
         if not _NAME.fullmatch(self.name):
             raise ValueError(f"command name {self.name!r} must be lowercase letters, digits, _")
+        if self.lane_scoped and FieldSpec("lane", "str") not in self.args:
+            raise ValueError(f"lane-scoped command {self.name!r} requires a lane argument")
 
 
 class CommandRegistry:

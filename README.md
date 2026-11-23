@@ -42,9 +42,10 @@ tickets. The daemon preserves the last mirror when a source refresh fails.
 The orchestrator can call `brief(work_item, worker)` for a configured worker.
 The tool returns a draft with the full text of the referenced ticket or issue,
 the worker's current claims, and the claims of other lanes to avoid. Use the
-source's work-item reference. For a BMad source the ticket must have a story
-file in the configured tree. Before a worker starts a lane, its paths section is
-empty. The orchestrator can edit the returned text before sending it.
+source's work-item reference. BMad sources use the story file when present and
+render the ticket's description, verification, references, and notes when the
+ticket lives in `tickets.toml`. Before a worker starts a lane, its paths section
+is empty. The orchestrator can edit the returned text before sending it.
 
 The optional project table configures the outline and standing rules. Plotroom
 defaults to a Markdown brief with headings and a short plan and RESULT outline.
@@ -70,9 +71,10 @@ PR and head merge.
 The owning worker or orchestrator can call `checklist_done` with the lane and
 step name. An optional `ref` records completion evidence. If omitted, the
 tool uses the declared ref. Open active steps block `lane_archive`. The last
-completion opens one archive proposal and emits a `checklist_empty` event
-that an orchestrator trigger can match. An explicitly empty checklist opens
-an archive proposal as soon as its PR merges.
+completion opens one archive proposal and emits a `core.checklist_empty` event.
+An orchestrator's `checklist_empty` predicate also matches a current active
+checklist whose last step has already closed. An explicitly empty checklist
+opens an archive proposal as soon as its PR merges.
 
 ## Local merge readiness
 

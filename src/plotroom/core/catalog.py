@@ -237,6 +237,7 @@ def build_catalog(
             (lane, FieldSpec("step", "str"), FieldSpec("ref", "str", required=False)),
             checklist_done,
             record_if=lambda result: bool(result["changed"]),
+            lane_scoped=True,
         ),
         rules=owner,
     )

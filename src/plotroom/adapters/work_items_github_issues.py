@@ -36,10 +36,38 @@ class _Issue:
     title: str
     kind: str | None
     status: str | None
-    can_start: bool
+    body: str
     milestone: int | None
     children: tuple[int, ...]
     blockers: tuple[int | str, ...]
+
+    @property
+    def can_start(self) -> bool:
+        return (
+            self.status == "backlog"
+            and self.kind in _LEAF_TYPES
+            and _body_allows_start(self.kind, self.body)
+        )
+
+
+@dataclass(frozen=True)
+class _IssueTree:
+    issues: dict[int, _Issue]
+    parents: dict[int, tuple[_Issue, int]]
+    milestones: dict[int, str]
+
+    def scoped(
+        self, issue: _Issue, milestone_filter: int | None
+    ) -> tuple[tuple[_Issue, int] | None, int | None] | None:
+        if issue.kind not in _LEAF_TYPES:
+            return None
+        parent = self.parents.get(issue.number)
+        milestone = issue.milestone or (parent[0].milestone if parent else None)
+        if milestone_filter is not None and milestone != milestone_filter:
+            return None
+        if milestone is not None and self.milestones.get(milestone) != "open":
+            return None
+        return parent, milestone
 
 
 def _settings(path: Path) -> dict[str, Any]:
@@ -191,7 +219,7 @@ def _issue(row: dict[str, Any], mapping: _StoreMapping) -> _Issue:
         title,
         kind,
         status,
-        status == "backlog" and kind in _LEAF_TYPES and _body_allows_start(kind, body or ""),
+        body or "",
         _number(milestone) if milestone is not None else None,
         tuple(_number(child) for child in _list(row.get("sub_issues"))),
         tuple(
@@ -225,24 +253,15 @@ class GitHubIssuesWorkItems:
     async def body(self, ref: str) -> str | None:
         if re.fullmatch(r"[1-9][0-9]{0,18}", ref) is None:
             return None
-        number = int(ref)
-        matches = [
-            row
-            for row in await self._read()
-            if row.get("resource") == "issue" and _number(row.get("number")) == number
-        ]
-        if not matches:
+        tree = await asyncio.to_thread(self._snapshot, await self._read())
+        issue = tree.issues.get(int(ref))
+        if issue is None or tree.scoped(issue, self._milestone) is None:
             return None
-        if len(matches) != 1:
-            raise GitHubIssuesError("the GitHub issue snapshot has duplicate issues")
-        body = matches[0].get("body")
-        if body is None:
-            return ""
-        if not isinstance(body, str) or len(body.encode("utf-8")) > MAX_WORK_ITEM_BODY_BYTES:
+        if len(issue.body.encode("utf-8")) > MAX_WORK_ITEM_BODY_BYTES:
             raise GitHubIssuesError("the GitHub issue snapshot has an invalid body")
-        return body
+        return issue.body
 
-    def _classify(self, rows: tuple[dict[str, Any], ...]) -> tuple[WorkItem, ...]:
+    def _snapshot(self, rows: tuple[dict[str, Any], ...]) -> _IssueTree:
         mapping = _StoreMapping.load(self._starter, self._project_config, self._repository)
         milestones: dict[int, str] = {}
         issues: dict[int, _Issue] = {}
@@ -268,28 +287,27 @@ class GitHubIssuesWorkItems:
                     if child in parents:
                         raise GitHubIssuesError("a GitHub sub-issue occurs more than once")
                     parents[child] = (epic, position)
+        return _IssueTree(issues, parents, milestones)
 
+    def _classify(self, rows: tuple[dict[str, Any], ...]) -> tuple[WorkItem, ...]:
+        tree = self._snapshot(rows)
         done = {
             issue.number
-            for issue in issues.values()
+            for issue in tree.issues.values()
             if issue.status == "done" and issue.kind is not None
         }
         met = done | {
             issue.number
-            for issue in issues.values()
+            for issue in tree.issues.values()
             if issue.status == "review" and issue.kind in _LEAF_TYPES
         }
         ready: list[tuple[tuple[int, bool, int, int], WorkItem]] = []
-        for issue in issues.values():
-            if not issue.can_start:
+        for issue in tree.issues.values():
+            scope = tree.scoped(issue, self._milestone)
+            if scope is None or not issue.can_start:
                 continue
-            parent = parents.get(issue.number)
+            parent, milestone = scope
             epic = parent[0] if parent else None
-            milestone = issue.milestone or (epic.milestone if epic else None)
-            if self._milestone is not None and milestone != self._milestone:
-                continue
-            if milestone is not None and milestones.get(milestone) != "open":
-                continue
             if not met.issuperset(issue.blockers) or (epic and not done.issuperset(epic.blockers)):
                 continue
             order = (

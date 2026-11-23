@@ -174,6 +174,74 @@ async def test_explicit_ready_activates_when_multiple_lanes_use_the_branch(
     assert lanes[1].checklist is None
 
 
+async def test_explicit_ready_follows_its_pull_when_another_opens_on_the_branch(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, _ = board
+    observed = _pull()
+    await _poll(ledger, observed)
+    await ledger.execute("worker:fixture", "lane_ready", "ready", _ready())
+    pending = await _lane(ledger)
+
+    other = replace(observed, number=13, head_sha="b" * 40, updated_at="2026-11-22T12:00:02Z")
+    await _poll(ledger, other)
+    summary, _ = await ledger.snapshot_board("orchestrator")
+    assert summary[2] == {"ready": 1}
+    (row,) = summary[3]
+    assert (row.state, row.pr, row.head_sha) == ("ready", observed.number, observed.head_sha)
+    assert "checklist" not in row.render()
+    assert await _lane(ledger) == pending
+
+    await _poll(ledger, replace(observed, state="merged", updated_at="2026-11-22T12:00:03Z"))
+    active = await _lane(ledger)
+    assert active == {
+        **pending,
+        "state": "active",
+        "checklist": {**pending["checklist"], "state": "active"},
+    }
+    summary, _ = await ledger.snapshot_board("orchestrator")
+    (row,) = summary[3]
+    assert (row.state, row.pr, row.head_sha) == ("active", other.number, other.head_sha)
+
+
+async def test_omitted_ready_only_retains_checklist_for_the_same_repository(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, store = board
+    observed = _pull()
+    await _poll(ledger, observed)
+    await ledger.execute("worker:fixture", "lane_ready", "typed", _ready())
+    pending = await _lane(ledger)
+    legacy = {"lane": "lane", "pr": observed.number, "head_sha": observed.head_sha}
+    await ledger.execute("worker:fixture", "lane_ready", "same-repository", legacy)
+    assert await _lane(ledger) == pending
+
+    await ledger.stop()
+    other_repository = "fixture/other"
+    reconfigured = Ledger(
+        store,
+        build_catalog(frozenset({"fixture"}), github_repository=other_repository),
+        FixedClock(),
+        github_repository=other_repository,
+    )
+    reconfigured.start()
+    try:
+        await _poll(
+            reconfigured,
+            replace(observed, head_repository=other_repository),
+            repository=other_repository,
+        )
+        await reconfigured.execute("worker:fixture", "lane_ready", "new-repository", legacy)
+        assert "checklist" not in await _lane(reconfigured)
+        await _poll(
+            reconfigured,
+            replace(observed, state="merged", updated_at="2026-11-22T12:00:02Z"),
+        )
+        assert "checklist" not in await _lane(reconfigured)
+    finally:
+        await reconfigured.stop()
+
+
 @pytest.mark.parametrize("changed", ["head_sha", "branch", "head_repository"])
 async def test_merge_with_changed_identity_invalidates_pending_ready(
     board: tuple[Ledger, SqliteStore], changed: str

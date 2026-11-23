@@ -38,9 +38,13 @@ class Lane:
     def with_checklist(self, checklist: Checklist | None) -> Lane:
         if checklist is None or checklist.state == "invalidated":
             return self
-        if checklist.state == "active":
-            return replace(self, checklist=checklist, pr=checklist.pr, head_sha=checklist.head_sha)
-        return replace(self, checklist=checklist)
+        return replace(
+            self,
+            checklist=checklist,
+            state="ready" if checklist.state == "pending" else self.state,
+            pr=checklist.pr,
+            head_sha=checklist.head_sha,
+        )
 
     def render(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -156,20 +160,26 @@ async def refresh_ready_lanes(uow: UnitOfWork, repository: str, branch: str) -> 
         if lane.state != "ready":
             continue
         checklist = await uow.find_checklist(lane.id)
-        pending = checklist if checklist is not None and checklist.state == "pending" else None
-        if pending is None and len(lanes) != 1:
-            continue  # The legacy lane binding requires an unambiguous branch.
-        if pending is not None:
-            if pending.repository != repository:
+        if checklist is not None and checklist.state == "pending":
+            if checklist.repository != repository:
                 continue
-            projected = await uow.pull_request(repository, pending.pr)
-            if projected is not None and projected.state == "merged" and pending.matches(projected):
-                await activate_checklist(uow, pending)
-                pending = None
-        pr = await uow.open_branch_pull(repository, branch)
-        if pr is None or (pr.number, pr.head_sha) != (lane.pr, lane.head_sha):
-            await invalidate_checklist(uow, pending)
-            await _save(uow, replace(lane, state="active", pr=None, head_sha=None))
+            projected = await uow.pull_request(repository, checklist.pr)
+            state = (
+                projected.state if projected is not None and checklist.matches(projected) else None
+            )
+            if state == "open":
+                continue
+            if state == "merged":
+                await activate_checklist(uow, checklist)
+            else:
+                await invalidate_checklist(uow, checklist)
+        else:
+            if len(lanes) != 1:
+                continue  # The legacy lane binding requires an unambiguous branch.
+            pr = await uow.open_branch_pull(repository, branch)
+            if pr is not None and (pr.number, pr.head_sha) == (lane.pr, lane.head_sha):
+                continue
+        await _save(uow, replace(lane, state="active", pr=None, head_sha=None))
 
 
 async def archive_lane(

@@ -82,6 +82,12 @@ async def declare_checklist(
     if current is not None and current.state == "active":
         raise LedgerError("conflict", "the lane already has an active checklist")
     if "checklist" not in args:
+        identity = (repository, lane.branch, args["pr"], args["head_sha"])
+        if (
+            current is not None
+            and (current.repository, current.branch, current.pr, current.head_sha) != identity
+        ):
+            await invalidate_checklist(uow, current)
         return
     steps = _parse_steps(args["checklist"])
     if repository is None:
@@ -106,7 +112,12 @@ async def activate_checklist(uow: UnitOfWork, checklist: Checklist) -> None:
 
 
 async def propose_lane_archive(uow: UnitOfWork, lane: str) -> None:
-    await uow.raise_item(ARCHIVE_PROPOSAL, lane, "orchestrator", {"lane": lane})
+    context: dict[str, Any] = {"lane": lane}
+    checklist = await uow.find_checklist(lane)
+    if checklist is not None and checklist.state == "active" and not checklist.open_steps():
+        # The checklist becoming actionable wakes an earlier snoozed proposal under the same ID.
+        context["checklist_version"] = checklist.version
+    await uow.raise_item(ARCHIVE_PROPOSAL, lane, "orchestrator", context)
 
 
 async def complete_checklist_step(

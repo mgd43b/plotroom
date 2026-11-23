@@ -183,3 +183,37 @@ async def test_incomplete_or_ambiguous_work_has_no_eligible_leaf(tmp_path: Path)
         await source.ready_items()
     with pytest.raises(GitHubIssuesError, match="duplicate issues"):
         await source.body("1")
+
+
+async def test_issue_body_uses_ticket_types_and_effective_milestone(tmp_path: Path) -> None:
+    config = tmp_path / "ticketing-store-config.toml"
+    config.write_text(
+        '[tickets]\nstore = "github"\n[tickets.types]\nstory = "work"\n', encoding="utf-8"
+    )
+    rows = (
+        {"resource": "milestone", "number": 1, "state": "open"},
+        {"resource": "milestone", "number": 2, "state": "open"},
+        {"resource": "milestone", "number": 3, "state": "closed"},
+        issue(20, "epic", milestone=1, sub_issues=[2, 3]),
+        issue(21, "epic", milestone=2, sub_issues=[4, 5]),
+        issue(1, "work", "backlog", body="Direct\r\n"),
+        issue(2, "work", "backlog", milestone=None, body="Inherited"),
+        issue(3, "work", "backlog", milestone=2, body="Direct overrides inherited"),
+        issue(4, "work", "backlog", milestone=None, body="Different inherited milestone"),
+        issue(5, "work", "in-progress", body="Already started"),
+        issue(6, "story", "backlog", body="Unmapped type"),
+        issue(7, "work", "backlog", milestone=3, body="Closed milestone"),
+    )
+
+    async def read() -> tuple[dict[str, Any], ...]:
+        return rows
+
+    source = GitHubIssuesWorkItems(read, STARTER, config, "owner/repo", milestone=1)
+    assert await source.ready_items() == (WorkItem("2", "Ticket 2"), WorkItem("1", "Ticket 1"))
+    assert await source.body("1") == "Direct\r\n"
+    assert await source.body("2") == "Inherited"
+    assert await source.body("5") == "Already started"
+    for ref in ("3", "4", "6", "20"):
+        assert await source.body(ref) is None
+    unfiltered = GitHubIssuesWorkItems(read, STARTER, config, "owner/repo")
+    assert await unfiltered.body("7") is None

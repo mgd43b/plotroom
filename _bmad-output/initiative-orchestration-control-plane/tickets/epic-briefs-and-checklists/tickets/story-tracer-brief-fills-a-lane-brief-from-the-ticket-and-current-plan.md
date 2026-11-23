@@ -3,10 +3,13 @@ title: 'Build a lane brief from current project facts'
 type: feature
 ticket: 1
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '65ed0835eeab89276f197f375cc1ebdcd87dfc54'
 route: full
 route_source: auto
+review: thorough
+review_source: pinned
+lenses_ran: [acceptance, lifecycle, integration]
 risk: medium
 context: [AGENTS.md]
 ---
@@ -51,6 +54,10 @@ The source lookup runs outside the writer. The brief reads the worker's current 
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Medium, patch. Acceptance and integration each identified compact ready tickets that produced an absent body. The reader now returns the text fields from the matching in-scope entry. A mirror-to-brief fixture verifies the same reference through both paths.
+- Medium, patch. Acceptance and integration each identified that body lookup bypassed the source's configured issue scope. Lookup now shares ticket and effective milestone membership with the mirror. Focused fixtures cover explicit and inherited assignments and an in-progress ticket.
+- Medium, patch. The integration recheck found that the compact renderer could still return earlier subprocess text after validating a different file read. The trusted lookup now locates the ticket, and the confined TOML read provides the rendered text.
 
 ## Verification
 

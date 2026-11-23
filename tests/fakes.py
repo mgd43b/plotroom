@@ -597,12 +597,24 @@ class MemoryStore:
         )
         cursor = await self.fetch_cursor(repository, PULL_REQUESTS)
         seq, items, counts, lanes = await self.read_board(role)
-        projected = [
-            with_projected_pr(lane, pr.number, pr.head_sha)
-            if (pr := _branch_pull(self._pulls, repository, lane.branch)) is not None
-            else with_projected_pr(lane, None, None)
-            for lane in lanes
-        ]
+        projected: list[Lane] = []
+        for lane in lanes:
+            if lane.state == "ready" and (checklist := self._checklists.get(lane.id)) is not None:
+                pr = self._pulls.get((repository, checklist.pr))
+                if (
+                    checklist.state == "pending"
+                    and pr is not None
+                    and pr.state == "open"
+                    and checklist.matches(pr)
+                ):
+                    projected.append(with_projected_pr(lane, pr.number, pr.head_sha))
+                    continue
+            pr = _branch_pull(self._pulls, repository, lane.branch)
+            projected.append(
+                with_projected_pr(lane, pr.number, pr.head_sha)
+                if pr is not None
+                else with_projected_pr(lane, None, None)
+            )
         return (seq, items, counts, projected), GitHubSummary(
             opened, cursor.as_of if cursor else None
         )

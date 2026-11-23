@@ -6,7 +6,7 @@ import pytest
 
 from fakes import FixedClock
 from plotroom.core.checklists import CHECKLIST_EMPTY
-from plotroom.core.events import LedgerError
+from plotroom.core.events import LedgerError, NewEvent
 from plotroom.core.ledger import Ledger
 from plotroom.core.triggers import TRIGGER_FIRED
 from test_trigger_actions import open_ledger, pull, runtime, trigger
@@ -92,6 +92,46 @@ async def test_empty_ready_proposes_archive_only_when_merged(tmp_path: Path) -> 
         assert not any(event.kind == CHECKLIST_EMPTY for event in await ledger.events_after(0))
 
 
+@pytest.mark.parametrize("steps", [[], STEPS])
+async def test_actionable_checklist_wakes_the_same_snoozed_proposal(
+    tmp_path: Path, steps: list[dict[str, str]]
+) -> None:
+    clock = FixedClock()
+    async with open_ledger(tmp_path, clock) as ledger:
+        await prepare(ledger, steps)
+        await pull(ledger, 2)
+        proposal_args = {
+            "predicate": {"pr_merged": {"number": 2}},
+            "action": {"propose_archive": {"lane": LANE}},
+        }
+        await ledger.execute("orchestrator", "trigger", "propose-early", proposal_args)
+        runner = runtime(ledger, clock)
+        assert await runner.run_one_action()
+        [item_id] = await archive_ids(ledger)
+        original = await ledger.read_open_item("orchestrator", item_id)
+        assert original is not None
+        assert original.context == {"lane": LANE}
+        await ledger.execute("orchestrator", "ack", "not-yet", {"item": item_id})
+        assert await archive_ids(ledger) == []
+
+        await pull(ledger, 1)
+        for index, row in enumerate(steps):
+            await ledger.execute(
+                "orchestrator",
+                "checklist_done",
+                f"step-{index}",
+                {"lane": LANE, "step": row["step"]},
+            )
+        assert await archive_ids(ledger) == [item_id]
+        actionable = await ledger.read_open_item("orchestrator", item_id)
+        assert actionable is not None
+        assert actionable.seq > original.seq
+        assert actionable.context == {"lane": LANE, "checklist_version": 1}
+        await ledger.execute("orchestrator", "trigger", "propose-late", proposal_args)
+        assert await runner.run_one_action()
+        assert await ledger.read_open_item("orchestrator", item_id) == actionable
+
+
 async def test_checklist_empty_fires_once_across_restarts(tmp_path: Path) -> None:
     clock = FixedClock()
     predicate = {"checklist_empty": {"lane": LANE}}
@@ -137,3 +177,36 @@ async def test_checklist_empty_fires_once_across_restarts(tmp_path: Path) -> Non
         assert [event.fields["trigger_id"] for event in events if event.kind == TRIGGER_FIRED] == [
             fired["id"]
         ]
+        late = await ledger.execute("orchestrator", "trigger", "already-complete", args)
+        triggers = await ledger.list_triggers("orchestrator", None)
+        assert next(row for row in triggers if row["id"] == late.result["id"])["state"] == "fired"
+        assert [
+            event.id for event in await ledger.events_after(0) if event.kind == CHECKLIST_EMPTY
+        ] == [empty.id]
+
+
+async def test_nonfinal_completion_updates_lane_activity_once(tmp_path: Path) -> None:
+    clock = FixedClock()
+    async with open_ledger(tmp_path, clock) as ledger:
+        await prepare(ledger, STEPS)
+        await pull(ledger, 1)
+        await ledger.execute(
+            "orchestrator",
+            "trigger",
+            "idle",
+            {
+                "predicate": {"lane_idle": {"lane": LANE}},
+                "action": {"notify_orchestrator": {"text": "Fixture lane idle"}},
+            },
+        )
+        args = {"lane": LANE, "step": STEPS[0]["step"]}
+        clock.advance(14 * 60)
+        await ledger.execute("worker:desktop", "checklist_done", "progress", args)
+        clock.advance(2 * 60)
+        await ledger.append("system", NewEvent("core", "core.tick", "recent-progress"))
+        assert (await ledger.list_triggers("orchestrator", None))[0]["state"] == "open"
+        clock.advance(14 * 60)
+        repeated = await ledger.execute("worker:desktop", "checklist_done", "repeat-step", args)
+        assert repeated.result["changed"] is False
+        await ledger.append("system", NewEvent("core", "core.tick", "stalled-progress"))
+        assert (await ledger.list_triggers("orchestrator", None))[0]["state"] == "fired"

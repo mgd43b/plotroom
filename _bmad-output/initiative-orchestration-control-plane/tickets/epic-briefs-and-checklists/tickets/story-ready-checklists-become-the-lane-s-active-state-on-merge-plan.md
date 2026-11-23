@@ -3,10 +3,13 @@ title: 'Store and activate a structured READY checklist'
 type: feature
 ticket: 2
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '65ed0835eeab89276f197f375cc1ebdcd87dfc54'
 route: full
 route_source: auto
+review: thorough
+review_source: pinned
+lenses_ran: [acceptance, lifecycle, integration]
 risk: medium
 context: [AGENTS.md]
 ---
@@ -46,6 +49,10 @@ Use the single existing lane row and a separate checklist header with positive v
 - 2026-11-23. Added populated-upgrade coverage and explicit READY reconciliation when current lanes share a branch. The named lane snapshot retains the active checklist's original PR and head. Migration `0017` uses local predecessor `0015` pending integration with the landed peer revision.
 
 ## Review Triage Log
+
+- High, patch. Lifecycle and integration each reproduced the second same-branch PR discarding a first PR's pending checklist. Typed reconciliation uses the declared projection and keeps the named snapshot attached through branch ambiguity.
+- Medium, patch. Lifecycle identified that a READY without steps in a newly configured repository could retain a pending checklist from the previous repository. Omission retains the checklist only when the full accepted identity matches.
+- Medium, patch. The lifecycle recheck found that an ambiguous branch could still demote a valid typed READY in board summaries. The summary preserves its pending identity from checklist headers without loading steps.
 
 ## Verification
 
