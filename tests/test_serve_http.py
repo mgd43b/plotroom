@@ -25,8 +25,7 @@ from conftest import (
 )
 from plotroom.adapters.store_sqlite import head_revision
 from plotroom.app.cli import EXIT_CONFIG, EXIT_FAILURE, EXIT_LOCKED, main
-from plotroom.app.daemon_start import speaks_mcp
-from plotroom.app.portfile import PORT_FILE_NAME, read_port
+from plotroom.app.portfile import PORT_FILE_NAME, read_listener, read_port
 from plotroom.app.tokens import IssuedToken
 
 EMPTY_BOARD: dict[str, Any] = {
@@ -87,17 +86,25 @@ async def test_the_published_port_is_the_serving_port_and_answers(
     assert announced["port"] != 0
     assert read_port(config_path.parent / "data") == (child.process.pid, announced["port"])
     assert url == f"http://127.0.0.1:{announced['port']}/mcp"
-    assert await speaks_mcp(url)
+    async with httpx.AsyncClient(trust_env=False) as http:
+        assert (await http.head(url)).status_code == 401
 
 
-def test_the_port_file_is_gone_after_the_server_is_stopped(
+def test_the_publication_and_private_socket_are_gone_after_the_server_is_stopped(
     server: tuple[Child, str], config_path: Path
 ) -> None:
     child, _ = server
     port_file = config_path.parent / "data" / PORT_FILE_NAME
+    publication = read_listener(port_file.parent)
+    assert publication is not None
+    assert publication.local_socket is not None
+    socket_path = Path(publication.local_socket)
+    assert socket_path.is_socket()
+    assert socket_path.parent.stat().st_mode & 0o777 == 0o700
     assert port_file.exists()
     child.stop()
     assert not port_file.exists()
+    assert not socket_path.exists()
 
 
 def test_sigterm_closes_the_open_project_file(server: tuple[Child, str], config_path: Path) -> None:

@@ -14,13 +14,25 @@ from types import FrameType
 from typing import Any
 
 import uvicorn
+from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from plotroom.adapters.mcp import build_app
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.app.clock import SystemClock
-from plotroom.app.config import Config
+from plotroom.app.config import Config, ConfigError
 from plotroom.app.lock import DataDirLock
-from plotroom.app.portfile import remove_port, write_port
+from plotroom.app.portfile import (
+    DirectoryIdentity,
+    directory_identity,
+    directory_key,
+    pin_directory,
+    prepare_local_socket,
+    published_socket,
+    read_listener,
+    remove_local_socket,
+    remove_port,
+    write_port,
+)
 from plotroom.app.sqlite_floor import floor_problem
 from plotroom.app.tokens import TokenRegistry
 from plotroom.core.catalog import build_catalog
@@ -30,15 +42,32 @@ from plotroom.ports import Clock
 log = logging.getLogger("plotroom.serve")
 
 
+def _require_directory(data_dir: Path, identity: DirectoryIdentity) -> None:
+    try:
+        if directory_identity(data_dir) == identity:
+            return
+    except OSError:
+        pass
+    raise ConfigError("the canonical plotroom data directory changed during startup")
+
+
 class _Server(uvicorn.Server):
     """uvicorn's server that publishes the address it actually bound."""
 
     def __init__(
-        self, config: uvicorn.Config, started: asyncio.Future[int], data_dir: Path
+        self,
+        config: uvicorn.Config,
+        started: asyncio.Future[int],
+        data_dir: Path,
+        directory_fd: int,
     ) -> None:
         super().__init__(config)
         self._started_future = started
         self._data_dir = data_dir
+        self._directory_fd = directory_fd
+        self._identity = directory_identity(directory_fd)
+        self._local_socket: Path | None = None
+        self._local_listener: asyncio.Server | None = None
 
     _shutdown_task: asyncio.Task[None] | None = None
 
@@ -50,8 +79,9 @@ class _Server(uvicorn.Server):
 
     async def _shut_down(self, sockets: Any) -> None:
         # Stop publishing the listener as soon as it starts shutting down.
+        self._stop_local_socket()
         with contextlib.suppress(OSError):
-            remove_port(self._data_dir)
+            remove_port(self._data_dir, directory_fd=self._directory_fd)
         await uvicorn.Server.shutdown(self, sockets)
 
     async def shutdown(self, sockets: Any = None) -> None:
@@ -67,13 +97,62 @@ class _Server(uvicorn.Server):
             # Published before anyone is told the server is up: a client that sees "serving" in
             # the log, or reads the file, finds the same port.
             try:
-                write_port(self._data_dir, port, host=host)
+                _require_directory(self._data_dir, self._identity)
+                local_socket = await self._start_local_socket()
+                _require_directory(self._data_dir, self._identity)
+                write_port(
+                    self._data_dir,
+                    port,
+                    host=host,
+                    local_socket=local_socket,
+                    local_unavailable=local_socket is None,
+                    directory_fd=self._directory_fd,
+                )
             except BaseException:
                 # uvicorn skips its own shutdown when startup raises, which would leave the
                 # listener open after the lock is released.
-                await self.shutdown_task()
+                await _finish(self.shutdown_task())
                 raise
             self._started_future.set_result(port)
+
+    async def _start_local_socket(self) -> Path | None:
+        loop = asyncio.get_running_loop()
+
+        def protocol() -> asyncio.Protocol:
+            # Use the same app, lifespan, and tracked connections as the TCP listener.
+            return H11Protocol(
+                config=self.config,
+                server_state=self.server_state,
+                app_state=self.lifespan.state,
+                _loop=loop,
+            )
+
+        try:
+            local_socket = prepare_local_socket(self._data_dir, directory_fd=self._directory_fd)
+            self._local_socket = local_socket
+            _require_directory(self._data_dir, self._identity)
+            listener = await loop.create_unix_server(
+                protocol, path=local_socket, start_serving=False
+            )
+            self._local_listener = listener
+            self.servers.append(listener)  # shutdown owns the socket before it starts accepting
+            await listener.start_serving()
+        except OSError as exc:
+            self._stop_local_socket()
+            log.warning("private local listener unavailable", extra={"reason": str(exc)})
+            return None
+        return local_socket
+
+    def _stop_local_socket(self) -> None:
+        if self._local_listener is not None:
+            self._local_listener.close()
+            self._local_listener = None
+        if self._local_socket is not None:
+            directory_fd = (
+                self._directory_fd if self._local_socket.parent.parent == self._data_dir else None
+            )
+            remove_local_socket(self._local_socket, directory_fd=directory_fd)
+            self._local_socket = None
 
 
 async def _finish(task: asyncio.Task[None]) -> None:
@@ -101,8 +180,10 @@ class Daemon:
         *,
         sqlite_version: str | None = None,
         clock: Clock | None = None,
+        expected_directory: str | None = None,
     ) -> None:
         self._config = config
+        self._expected_directory = expected_directory
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._projects: dict[str, _Project] = {}
         self._sqlite_version = (
@@ -156,54 +237,70 @@ class Daemon:
         config = self._config
         if self._started is None:
             self._started = asyncio.get_running_loop().create_future()
-        with DataDirLock(config.data_dir):
-            # Whatever an earlier daemon left behind is not this one's: gone before it binds.
-            remove_port(config.data_dir)
+        with pin_directory(config.data_dir) as directory_fd:
+            identity = directory_identity(directory_fd)
+            if self._expected_directory is not None and self._expected_directory != directory_key(
+                identity
+            ):
+                raise ConfigError("the canonical plotroom data directory changed during startup")
+            with DataDirLock(config.data_dir, directory_fd=directory_fd):
+                _require_directory(config.data_dir, identity)
+                await self._run_locked(self._started, directory_fd, identity)
+
+    async def _run_locked(
+        self, started: asyncio.Future[int], directory_fd: int, identity: DirectoryIdentity
+    ) -> None:
+        config = self._config
+        # Clear a publication left by a previous owner of the directory we locked.
+        old = read_listener(config.data_dir, directory_fd=directory_fd)
+        remove_port(config.data_dir, directory_fd=directory_fd)
+        if old is not None and old.local_socket is not None:
+            stale_socket = published_socket(config.data_dir, identity, old.local_socket)
+            if stale_socket is not None:
+                parent_fd = directory_fd if stale_socket.parent.parent == config.data_dir else None
+                remove_local_socket(stale_socket, directory_fd=parent_fd)
+        try:
+            problem = floor_problem(self._sqlite_version)
+            if problem is not None:
+                log.error("not ready", extra={"reason": problem})
+            else:
+                await self._open_projects()
+            _require_directory(config.data_dir, identity)
+            app = build_app(
+                config.projects,
+                config.allowed_hosts,
+                ledgers=self.ledgers,
+                authenticate=TokenRegistry(config.data_dir).authenticate,
+                unavailable=problem,
+            )
+            uvicorn_config = uvicorn.Config(
+                app,
+                host=config.host,
+                port=config.port,
+                log_config=None,
+                access_log=False,
+            )
+            self._server = _Server(uvicorn_config, started, config.data_dir, directory_fd)
+            if self._received_sigterm:  # opening finished after a stop request
+                return
+            serving = asyncio.ensure_future(self._announce())
             try:
-                problem = floor_problem(self._sqlite_version)
-                if problem is not None:
-                    log.error("not ready", extra={"reason": problem})
-                else:
-                    await self._open_projects()
-                app = build_app(
-                    config.projects,
-                    config.allowed_hosts,
-                    ledgers=self.ledgers,
-                    authenticate=TokenRegistry(config.data_dir).authenticate,
-                    unavailable=problem,
-                )
-                uvicorn_config = uvicorn.Config(
-                    app,
-                    host=config.host,
-                    port=config.port,
-                    log_config=None,
-                    access_log=False,
-                )
-                self._server = _Server(uvicorn_config, self._started, config.data_dir)
-                if self._received_sigterm:  # opening finished after a stop request
-                    return
-                serving = asyncio.ensure_future(self._announce())
-                try:
-                    await self._server.serve()
-                except asyncio.CancelledError:
-                    # uvicorn skips its own shutdown when its main loop is cancelled. Finish the
-                    # one shutdown (begun by uvicorn or by us) before the lock is released.
-                    if self._server.started:
-                        await _finish(self._server.shutdown_task())
-                    raise
-                finally:
-                    serving.cancel()
+                await self._server.serve()
+            except asyncio.CancelledError:
+                # Finish shutdown before releasing the data-directory lock.
+                if self._server.started:
+                    await _finish(self._server.shutdown_task())
+                raise
             finally:
-                # Whatever ended the server (stop, cancel, a failed start), the port file goes, then
-                # every writer stops and every store closes, all before the lock is released.
-                with contextlib.suppress(
-                    OSError
-                ):  # a leftover file is never trusted without the lock
-                    remove_port(config.data_dir)
-                await _finish(asyncio.ensure_future(self._close_projects()))
-                current = asyncio.current_task()
-                if current is not None and current.cancelling():
-                    raise asyncio.CancelledError  # a cancel that arrived mid-teardown still counts
+                serving.cancel()
+        finally:
+            # Unpublish and close the stores before releasing the lock.
+            with contextlib.suppress(OSError):
+                remove_port(config.data_dir, directory_fd=directory_fd)
+            await _finish(asyncio.ensure_future(self._close_projects()))
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise asyncio.CancelledError  # a cancel that arrived mid-teardown still counts
 
     async def _announce(self) -> None:
         port = await self.wait_started()

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import socket
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +19,15 @@ from starlette.requests import Request
 from conftest import authenticated_client, tool_json
 from plotroom.adapters.mcp.server import execute_command
 from plotroom.adapters.store_sqlite import SqliteStore, head_revision
-from plotroom.app.config import Config
+from plotroom.app.config import Config, ConfigError
 from plotroom.app.lock import LockError
-from plotroom.app.portfile import PORT_FILE_NAME, PublishedListener, read_listener, read_port
+from plotroom.app.portfile import (
+    PORT_FILE_NAME,
+    directory_identity,
+    published_socket,
+    read_listener,
+    read_port,
+)
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import TokenRegistry
 from plotroom.core.catalog import build_catalog
@@ -215,22 +223,142 @@ async def test_cancelling_the_daemon_closes_the_listener_before_the_lock_is_rele
     await stop(again, task2)
 
 
+async def test_cancelling_while_the_unix_listener_starts_cleans_up_its_socket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_config(tmp_path)
+    listening = asyncio.Event()
+    hold = asyncio.Event()
+    start_serving = asyncio.Server.start_serving
+    paths: list[Path] = []
+
+    async def start_then_wait(listener: asyncio.Server) -> None:
+        await start_serving(listener)
+        if listener.sockets[0].family == socket.AF_UNIX:
+            paths.append(Path(str(listener.sockets[0].getsockname())))
+            listening.set()
+            await hold.wait()
+
+    monkeypatch.setattr(asyncio.Server, "start_serving", start_then_wait)
+    task = asyncio.create_task(Daemon(config).run())
+    try:
+        await asyncio.wait_for(listening.wait(), timeout=10)
+        [path] = paths
+        assert path.is_socket()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert not path.exists()
+    assert not path.parent.exists()
+
+
+async def test_startup_cannot_unpublish_or_displace_the_replacement_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_config(tmp_path)
+    tcp_started = asyncio.Event()
+    resume = asyncio.Event()
+    startup = uvicorn.Server.startup
+
+    async def pause_first(
+        server: uvicorn.Server, sockets: list[socket.socket] | None = None
+    ) -> None:
+        await startup(server, sockets)
+        if not tcp_started.is_set():
+            tcp_started.set()
+            await resume.wait()
+
+    monkeypatch.setattr(uvicorn.Server, "startup", pause_first)
+    previous = Daemon(config, sqlite_version="3.0.0")
+    previous_task = asyncio.create_task(previous.run())
+    try:
+        await asyncio.wait_for(tcp_started.wait(), timeout=10)
+        moved = tmp_path / "moved"
+        config.data_dir.rename(moved)
+        replacement = Daemon(config, sqlite_version="3.0.0")
+        replacement_task, _ = await run_daemon(replacement)
+        try:
+            published = read_listener(config.data_dir)
+            assert published is not None
+            assert published.local_socket is not None
+            resume.set()
+            with pytest.raises(ConfigError, match="data directory changed during startup"):
+                await asyncio.wait_for(previous_task, timeout=10)
+            assert read_listener(config.data_dir) == published
+            assert await asyncio.to_thread(Path(published.local_socket).is_socket)
+            assert read_listener(moved) is None
+        finally:
+            await stop(replacement, replacement_task)
+    finally:
+        if not previous_task.done():
+            previous_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await previous_task
+
+
+async def test_shutdown_removes_the_socket_from_a_renamed_data_directory() -> None:
+    with tempfile.TemporaryDirectory(prefix="plotroom-test-", dir="/tmp") as shared:
+        root = await asyncio.to_thread(Path(shared).resolve)
+        config = make_config(root)
+        daemon = Daemon(config, sqlite_version="3.0.0")
+        task, _ = await run_daemon(daemon)
+        try:
+            published = read_listener(config.data_dir)
+            assert published is not None
+            assert published.local_socket is not None
+            parent = Path(published.local_socket).parent
+            assert parent.parent == config.data_dir
+            moved = root / "moved"
+            await asyncio.to_thread(config.data_dir.rename, moved)
+            moved_parent = moved / parent.name
+            assert await asyncio.to_thread(moved_parent.is_dir)
+        finally:
+            await stop(daemon, task)
+        assert not await asyncio.to_thread(moved_parent.exists)
+        assert read_listener(moved) is None
+
+
+async def test_public_http_serves_when_the_private_listener_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_config(tmp_path)
+    credential = bearer(config)
+
+    def unavailable(_data_dir: Path, *, directory_fd: int | None = None) -> Path:
+        raise PermissionError("private socket directory unavailable")
+
+    monkeypatch.setattr("plotroom.app.serve.prepare_local_socket", unavailable)
+    daemon = Daemon(config)
+    task, port = await run_daemon(daemon)
+    try:
+        published = read_listener(config.data_dir)
+        assert published is not None
+        assert published.local_unavailable
+        assert published.local_socket is None
+        async with authenticated_client(f"http://127.0.0.1:{port}/mcp", credential) as client:
+            assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
+    finally:
+        await stop(daemon, task)
+
+
 async def test_a_failed_port_publication_closes_the_listener_and_frees_the_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = make_config(tmp_path)
-    bound: list[int] = []
+    bound: list[tuple[int, Path]] = []
 
-    def refuse(_data_dir: Path, port: int, *, host: str) -> None:
-        bound.append(port)
+    def refuse(_data_dir: Path, port: int, *, local_socket: Path, **_publication: Any) -> None:
+        bound.append((port, local_socket))
         raise OSError("no space left on device")
 
     monkeypatch.setattr("plotroom.app.serve.write_port", refuse)
     with pytest.raises(OSError, match="no space left"):
         await asyncio.wait_for(Daemon(config).run(), timeout=30)
-    [port] = bound
+    [(port, socket_path)] = bound
     with pytest.raises(ConnectionRefusedError):  # the socket was bound; it is closed again
         await asyncio.open_connection("127.0.0.1", port)
+    assert not socket_path.exists()
     monkeypatch.undo()
     again = Daemon(config)  # and the directory can be owned again
     task, _ = await run_daemon(again)
@@ -254,8 +382,12 @@ async def test_cancelling_during_uvicorns_own_shutdown_waits_for_it_and_keeps_th
     config = make_config(tmp_path)
     daemon = Daemon(config)
     task, _ = await run_daemon(daemon)
+    publication = read_listener(config.data_dir)
+    assert publication is not None
+    assert publication.local_socket is not None
     daemon.stop()  # uvicorn starts its graceful shutdown
     await asyncio.wait_for(in_shutdown.wait(), timeout=30)
+    assert not await asyncio.to_thread(Path(publication.local_socket).parent.exists)
     task.cancel()
     task.cancel()  # a second cancel must not cut the shutdown short either
     await asyncio.sleep(0)
@@ -297,7 +429,15 @@ async def test_the_bound_port_is_published_with_the_pid_and_answers(tmp_path: Pa
     try:
         assert port != 0, "the config's port of 0 became the port that was bound"
         assert read_port(config.data_dir) == (os.getpid(), port)
-        assert read_listener(config.data_dir) == PublishedListener(os.getpid(), port, "127.0.0.1")
+        publication = read_listener(config.data_dir)
+        assert publication is not None
+        assert publication.host == "127.0.0.1"
+        assert publication.local_socket is not None
+        path = published_socket(
+            config.data_dir, directory_identity(config.data_dir), publication.local_socket
+        )
+        assert path is not None
+        assert path.is_socket()
         async with authenticated_client(f"http://127.0.0.1:{port}/mcp", bearer(config)) as client:
             assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
     finally:

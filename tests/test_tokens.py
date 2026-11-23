@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -10,11 +11,19 @@ import stat
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
-from plotroom.app.cli import EXIT_CONFIG, main
+from conftest import Child, authenticated_client
+from plotroom.app.cli import EXIT_CONFIG, EXIT_FAILURE, main
 from plotroom.app.lock import LOCK_FILE_NAME
-from plotroom.app.tokens import TokenError, TokenRegistry, local_token_path, select_local_token
+from plotroom.app.tokens import (
+    IssuedToken,
+    TokenError,
+    TokenRegistry,
+    local_token_path,
+    select_local_token,
+)
 from plotroom.core.roles import Identity
 
 pytestmark = pytest.mark.usefixtures("token_home")
@@ -66,6 +75,183 @@ async def test_offline_cli_issues_and_revokes_without_exposing_bearers_in_the_in
     assert json.loads(registry.path.read_text(encoding="utf-8")) == {}
     assert bearer not in local.read_text(encoding="utf-8")
     assert stat.S_IMODE(local.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    ("failure", "exit_code"), [("permissions", EXIT_CONFIG), ("write", EXIT_FAILURE)]
+)
+async def test_revoke_reports_local_cleanup_failure_and_the_same_command_retries_it(
+    config_path: Path,
+    server: tuple[Child, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+    exit_code: int,
+) -> None:
+    _, url = server
+    data_dir = config_path.parent / "data"
+    registry = TokenRegistry(data_dir)
+    token = registry.issue("demo", "orchestrator")
+    local = local_token_path()
+    revoke = ["token", "revoke", "--config", str(config_path), token.token_id]
+    async with authenticated_client(url, token.bearer) as client:
+        assert (await client.call_tool("snapshot", {})).is_error is False
+    replace = os.replace
+
+    def fail_only_local(source: str, target: Path) -> None:
+        if target == local:
+            raise OSError("local write was refused")
+        replace(source, target)
+
+    with monkeypatch.context() as patch:
+        if failure == "permissions":
+            local.chmod(0o644)
+        else:
+            patch.setattr(os, "replace", fail_only_local)
+        assert main(revoke) == exit_code
+    local.chmod(0o600)
+    output = capsys.readouterr()
+    assert "token is revoked" in output.err
+    assert "local credential cleanup failed" in output.err
+    assert "retry the same revoke command" in output.err
+    assert token.bearer not in output.err + output.out
+    assert select_local_token(data_dir, token.token_id) == token.bearer
+
+    async with httpx.AsyncClient(trust_env=False) as client:
+        response = await client.post(url, headers={"authorization": f"Bearer {token.bearer}"})
+    assert response.status_code == 401
+    assert response.content == b""
+    assert main(revoke) == 0
+    assert select_local_token(data_dir, None) is None
+    assert await registry.authenticate(token.bearer) is None
+
+
+async def test_no_local_revokes_even_when_the_local_snapshot_is_invalid(config_path: Path) -> None:
+    registry = TokenRegistry(config_path.parent / "data")
+    token = registry.issue("demo", "orchestrator")
+    local = local_token_path()
+    local_contents = b"not JSON"
+    local.write_bytes(local_contents)
+    before = local.stat()
+    assert (
+        main(["token", "revoke", "--no-local", "--config", str(config_path), token.token_id]) == 0
+    )
+    assert local.read_bytes() == local_contents
+    assert local.stat().st_ino == before.st_ino
+    assert await registry.authenticate(token.bearer) is None
+
+
+@pytest.mark.parametrize(
+    "invalid", ["encoding", "json", "nesting", "record", "symlink", "directory"]
+)
+async def test_invalid_instance_snapshots_fail_closed_in_cli_and_http(
+    config_path: Path,
+    server: tuple[Child, str],
+    server_token: IssuedToken,
+    capsys: pytest.CaptureFixture[str],
+    invalid: str,
+) -> None:
+    _, url = server
+    path = TokenRegistry(config_path.parent / "data").path
+    valid = path.read_bytes()
+    if invalid == "encoding":
+        path.write_bytes(b"\xff" + server_token.bearer.encode())
+    elif invalid == "json":
+        path.write_text(f"{{malformed {server_token.bearer}", encoding="utf-8")
+    elif invalid == "nesting":
+        path.write_text("[" * 2048 + json.dumps(server_token.bearer) + "]" * 2048, encoding="utf-8")
+    elif invalid == "record":
+        records = json.loads(valid)
+        records["f" * 24] = {"hash": server_token.bearer, "project": "demo", "role": "orchestrator"}
+        path.write_text(json.dumps(records), encoding="utf-8")
+    else:
+        path.unlink()
+        if invalid == "symlink":
+            other = path.with_name("other.json")
+            other.write_bytes(valid)
+            other.chmod(0o600)
+            path.symlink_to(other)
+        else:
+            path.mkdir(mode=0o700)
+
+    assert (
+        main(["token", "revoke", "--no-local", "--config", str(config_path), server_token.token_id])
+        == EXIT_CONFIG
+    )
+    output = capsys.readouterr()
+    assert "cannot manage token" in output.err
+    assert server_token.bearer not in output.err + output.out
+    async with httpx.AsyncClient(trust_env=False) as client:
+        response = await client.post(
+            url, headers={"authorization": f"Bearer {server_token.bearer}"}
+        )
+    assert response.status_code == 401
+    assert response.content == b""
+
+
+@pytest.mark.parametrize("contents", ["[" * 2048 + "0" + "]" * 2048, '{"unrelated-dir": false}'])
+def test_invalid_local_snapshots_report_configuration_errors_at_connect(
+    config_path: Path, capsys: pytest.CaptureFixture[str], contents: str
+) -> None:
+    token = TokenRegistry(config_path.parent / "data").issue("demo", "orchestrator")
+    local_token_path().write_text(contents, encoding="utf-8")
+    assert main(["connect", "--stdio", "--config", str(config_path)]) == EXIT_CONFIG
+    output = capsys.readouterr()
+    assert "invalid connection configuration" in output.err
+    assert "invalid" in json.loads(output.err)["reason"]
+    assert token.bearer not in output.err + output.out
+
+
+async def test_token_read_io_errors_remain_operational(
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    registry = TokenRegistry(config_path.parent / "data")
+    token = registry.issue("demo", "orchestrator", local=False)
+    open_file = os.open
+
+    def fail_read(
+        name: str | bytes | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if os.fsdecode(name) == str(registry.path) and flags & os.O_NONBLOCK:
+            raise OSError(errno.EIO, "input/output error")
+        return open_file(name, flags, mode, dir_fd=dir_fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", fail_read)
+        assert await registry.authenticate(token.bearer) is None
+        assert (
+            main(["token", "revoke", "--no-local", "--config", str(config_path), token.token_id])
+            == EXIT_FAILURE
+        )
+    output = capsys.readouterr()
+    assert "input/output error" in output.err
+    assert token.bearer not in output.err + output.out
+    assert await registry.authenticate(token.bearer) == Identity("demo", "orchestrator")
+
+
+async def test_rejected_bearers_skip_whole_snapshot_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TokenRegistry(tmp_path)
+    token = registry.issue("demo", "orchestrator", local=False)
+    token_id, secret = token.bearer.split(".", 1)
+    missing_id = "f" * 24 if token_id != "f" * 24 else "0" * 24
+    wrong_secret = ("f" if secret[0] != "f" else "0") + secret[1:]
+
+    def unexpected_validation(_path: Path, _records: dict[str, Any]) -> None:
+        pytest.fail("requests with a missing ID or bad digest do not validate the full snapshot")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("plotroom.app.tokens._validate_instance", unexpected_validation)
+        assert await registry.authenticate(f"{missing_id}.{secret}") is None
+        assert await registry.authenticate(f"{token_id}.{wrong_secret}") is None
+    assert await registry.authenticate(token.bearer) == Identity("demo", "orchestrator")
 
 
 @pytest.mark.parametrize("role", ["system", "worker", "worker:bad name", "admin"])
