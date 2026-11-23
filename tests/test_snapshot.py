@@ -16,6 +16,8 @@ def test_empty_board() -> None:
         "cursor": 0,
         "lanes": {},
         "open_items": {},
+        "claims": 0,
+        "overlaps": 0,
         "items": [],
         "left_out": 0,
     }

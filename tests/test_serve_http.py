@@ -35,6 +35,8 @@ EMPTY_BOARD: dict[str, Any] = {
         "cursor": 0,
         "lanes": {},
         "open_items": {},
+        "claims": 0,
+        "overlaps": 0,
         "items": [],
         "left_out": 0,
     },

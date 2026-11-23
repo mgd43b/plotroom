@@ -126,6 +126,8 @@ async def apply_resource(
     generation = current.generation + 1 if current else 1
     fresh = {row.key: row for row in result.records}
     bindings: dict[int, str | None] = {}
+    if resource == FILES:
+        pulls = (int(scope),)
     candidates = set(pulls)
     if resource == CHECKS:
         candidates.update(
@@ -133,6 +135,8 @@ async def apply_resource(
         )
     for number in sorted(candidates):
         pr = await uow.pull_request(repository, number)
+        if pr is None and resource == FILES:
+            return
         if pr is None or (resource == CHECKS and scope != pr.head_sha):
             continue
         if resource == FILES and result.complete and result.attributes["head_sha"] != pr.head_sha:
@@ -184,6 +188,12 @@ async def apply_resource(
         scope,
         GitHubResource(tuple(records.values()), result.complete, attributes, generation, as_of),
     )
+    if (
+        resource == FILES
+        and result.complete
+        and (current is None or current.attributes != attributes or previous != fresh)
+    ):
+        uow.pull_overlaps_changed()
 
 
 def latest_checks(resource: GitHubResource) -> tuple[GitHubRecord, ...]:

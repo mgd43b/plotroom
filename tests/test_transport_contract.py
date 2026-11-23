@@ -43,6 +43,10 @@ TOOL_NAMES = {
     "lane_update",
     "lane_ready",
     "lane_archive",
+    "claim",
+    "release",
+    "claims",
+    "overlaps",
     "ingest",
     "trigger",
     "triggers",
@@ -54,6 +58,8 @@ WRITER_TOOLS = {
     "ack",
     "freeze",
     "unfreeze",
+    "claim",
+    "release",
     "lane_start",
     "lane_update",
     "lane_ready",
@@ -287,6 +293,10 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         assert (await call("wait", cursor=0, timeout=0))["item"] == item
         assert (await call("ack", item=item["id"]))["state"] == "snoozed"
         assert (await call("lane_ready", lane="lane", pr=1, head_sha="a" * 40))["state"] == "ready"
+        assert (await call("claim", lane="lane", globs=["src/**"], reason="fixture"))["changed"]
+        assert (await call("claims", lane="lane"))["claims"][0]["reason"] == "fixture"
+        assert (await call("overlaps", lane="lane"))["items"] == []
+        assert (await call("release", lane="lane", globs=["src/**"]))["changed"]
         assert (
             await call(
                 "ingest",
@@ -340,6 +350,9 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             "ack": {"item": "fixture"},
             "merge_gate": {"pr": 1},
             "freeze": {"reason": "fixture"},
+            "claim": {"lane": "fixture", "globs": ["src/**"], "reason": "fixture"},
+            "release": {"lane": "fixture", "globs": ["src/**"]},
+            "overlaps": {"lane": "fixture"},
             "lane_start": {
                 "lane": "fixture",
                 "worker": "fixture",

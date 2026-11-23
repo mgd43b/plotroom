@@ -17,7 +17,13 @@ from sqlalchemy.pool import ConnectionPoolEntry
 
 from plotroom.adapters.store_sqlite import github_sql, outbox_sql, triggers_sql
 from plotroom.adapters.store_sqlite.actions_sql import pending_action
-from plotroom.adapters.store_sqlite.items_sql import first_change, open_item, open_items
+from plotroom.adapters.store_sqlite.claims_sql import count_claims, read_claims
+from plotroom.adapters.store_sqlite.items_sql import (
+    first_change,
+    open_item,
+    open_items,
+    open_overlaps,
+)
 from plotroom.adapters.store_sqlite.lanes_sql import board_lanes, lane_counts
 from plotroom.adapters.store_sqlite.ledger_sql import (
     EVENTS_AFTER,
@@ -28,6 +34,7 @@ from plotroom.adapters.store_sqlite.ledger_sql import (
 from plotroom.adapters.store_sqlite.migrate import upgrade_to_head
 from plotroom.adapters.store_sqlite.work_items_sql import ready_work_items
 from plotroom.core.actions import Action
+from plotroom.core.claims import Claim
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
 from plotroom.core.github_projection import GitHubResource
@@ -185,6 +192,20 @@ class SqliteStore:
         async with self._engine.connect() as connection:
             return await self._board(connection, role)
 
+    async def read_snapshot(
+        self, role: str, repository: str | None
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
+        async with self._engine.connect() as connection:
+            board, github = (
+                (await self._board(connection, role), None)
+                if repository is None
+                else await self._github_board(connection, role, repository)
+            )
+            trigger_counts = await triggers_sql.trigger_counts(connection)
+            claim_count = await count_claims(connection, role)
+            freeze_reason = await SqliteTransaction(connection).deploy_freeze()
+            return board, github, trigger_counts, claim_count, freeze_reason
+
     async def read_github_board(self, role: str, repository: str) -> tuple[Board, GitHubSummary]:
         async with self._engine.connect() as connection:
             return await self._github_board(connection, role, repository)
@@ -196,18 +217,19 @@ class SqliteStore:
         projected = await github_sql.project_lane_heads(connection, repository, lanes)
         return (cursor, items, counts, projected), await github_sql.summary(connection, repository)
 
-    async def read_snapshot_board(
-        self, role: str, repository: str | None
-    ) -> tuple[Board, GitHubSummary | None, dict[str, int], str | None]:
+    async def read_claims(
+        self, role: str, lane: str | None, offset: int, limit: int
+    ) -> tuple[int, list[Claim]]:
         async with self._engine.connect() as connection:
-            board, github = (
-                (await self._board(connection, role), None)
-                if repository is None
-                else await self._github_board(connection, role, repository)
-            )
-            counts = await triggers_sql.trigger_counts(connection)
-            freeze_reason = await SqliteTransaction(connection).deploy_freeze()
-            return board, github, counts, freeze_reason
+            cursor = int((await connection.execute(HEAD_SEQ)).scalar_one())
+            return cursor, await read_claims(connection, role, lane, offset, limit)
+
+    async def read_overlaps(
+        self, role: str, lane: str | None, pr: int | None, offset: int, limit: int
+    ) -> tuple[int, list[Item]]:
+        async with self._engine.connect() as connection:
+            cursor = int((await connection.execute(HEAD_SEQ)).scalar_one())
+            return cursor, await open_overlaps(connection, role, lane, pr, offset, limit)
 
     async def list_triggers(self, lane: str | None) -> list[Trigger]:
         async with self._engine.connect() as connection:

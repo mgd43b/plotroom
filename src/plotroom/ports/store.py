@@ -6,6 +6,7 @@ from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Any, Protocol
 
 from plotroom.core.actions import Action
+from plotroom.core.claims import Claim
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
 from plotroom.core.github_projection import GitHubResource
@@ -82,6 +83,12 @@ class Transaction(Protocol):
 
     async def save_lane(self, lane: Lane) -> None: ...
 
+    async def lane_claims(self, lane: str | None = None) -> list[Claim]: ...
+
+    async def save_claims(self, claims: list[Claim]) -> None: ...
+
+    async def delete_claims(self, lane: str, globs: list[str] | None) -> None: ...
+
     async def ready_work_items(self) -> tuple[WorkItem, ...]: ...
 
     async def replace_work_items(self, items: tuple[WorkItem, ...]) -> None: ...
@@ -95,6 +102,8 @@ class Transaction(Protocol):
     async def deploy_freeze(self) -> str | None: ...
 
     async def set_deploy_freeze(self, reason: str | None) -> None: ...
+
+    async def open_pulls(self, repository: str) -> tuple[PullRequest, ...]: ...
 
     async def save_github_resource(
         self, repository: str, resource: str, scope: str, result: GitHubResource
@@ -147,13 +156,17 @@ class Store(Protocol):
 
     async def read_board(self, role: str) -> Board: ...
 
-    async def read_github_board(
-        self, role: str, repository: str
-    ) -> tuple[Board, GitHubSummary]: ...
-
-    async def read_snapshot_board(
+    async def read_snapshot(
         self, role: str, repository: str | None
-    ) -> tuple[Board, GitHubSummary | None, dict[str, int], str | None]: ...
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]: ...
+
+    async def read_claims(
+        self, role: str, lane: str | None, offset: int, limit: int
+    ) -> tuple[int, list[Claim]]: ...
+
+    async def read_overlaps(
+        self, role: str, lane: str | None, pr: int | None, offset: int, limit: int
+    ) -> tuple[int, list[Item]]: ...
 
     async def list_triggers(self, lane: str | None) -> list[Trigger]: ...
 

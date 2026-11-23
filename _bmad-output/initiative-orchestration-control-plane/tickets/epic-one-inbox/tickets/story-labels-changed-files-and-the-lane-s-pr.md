@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "35"
 remote: "https://github.com/mgd43b/plotroom/issues/35"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Labels, changed files and the lane's PR

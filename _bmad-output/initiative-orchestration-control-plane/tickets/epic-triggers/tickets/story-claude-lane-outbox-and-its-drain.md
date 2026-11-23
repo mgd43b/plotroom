@@ -30,3 +30,4 @@ Verify: With a drain token, a fired send to a Claude lane is leased once, outbox
 
 - Check beyond its criteria: two drain sessions running by mistake never deliver the same row twice within a lease.
 - Decision: 2026-11-22, leasing is its own outbox_lease command; wait() stays read-only and only wakes the drain.
+- Built: https://github.com/mgd43b/plotroom/pull/148

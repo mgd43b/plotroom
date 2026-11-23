@@ -20,7 +20,12 @@ from plotroom.core.intake import record_claude
 from plotroom.core.ledger import Ledger
 from plotroom.core.outbox import lease_request_id
 from plotroom.core.roles import Identity
-from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, render_next, render_snapshot
+from plotroom.core.snapshot import (
+    DEFAULT_SNAPSHOT_BUDGET,
+    render_claims,
+    render_next,
+    render_snapshot,
+)
 from plotroom.ports.session_reader import SessionEvent
 
 _NEXT_PAGE_SIZE = 64
@@ -143,8 +148,8 @@ def build_app(
             caller = board_access(ctx)
             if lane_offset < 0:
                 return err("invalid", "lane_offset must be nonnegative")
-            (cursor, items, lanes, details), github, trigger_counts, freeze_reason = (
-                ((0, [], {}, []), None, {}, None)
+            (cursor, items, lanes, details), github, trigger_counts, claim_count, freeze_reason = (
+                ((0, [], {}, []), None, {}, 0, None)
                 if caller.ledger is None
                 else await caller.ledger.snapshot_summary(caller.identity.role)
             )
@@ -164,6 +169,7 @@ def build_app(
                     lane_offset=lane_offset,
                     github=github,
                     github_error=None if caller.ledger is None else caller.ledger.github_error,
+                    claim_count=claim_count,
                     trigger_counts=trigger_counts,
                     freeze_reason=freeze_reason,
                 )
@@ -214,6 +220,70 @@ def build_app(
             if caller.ledger is None:
                 raise LedgerError("unavailable", "the project ledger is unavailable")
             return ok(asdict(await caller.ledger.merge_gate(caller.identity.role, pr)))
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
+
+    @server.tool()
+    async def claims(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        lane: str | None = None,
+        offset: int = 0,
+        detail: bool = False,
+    ) -> dict[str, Any]:
+        """Page through visible claims. Use detail with a row's offset for its full reason."""
+        try:
+            caller = board_access(ctx)
+            if not 0 <= offset <= 2**63 - 1:
+                return err("invalid", "offset must be a nonnegative SQLite integer")
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            cursor, entries = await caller.ledger.read_claims(
+                caller.identity.role, lane, offset, 1 if detail else _NEXT_PAGE_SIZE + 1
+            )
+            if detail:
+                return ok({"cursor": cursor, "claims": [entry.render() for entry in entries]})
+            return ok(
+                render_claims(
+                    cursor,
+                    entries[:_NEXT_PAGE_SIZE],
+                    offset,
+                    next_budget,
+                    has_more=len(entries) > _NEXT_PAGE_SIZE,
+                )
+            )
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
+
+    @server.tool()
+    async def overlaps(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        pr: int | None = None,
+        lane: str | None = None,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Page through visible overlaps for one PR or lane. Use next(item=...) for full detail."""
+        try:
+            caller = board_access(ctx)
+            if (lane is None) == (pr is None):
+                return err("invalid", "provide exactly one of pr or lane")
+            if pr is not None and not 0 < pr <= 2**63 - 1:
+                return err("invalid", "pr must be a positive SQLite integer")
+            if not 0 <= offset <= 2**63 - 1:
+                return err("invalid", "offset must be a nonnegative SQLite integer")
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            cursor, items = await caller.ledger.read_overlaps(
+                caller.identity.role, lane, pr, offset, _NEXT_PAGE_SIZE + 1
+            )
+            return ok(
+                render_next(
+                    cursor,
+                    items[:_NEXT_PAGE_SIZE],
+                    offset,
+                    next_budget,
+                    has_more=len(items) > _NEXT_PAGE_SIZE,
+                )
+            )
         except LedgerError as exc:
             return err(exc.code, exc.message)
 
@@ -349,6 +419,22 @@ def build_app(
     ) -> dict[str, Any]:
         """Clear this project's deploy window."""
         return await execute_command(ctx, "unfreeze", request_id, {})
+
+    @server.tool()
+    async def claim(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], lane: str, globs: list[str], reason: str, request_id: str
+    ) -> dict[str, Any]:
+        """Claim one or more paths for a lane and record the reason."""
+        return await execute_command(
+            ctx, "claim", request_id, {"lane": lane, "globs": globs, "reason": reason}
+        )
+
+    @server.tool()
+    async def release(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], lane: str, globs: list[str], request_id: str
+    ) -> dict[str, Any]:
+        """Release the requested path claims for a lane."""
+        return await execute_command(ctx, "release", request_id, {"lane": lane, "globs": globs})
 
     @server.tool()
     async def trigger(  # pyright: ignore[reportUnusedFunction]

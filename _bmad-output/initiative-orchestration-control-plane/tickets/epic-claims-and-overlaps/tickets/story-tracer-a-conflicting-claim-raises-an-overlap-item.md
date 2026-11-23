@@ -30,3 +30,5 @@ Verify: A worker claims src/a/** for its lane, another lane's claim of src/a/x.p
 
 - Decision: 2026-11-22, the owner chose that a lane's worker claims for its own lane and the orchestrator for any lane ('Lane + orchestrator').
 - Decision: 2026-11-22, globs have no negation and claim-against-claim overlap uses literal prefixes, so the check is decidable and errs toward reporting; the tracer starts before the projection exists, and PR diffs come in entry 2.
+
+- Built: https://github.com/mgd43b/plotroom/pull/150

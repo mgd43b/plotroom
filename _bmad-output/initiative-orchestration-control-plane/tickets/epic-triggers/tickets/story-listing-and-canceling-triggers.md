@@ -9,7 +9,7 @@ hitl: false
 risk: low
 tracker_id: "54"
 remote: "https://github.com/mgd43b/plotroom/issues/54"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Listing and canceling triggers
@@ -25,3 +25,7 @@ Verify: triggers() lists open, fired and canceled triggers with their bindings a
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-triggers/epic-triggers.md
+
+## Notes
+
+- Built: https://github.com/mgd43b/plotroom/pull/148

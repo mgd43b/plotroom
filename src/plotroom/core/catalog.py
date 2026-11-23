@@ -12,6 +12,7 @@ from plotroom.core.branch_updates import (
     BRANCH_UPDATE_FIELDS,
     BRANCH_UPDATE_STAGED,
 )
+from plotroom.core.claims import CLAIM_OVERLAP, PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, claim, release
 from plotroom.core.commands import Command, CommandRegistry
 from plotroom.core.deploy_window import freeze, unfreeze
 from plotroom.core.events import EventKind, EventRegistry, FieldSpec
@@ -137,6 +138,27 @@ def build_catalog(
     )
     catalog.commands.register(Command("unfreeze", (), unfreeze), rules=orchestrator)
     owner = (*orchestrator, WriterRule("worker", owns_lane))
+    catalog.register_item(ItemKind(CLAIM_OVERLAP, 10, True, ("Coordinate the lane claims",)))
+    catalog.register_item(ItemKind(PR_CLAIM_OVERLAP, 10, True, ("Coordinate the PR and claim",)))
+    catalog.register_item(
+        ItemKind(TICKET_TREE_MOVE, 10, True, ("Coordinate the move with the editing PRs",))
+    )
+    globs = FieldSpec("globs", "array")
+    catalog.commands.register(
+        Command(
+            "claim",
+            (lane, globs, FieldSpec("reason", "str")),
+            claim,
+            record_if=lambda result: bool(result["changed"]),
+        ),
+        rules=owner,
+    )
+    catalog.commands.register(
+        Command(
+            "release", (lane, globs), release, record_if=lambda result: bool(result["changed"])
+        ),
+        rules=owner,
+    )
     catalog.commands.register(
         Command(
             "lane_start",

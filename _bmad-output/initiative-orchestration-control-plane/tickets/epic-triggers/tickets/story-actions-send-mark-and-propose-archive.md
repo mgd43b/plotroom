@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "59"
 remote: "https://github.com/mgd43b/plotroom/issues/59"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Actions: send, mark and propose_archive
@@ -29,3 +29,4 @@ Verify: A fired trigger's send reaches the scripted switchboard participant once
 ## Notes
 
 - propose_archive opens epic 6's one archive item kind (entry 6.3), deduplicated per lane, never a second item.
+- Built: https://github.com/mgd43b/plotroom/pull/148

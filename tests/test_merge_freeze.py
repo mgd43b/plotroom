@@ -144,7 +144,7 @@ async def test_freeze_persists_and_unfreeze_restores_each_verdict(tmp_path: Path
             assert (decision.head_sha, decision.as_of) == (previous.head_sha, previous.as_of)
             [reason] = decision.reasons
             assert (reason.code, reason.detail) == ("deploy_window", REASON)
-        _, _, _, reason_from_board = await ledger.snapshot_summary("orchestrator")
+        _, _, _, _, reason_from_board = await ledger.snapshot_summary("orchestrator")
         assert reason_from_board == REASON
         assert (await separate.merge_gate("orchestrator", 1)).reasons[0].code != "deploy_window"
         cleared = await ledger.execute("orchestrator", "unfreeze", "clear", {})

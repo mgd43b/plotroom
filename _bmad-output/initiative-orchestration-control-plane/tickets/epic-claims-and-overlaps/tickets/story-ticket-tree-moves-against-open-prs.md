@@ -25,3 +25,7 @@ Verify: A PR moving a story file that two open PRs edit opens one item naming bo
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-claims-and-overlaps/epic-claims-and-overlaps.md
+
+## Notes
+
+- Built: https://github.com/mgd43b/plotroom/pull/150

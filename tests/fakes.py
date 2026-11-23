@@ -18,6 +18,7 @@ from typing import Any
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.actions import BRANCH_UPDATE, Action
 from plotroom.core.catalog import Catalog
+from plotroom.core.claims import OVERLAP_KINDS, Claim
 from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
@@ -36,6 +37,21 @@ from plotroom.ports.work_items import WorkItem
 
 FIXTURES = Path(__file__).parent / "fixtures"
 START = datetime(2026, 11, 22, 12, 0, 0, tzinfo=UTC)
+
+
+def _visible_claims(
+    claims: dict[tuple[str, str], Claim],
+    lanes: dict[str, Lane],
+    role: str,
+    lane: str | None = None,
+) -> list[Claim]:
+    return [
+        entry
+        for key, entry in sorted(claims.items())
+        if (lane is None or key[0] == lane)
+        and lanes[key[0]].state != "archived"
+        and role in {"orchestrator", "clerk", f"worker:{lanes[key[0]].worker}"}
+    ]
 
 
 def _branch_pull(
@@ -81,6 +97,7 @@ class _MemoryTransaction:
         self.delivered: set[str] = set()
         self.triggers: dict[str, Trigger] = {}
         self.lanes: dict[str, Lane] = {}
+        self.claims: dict[tuple[str, str], Claim] = {}
         self.work_items: tuple[WorkItem, ...] = ()
         self.claude_turns: dict[tuple[str, str], set[str]] = {}
         self.pulls: dict[tuple[str, int], PullRequest] = {}
@@ -171,6 +188,30 @@ class _MemoryTransaction:
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         self._live()
         return self.pulls.get((repository, number))
+
+    async def lane_claims(self, lane: str | None = None) -> list[Claim]:
+        self._live()
+        return _visible_claims(self.claims, self.lanes, "orchestrator", lane)
+
+    async def save_claims(self, claims: list[Claim]) -> None:
+        self._live()
+        self.claims.update({(entry.lane, entry.glob): entry for entry in claims})
+
+    async def delete_claims(self, lane: str, globs: list[str] | None) -> None:
+        self._live()
+        self.claims = {
+            key: entry
+            for key, entry in self.claims.items()
+            if entry.lane != lane or (globs is not None and entry.glob not in globs)
+        }
+
+    async def open_pulls(self, repository: str) -> tuple[PullRequest, ...]:
+        self._live()
+        return tuple(
+            pull
+            for _, pull in sorted(self.pulls.items())
+            if pull.repository == repository and pull.state == "open" and pull.complete
+        )
 
     async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None:
         self._live()
@@ -344,6 +385,7 @@ class MemoryStore:
         self._delivered: set[str] = set()
         self._triggers: dict[str, Trigger] = {}
         self._lanes: dict[str, Lane] = {}
+        self._claims: dict[tuple[str, str], Claim] = {}
         self._work_items: tuple[WorkItem, ...] = ()
         self._claude_turns: dict[tuple[str, str], set[str]] = {}
         self._pulls: dict[tuple[str, int], PullRequest] = {}
@@ -380,6 +422,7 @@ class MemoryStore:
         tx.delivered = self._delivered.copy()
         tx.triggers = copy.deepcopy(self._triggers)
         tx.lanes = self._lanes.copy()
+        tx.claims = self._claims.copy()
         tx.work_items = self._work_items
         tx.claude_turns = {key: ids.copy() for key, ids in self._claude_turns.items()}
         tx.pulls = self._pulls.copy()
@@ -401,6 +444,7 @@ class MemoryStore:
             self._outbox, self._leases, self._delivered = tx.outbox, tx.leases, tx.delivered
             self._triggers = tx.triggers
             self._lanes = tx.lanes
+            self._claims = tx.claims
             self._work_items = tx.work_items
             self._claude_turns = tx.claude_turns
             self._pulls = tx.pulls
@@ -451,6 +495,18 @@ class MemoryStore:
     async def ready_work_items(self) -> tuple[WorkItem, ...]:
         return self._work_items
 
+    async def read_snapshot(
+        self, role: str, repository: str | None
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
+        board, github = (
+            (await self.read_board(role), None)
+            if repository is None
+            else await self.read_github_board(role, repository)
+        )
+        trigger_counts = dict(Counter(t.state for t in self._triggers.values()))
+        claim_count = len(_visible_claims(self._claims, self._lanes, role))
+        return board, github, trigger_counts, claim_count, self._freeze_reason
+
     async def read_github_board(self, role: str, repository: str) -> tuple[Board, GitHubSummary]:
         opened = sum(
             pull.state == "open" for pull in self._pulls.values() if pull.repository == repository
@@ -467,16 +523,22 @@ class MemoryStore:
             opened, cursor.as_of if cursor else None
         )
 
-    async def read_snapshot_board(
-        self, role: str, repository: str | None
-    ) -> tuple[Board, GitHubSummary | None, dict[str, int], str | None]:
-        board, github = (
-            (await self.read_board(role), None)
-            if repository is None
-            else await self.read_github_board(role, repository)
-        )
-        counts = dict(Counter(t.state for t in self._triggers.values()))
-        return board, github, counts, self._freeze_reason
+    async def read_claims(
+        self, role: str, lane: str | None, offset: int, limit: int
+    ) -> tuple[int, list[Claim]]:
+        claims = _visible_claims(self._claims, self._lanes, role, lane)
+        return self._seq, claims[offset : offset + limit]
+
+    async def read_overlaps(
+        self, role: str, lane: str | None, pr: int | None, offset: int, limit: int
+    ) -> tuple[int, list[Item]]:
+        cursor, items, _, _ = await self.read_board(role)
+        path = "lanes" if lane is not None else "prs"
+        subject = lane if lane is not None else pr
+        overlaps = [
+            item for item in items if item.kind in OVERLAP_KINDS and subject in item.context[path]
+        ]
+        return cursor, overlaps[offset : offset + limit]
 
     async def list_triggers(self, lane: str | None) -> list[Trigger]:
         return [copy.deepcopy(t) for t in self._triggers.values() if lane is None or t.lane == lane]

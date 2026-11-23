@@ -12,6 +12,7 @@ from typing import Any
 
 from plotroom.core.actions import Action
 from plotroom.core.catalog import Catalog
+from plotroom.core.claims import PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, Claim, sync_items
 from plotroom.core.commands import COMMAND_APPENDER, command_kind
 from plotroom.core.events import (
     AppendResult,
@@ -63,6 +64,7 @@ class Ledger:
         wait_cap: int = 240,
         github_repository: str | None = None,
         merge_gate_policy: GatePolicy | None = None,
+        github_tree_path: str | None = None,
         session_workers: Mapping[str, str] | None = None,
         drain_enabled: bool = False,
     ) -> None:
@@ -74,6 +76,7 @@ class Ledger:
         self._wait_cap = wait_cap
         self.github_repository = github_repository
         self._merge_gate_policy = merge_gate_policy or GatePolicy()
+        self._github_tree_path = github_tree_path
         self.github_error = "waiting for the first GitHub poll" if github_repository else None
         self.session_workers = dict(session_workers or {})
         self._drain_enabled = drain_enabled
@@ -102,6 +105,18 @@ class Ledger:
         self._stopping.clear()
         self._writer.start()
 
+    async def initialize_overlaps(self) -> None:
+        """Materialize conflicts from facts already stored before the daemon opened."""
+
+        async def restore(uow: UnitOfWork) -> None:
+            if self.github_repository is None:
+                for kind in (PR_CLAIM_OVERLAP, TICKET_TREE_MOVE):
+                    await sync_items(uow, kind, {})
+            else:
+                uow.pull_overlaps_changed()
+
+        await self.run("system", restore)
+
     async def stop(self) -> None:
         """Finish the queued inputs and stop the writer; later inputs fail ``unavailable``."""
         self.stop_waiting()
@@ -119,11 +134,11 @@ class Ledger:
         _check_role(role)
 
         async def in_transaction(tx: Transaction) -> T:
-            result = await work(
-                UnitOfWork(
-                    tx, self._catalog.events, self._clock, role=role, items=self._catalog.items
-                )
+            uow = UnitOfWork(
+                tx, self._catalog.events, self._clock, role=role, items=self._catalog.items
             )
+            result = await work(uow)
+            await uow.refresh_overlaps(self.github_repository, self._github_tree_path)
             await self._evaluate_triggers(tx)
             return result
 
@@ -200,6 +215,7 @@ class Ledger:
             result = await registered.handler(uow, copy.deepcopy(snapshot))
             if not isinstance(result, dict) or not is_json(result):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise TypeError(f"command {command!r} must return a JSON object")
+            await uow.refresh_overlaps(self.github_repository, self._github_tree_path)
             if registered.record_if is not None and not registered.record_if(result):
                 await tx.insert_noop_receipt(
                     command, upstream_id, {"args": snapshot, "result": result}
@@ -309,20 +325,35 @@ class Ledger:
         return await self._store.read_board(role)
 
     async def snapshot_board(self, role: str) -> tuple[Board, GitHubSummary | None]:
-        if self.github_repository is None:
-            return await self.read_board(role), None
-        return await self._store.read_github_board(role, self.github_repository)
+        board, github, _, _ = await self.read_snapshot(role)
+        return board, github
 
     async def snapshot_summary(
         self, role: str
-    ) -> tuple[Board, GitHubSummary | None, dict[str, int], str | None]:
-        return await self._store.read_snapshot_board(role, self.github_repository)
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
+        return await self._store.read_snapshot(role, self.github_repository)
 
     async def snapshot_with_triggers(
         self, role: str
     ) -> tuple[Board, GitHubSummary | None, dict[str, int]]:
-        board, github, counts, _ = await self.snapshot_summary(role)
-        return board, github, counts
+        board, github, trigger_counts, _ = await self.read_snapshot(role)
+        return board, github, trigger_counts
+
+    async def read_snapshot(
+        self, role: str
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int]:
+        board, github, counts, claims, _ = await self.snapshot_summary(role)
+        return board, github, counts, claims
+
+    async def read_claims(
+        self, role: str, lane: str | None, offset: int, limit: int
+    ) -> tuple[int, list[Claim]]:
+        return await self._store.read_claims(role, lane, offset, limit)
+
+    async def read_overlaps(
+        self, role: str, lane: str | None, pr: int | None, offset: int, limit: int
+    ) -> tuple[int, list[Item]]:
+        return await self._store.read_overlaps(role, lane, pr, offset, limit)
 
     async def list_triggers(self, role: str, lane: str | None) -> list[dict[str, Any]]:
         if _check_role(role) != "orchestrator":
