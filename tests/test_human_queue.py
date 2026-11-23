@@ -516,3 +516,24 @@ async def test_closed_ask_requires_its_own_verified_comment_history(
             assert proof is not None
             assert proof.attributes["comment_ids"] == [9001]
             assert await ledger.github_resource(REPO, COMMENTS, "9002") is not None
+
+
+async def test_ask_history_writer_rejects_proof_for_a_superseded_issue(tmp_path: Path) -> None:
+    async with decision_ledger(tmp_path) as ledger:
+        await issue_states(ledger, {42: "closed"})
+        await observe_comment(ledger, author="fixture-agent")
+        ask_id = (await ledger.execute(ORCHESTRATOR, "ask", "pending", ask_args())).result["ask_id"]
+        cached = await ledger.github_resource(REPO, COMMENTS, "9001")
+        assert cached is not None
+
+        # A newer issue snapshot arrives after the provider confirmed the old history.
+        await issue_states(ledger, {42: "closed"}, comment_count=2)
+        await ledger.run(
+            "system",
+            lambda uow: apply_ask_comment_history(
+                uow, REPO, 42, f"{STAMP}/1", cached.records, STAMP
+            ),
+        )
+
+        assert await ledger.github_resource(REPO, ASK_COMMENT_HISTORY, "42") is None
+        assert (ASK_ORPHANED, ask_id) not in await open_checks(ledger)
