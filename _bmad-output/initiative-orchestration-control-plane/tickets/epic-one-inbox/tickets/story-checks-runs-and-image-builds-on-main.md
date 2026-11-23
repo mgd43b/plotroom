@@ -25,3 +25,4 @@ Verify: A CI run on a PR and on main produces one event per check state change, 
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
+- Built: https://github.com/mgd43b/plotroom/pull/147

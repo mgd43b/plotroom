@@ -27,3 +27,4 @@ Verify: Against a fixture tree on the test repository, the mirror lists the same
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
 - .claude/skills/bmad-agent-po/scripts/tickets.py
 - architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-17
+- Built: https://github.com/mgd43b/plotroom/pull/147

@@ -25,6 +25,7 @@ Verify: Labeling a PR and pushing a file change each appear once with the label'
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
+- Built: https://github.com/mgd43b/plotroom/pull/147
 
 ## Notes
 
