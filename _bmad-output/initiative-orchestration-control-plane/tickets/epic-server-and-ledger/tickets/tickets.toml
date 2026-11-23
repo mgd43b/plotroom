@@ -261,3 +261,15 @@ covers = ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R11"]
 after = [12]
 hitl = false
 risk = "low"
+
+[[entry]]
+id = 24
+type = "story"
+title = "Recover failed search indexing without restarting the daemon"
+description = "A SQLite write failure can end a search indexing input. Rollback leaves the last committed checkpoint intact. The daemon currently resumes indexing from that checkpoint on restart."
+verify = "Verify operator-visible failure and recovery during the same daemon run using search indexing as the case. After storage becomes available, resume from the last committed checkpoint without missing or duplicating indexed records. A persistent failure remains visible while retry behavior stays bounded."
+covers = []
+after = []
+hitl = false
+risk = "medium"
+refine = true

@@ -10,7 +10,7 @@ hitl: false
 risk: medium
 tracker_id: "169"
 remote: "https://github.com/mgd43b/plotroom/issues/169"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Over-depth trigger predicates can produce recursion errors

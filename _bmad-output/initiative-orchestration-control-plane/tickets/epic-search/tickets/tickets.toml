@@ -77,3 +77,14 @@ covers = ["R1", "R2", "R3", "R4"]
 after = [6]
 hitl = false
 risk = "low"
+
+[[entry]]
+id = 8
+type = "bug"
+title = "Permanent embedding rejection stalls vector indexing"
+description = "A permanently rejected record keeps the configured model and dimension at the same durable checkpoint. Valid records after it stay pending. Queries that need the incomplete vector index fall back to lexical results."
+verify = "Verify that valid records after a permanently rejected record can progress under the agreed record-handling policy. Preserve transient retry, durable checkpoint integrity, and lexical availability during incomplete indexing."
+covers = ["R1", "R4"]
+after = []
+hitl = false
+risk = "medium"
