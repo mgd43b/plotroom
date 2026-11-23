@@ -1,0 +1,68 @@
+# Entries of the Claims and overlaps epic, in build order. Ids are permanent; table order is build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Tracer: a conflicting claim raises an overlap item"
+description = "The thinnest path: claim(lane, globs[], reason) and release(lane, globs[]) by a worker for its own lane or by the orchestrator for any lane; globs are gitignore-style without negation; two claims overlap when one glob's literal prefix (up to its first wildcard) contains the other's, judged conservatively; an overlapping claim opens an overlap item when it is made; lane_archive releases the lane's claims. Hands on: claims to entry 2 and to epic 6's briefs."
+verify = "A worker claims src/a/** for its lane, another lane's claim of src/a/x.py opens one overlap item naming both lanes, a worker cannot claim for another lane while the orchestrator can claim for lane B, a negated glob is refused, and release or archiving the lane clears the item."
+covers = ["R1", "R4"]
+after = ["1.8"]
+hitl = false
+risk = "medium"
+notes = ["Decision: 2026-11-22, the owner chose that a lane's worker claims for its own lane and the orchestrator for any lane ('Lane + orchestrator').", "Decision: 2026-11-22, globs have no negation and claim-against-claim overlap uses literal prefixes, so the check is decidable and errs toward reporting; the tracer starts before the projection exists, and PR diffs come in entry 2."]
+
+[[entry]]
+id = 2
+type = "story"
+title = "PR diffs against other lanes' claims"
+description = "Every PR's changed files in the projection are checked against other lanes' claims (a PR with no lane against every claim) as a state-backed item opened before review, naming the PR, the files and the claiming lane, and closed when the overlap clears."
+verify = "A PR from lane A touching a file lane B claims opens one item and none for lane A's own claims; a claim made after the PR's head opens it too; pushing a head without the file or releasing the claim closes it; a PR with no lane is checked against every claim."
+covers = ["R1"]
+after = [1, "2.15"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Ticket-tree moves against open PRs"
+description = "Using the renames and previous paths entry 2.15 records, a PR that moves files under the project's ticket-tree path (from the work-item source config) while other open PRs edit those files opens an item listing the editing PRs and a suggested order (those PRs merge first). Uses the fixture tree entry 2.10 puts on the test repository."
+verify = "A PR moving a story file that two open PRs edit opens one item naming both and suggesting they merge first; a move of an untouched file opens none."
+covers = ["R2"]
+after = [2, "2.10"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 4
+type = "story"
+title = "overlaps() and claims in snapshot()"
+description = "overlaps(pr | lane) returns current conflicts, tree-move items included, for a PR or a lane; claims(lane?) lists claims with reasons; snapshot() shows claim and overlap counts. Hands on: claims() to epic 6's don't-touch section."
+verify = "overlaps for a lane and for a PR each return the same conflicts their items show, claims lists each claim with its reason, and snapshot() counts both."
+covers = ["R3"]
+after = [2, 3]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+verify = "Deferred findings are resolved or re-filed, and CI passes."
+covers = []
+after = [1, 2, 3, 4]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 6
+type = "story"
+title = "End-to-end suite over the epic's Done when"
+description = "One suite runs every Done-when check of this epic against a real daemon and the test repository."
+verify = "The suite passes in CI, one test per Done-when line."
+covers = ["R1", "R2", "R3", "R4"]
+after = [5]
+hitl = false
+risk = "low"

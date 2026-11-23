@@ -1,0 +1,152 @@
+# Entries of the Merge controller epic, in build order. Ids are permanent; table order is build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Tracer: merge_gate(pr) judges checks like the clerk's gate"
+description = "The thinnest path: one pure gate function over (projection, freezes, config) with a per-rule registry later entries append to, and merge_gate(pr) for orchestrator and clerk tokens returning the verdict, reason codes mapped to safemerge's exit classes (refused, stale, keywords, base red) and the projection's as_of. Rule 1 as in safemerge.sh and lib.sh: a required minimum check count of at least 1 with no default (config fails closed), only the latest run per check name counts, none pending (an ignored check still pending refuses), none failing outside the ignore list, canceled and skipped checks pass; a projection that is stale or not complete for the PR refuses. An orchestrator calling merge_gate on the test repository's PR sees the verdict with its reasons and as_of. Hands on: the registry and gate function to every later entry."
+verify = "Table-driven tests built from safemerge.sh's rule-1 cases give the same verdict kind and first reason, including fewer checks than the minimum, a rerun that does not inflate the count, a pending ignored check and a missing minimum in config; merge_gate on a test PR returns the verdict with as_of."
+covers = ["R1", "R2"]
+after = ["2.3", "2.14"]
+hitl = false
+risk = "high"
+references = [".claude/skills/clerk/scripts/safemerge.sh", ".claude/skills/clerk/scripts/lib.sh", "architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-11"]
+notes = ["Decision: 2026-11-22, the owner chose the clerk's gate as the reference spec ('Copy the clerk's gate'); where safemerge.sh, lib.sh or sweep.sh settle a detail, the gate copies it.", "Check beyond its criteria: with a revoked PAT the projection goes stale and every verdict refuses, never passes."]
+
+[[entry]]
+id = 11
+type = "story"
+title = "Rule 2: unresolved review threads"
+description = "Rule 2 as in safemerge.sh: any unresolved review thread refuses, and a thread list the projection cannot show complete (more than 100 threads, or not yet fetched) refuses."
+verify = "A PR with one unresolved thread is refused and passes once it is resolved; a PR whose thread list is incomplete is refused with that reason."
+covers = ["R2"]
+after = [1, "2.4"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Flake candidates on PRs and on main"
+description = "A check that fails and then passes on the same head SHA, a PR failure in a test whose files the PR does not change, or a main failure whose failing test passes on a later main commit that did not change its files, opens a flake-candidate item with the test id and excerpt taken from structured check-run annotations or a JUnit artifact (or the check name and run link when neither exists); nothing is ever rerun. Flake candidates are kept as records epic 10 indexes."
+verify = "Fixture runs for each of the three cases open one flake item each with test id and excerpt, a run with no annotations opens one with the check name and run link, and no rerun call is made."
+covers = ["R6"]
+after = ["2.3", "2.5", "2.15"]
+hitl = false
+risk = "medium"
+plan_checkpoint = true
+notes = ["Decision: 2026-11-22, a test's area is its own files, taken from the annotation or JUnit path; flakes on main are judged across later main commits, since nothing reruns."]
+
+[[entry]]
+id = 2
+type = "story"
+title = "Rule 3: main's verdict and the marked fix"
+description = "Rule 3 as lib.sh's main-verdict rules: the configured CI workflow's runs on main decide; canceled and skipped runs are ignored; a failure run whose jobs were all canceled is no verdict and the next older run decides; startup_failure is red; red needs a failed or timed-out job, and unreadable jobs are not green; no verdict in the window refuses; a flake candidate on main is not red. A PR carrying the configured fix label, applied by a configured login, overrides only main red: rules 1, 2, 4 and 5, a missing or unreadable verdict and the deploy window still refuse it."
+verify = "Fixture main histories give the same verdict as lib.sh for each case; with main red only the labeled fix passes, a label from another login does not count, and the labeled fix is still refused for an unresolved thread and for no main verdict."
+covers = ["R3", "R4"]
+after = [1, 11, 6, "2.15"]
+hitl = false
+risk = "medium"
+references = [".claude/skills/clerk/scripts/lib.sh"]
+
+[[entry]]
+id = 3
+type = "story"
+title = "Rule 4: stale CI and the automatic branch update"
+description = "A fetcher adds each PR's merge base and the files main changed since it; rule 4 refuses a PR with a file changed on both sides as stale (no merge base, or a file list that cannot be read, refuses); a GitHub write adapter that exposes only branch update and merge performs one automatic branch update by merging main, keyed branch_update:<pr>:<head_sha>, only when rules 1 to 3 pass with checks complete and outside a red main or a deploy window; a failed update (a conflict) opens an item for the lane; an allow-overlap label by a configured login waives rule 4 for that head. The owner grants contents and pull-request write to the PAT and the GitHub App."
+verify = "A PR whose file changed on main is refused as stale and gets exactly one branch update per head, also across a restart, and only once rules 1 to 3 pass; a conflicting update opens one lane item; the write adapter has no call besides branch update and merge."
+covers = ["R3"]
+after = [2, "2.15", "1.7"]
+hitl = true
+risk = "high"
+notes = ["Decision: 2026-11-22, this is the least certain story (the first GitHub write); it follows rules 2 and 3 because the update waits on them.", "Check beyond its criteria: a branch update never runs twice for one head even when two events arrive in one poll."]
+
+[[entry]]
+id = 12
+type = "story"
+title = "The deploy window"
+description = "freeze(reason) and unfreeze(), orchestrator only, set and clear the deploy window, during which every PR is refused with that reason."
+verify = "During a freeze every PR is refused with its reason, unfreeze restores the earlier verdicts, and a clerk or worker token's freeze is refused."
+covers = ["R4"]
+after = [2]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Rule 5: closing keywords"
+description = "A fetcher adds PR bodies and commit messages to the projection as structured fields; rule 5 refuses a closing keyword with an issue number in either, as in safemerge.sh, unless a keywords-ok label from a configured login is on the PR."
+verify = "A PR with 'closes #1' in a commit is refused, one with 'Refs #1' is not, and the keywords-ok label from a configured login lets the first pass."
+covers = ["R3"]
+after = [1, "2.5"]
+hitl = false
+risk = "low"
+notes = ["Decision: 2026-11-22, PR bodies and commit messages are structured GitHub fields, not event body text, so reading them keeps AD-2; the after on 2.5 serializes the projection schema."]
+
+[[entry]]
+id = 13
+type = "story"
+title = "Rule 6, live evaluation and the merge log"
+description = "Every verdict is pinned to the head SHA; the gate runs on every relevant event; a verdict is logged in the merge log as an inbox event only when its kind or reasons change for that head, a new head superseding the old; pending and too-few-checks verdicts open no items; branch updates log BRANCH UPDATED."
+verify = "On recorded fixtures merge_gate and the live gate give the same verdict for every PR; a new head logs a new verdict and supersedes the old; a branch update logs BRANCH UPDATED; a pending PR opens no item."
+covers = ["R1", "R3"]
+after = [3, 4, 11, 12]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "MERGE items, observed merges and refusals the lane sees"
+description = "A MERGE verdict opens a state-backed item that closes when the live verdict for that head stops being MERGE; it is for the clerk (the orchestrator when no clerk is configured), and a labeled-fix MERGE is for the orchestrator only; its suggested action is the full command with the configured merge method (merge by default) and --match-head-commit. Core logs MERGED with the PR's merge-commit SHA when it observes a merge, gated when an open MERGE item matched the head, else outside_gate with an item. A refusal opens an item for the owning lane's worker, deduplicated on PR, head and reason; a PR with no lane gets its refusal items for the orchestrator; draft PRs and PRs with the configured skip label are not gated."
+verify = "The clerk runs a MERGE item's command and the merge is logged as gated with its merge-commit SHA; a merge by hand is logged outside_gate with an item; a push or a freeze closes an open MERGE item; a refused PR's lane worker sees the refusal through wait() once per reason; a draft PR opens nothing."
+covers = ["R1", "R5"]
+after = [13, 2, 3, "1.8", "1.9"]
+hitl = false
+risk = "medium"
+notes = ["Decision: 2026-11-22, the owner chose refusals as items the lane's own wait() sees ('Item the lane's wait() sees'), with no dependency on epic 3."]
+
+[[entry]]
+id = 7
+type = "story"
+title = "One open PR per lane"
+description = "Lanes gain an optional branch pattern (a lane's branch when unset); a second open PR matching a lane's pattern opens an item for the orchestrator, and the gate refuses it until the first closes."
+verify = "Opening a second PR on a lane's branch pattern opens one item and its verdict is a refusal naming the first PR; closing the first lets the second be judged."
+covers = ["R7"]
+after = [13, "2.15", "1.8"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Controller-run merges, built off"
+description = "A per-project setting, off by default, lets the controller itself merge a MERGE verdict with the configured method, pinned to the head SHA, through entry 3's write adapter; with it off the adapter refuses to merge."
+verify = "With the setting off no merge call is possible; with it on in a test project the controller merges a green test PR pinned to its head and logs it as gated."
+covers = ["R5"]
+after = [5, 3]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 9
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+verify = "Deferred findings are resolved or re-filed, and CI passes."
+covers = []
+after = [1, 11, 6, 2, 3, 12, 4, 13, 5, 7, 8]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 10
+type = "story"
+title = "End-to-end suite over the epic's Done when"
+description = "One suite runs every Done-when check of this epic against a real daemon and fixture PRs on a test repository kept apart from epics 2 and 3's suites (one PR per rule and reason), and compares the gate with safemerge.sh run under ORCH_DRY=1 on the same PRs (same verdict kind, and safemerge's first reason among the gate's). The fix label, the deploy window and the one-open-PR rule are plotroom's own and are not compared."
+verify = "The suite passes in CI, one test per Done-when line."
+covers = ["R1", "R2", "R3", "R4", "R5", "R6", "R7"]
+after = [9]
+hitl = false
+risk = "low"

@@ -1,0 +1,91 @@
+# Entries of the human's queue epic, in build order. Ids are permanent; table order is build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Tracer: decide() records the human's exact words"
+description = "The thinnest path: decide(who, exact_words, where_ref, governs[], settles[]) (orchestrator only) stores the words byte for byte with who, where and when, the tickets it governs and the asks it settles; words cited from a GitHub comment must appear in that comment's projected body, and a comment not yet in the projection returns a retryable unavailable error; decisions(governs?) lists them; the project config gains its human_login key. Hands on: decisions to entries 4 and 6 and to epic 10's search; human_login to entries 3 and 6."
+verify = "Words quoted from a test comment are stored byte for byte with the tickets they govern and decisions(governs) finds them, words not in the comment are refused, a just-posted comment not yet polled returns unavailable, a decision citing a chat source is stored as given, and a worker token's decide is refused."
+covers = ["R1"]
+after = ["1.5", "2.5"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Goal language: grammar and evaluator"
+description = "A small query language for goals over the projection and ledger (issues, labels, assignees, blocked-by, lanes, decisions), relational enough to say 'blocked by an issue that is', parsed and evaluated in core with no I/O, returning matching items with the clause each fails. The grammar is reviewed with the owner at the plan checkpoint. Hands on: the evaluator to entry 6."
+verify = "Table-driven tests parse and evaluate goals over fixture state, including the first goal (every open issue in the milestone is assigned to the human or blocked by one that is); an invalid goal is refused with the position of the error; evaluation never writes."
+covers = ["R3"]
+after = [1, "1.8", "2.5"]
+hitl = false
+risk = "high"
+plan_checkpoint = true
+notes = ["Decision: 2026-11-22, the owner chose a small query language for goals ('A small query language'); it is the least certain story, so it follows the tracer.", "Check beyond its criteria: evaluating a goal over a large fixture board stays within snapshot()'s token budget when rendered."]
+
+[[entry]]
+id = 2
+type = "story"
+title = "Recording asks"
+description = "ask(issue, text, options[], comment_id) records an ask the orchestrator posted on the human's issue (a comment not yet polled returns a retryable unavailable error), and asks(stale_only?) lists them; the tool never posts the comment itself (C3). Hands on: asks to epic 10's search."
+verify = "An ask recorded against a test comment lists with its options and comment id, and an ask whose comment is not yet in the projection returns unavailable."
+covers = ["R2"]
+after = ["1.5", "2.5"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Ask checks: buried, optionless, stale and orphaned"
+description = "On each relevant event and tick, using comment authors and times from the projection and the configured human_login, an ask is flagged with an item when a newer comment by someone else follows it on its issue, when it has no options, when it is older than a configured number of days, or when its issue closed with no reply from the human after the ask."
+verify = "Fixture issues raise exactly one item for each of the four cases, a newer comment by the human does not count as burying, and each item closes when its condition clears."
+covers = ["R2"]
+after = [1, 2, "1.7"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Decisions settle asks and tickets"
+description = "A decision's settles[] and governs[] link it to asks and tickets; a settled ask stops being flagged, and asks(), decisions() and a ticket's decisions show the links both ways."
+verify = "Recording a decision that settles an ask closes its stale item, and both lists show the ask link and the ticket link."
+covers = ["R1", "R2"]
+after = [1, 3]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Storing goals, goal() and the first goal"
+description = "goal_set(name, text), orchestrator only and declared in the writer-rule table, stores a goal after it parses; goal(name?) reports whether a stored goal holds and, for each remaining item, why it is still open; the first goal ships as an example."
+verify = "goal_set stores the first goal and a worker token's goal_set is refused; on fixture issues goal() reports done only when every open issue is the human's or blocked by one, and names each remaining issue with its failing clause."
+covers = ["R3"]
+after = [5, 1, "2.16"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+verify = "Deferred findings are resolved or re-filed, and CI passes."
+covers = []
+after = [1, 5, 2, 3, 4, 6]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 8
+type = "story"
+title = "End-to-end suite over the epic's Done when"
+description = "One suite runs every Done-when check of this epic against a real daemon and the test repository."
+verify = "The suite passes in CI, one test per Done-when line."
+covers = ["R1", "R2", "R3"]
+after = [7]
+hitl = false
+risk = "low"

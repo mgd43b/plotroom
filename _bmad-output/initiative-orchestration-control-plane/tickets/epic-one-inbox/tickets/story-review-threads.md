@@ -16,7 +16,7 @@ tracker_status: backlog
 
 ## Description
 
-A fetcher adds review threads and their resolved state into the projection. Hands on: unresolved threads to epic 4.
+A fetcher adds review threads and their resolved state into the projection, paginating fully and marking a PR's thread list incomplete when it cannot. Hands on: unresolved threads to epic 4.
 
 ## Requirements
 

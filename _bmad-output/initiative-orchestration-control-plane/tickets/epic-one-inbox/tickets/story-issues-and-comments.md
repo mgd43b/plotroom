@@ -16,7 +16,7 @@ tracker_status: backlog
 
 ## Description
 
-A fetcher adds issues, their state, assignees and comments (comment ids and bodies stored verbatim) into the projection. Hands on: asks and exact-words checks to epic 7, issue_closed to epic 3, issues to entry 16.
+A fetcher adds issues, their state, assignees and comments (comment ids, authors, creation times and bodies stored verbatim) into the projection. Hands on: asks, comment authors and exact-words checks to epic 7, issue_closed to epic 3, issues to entry 16.
 
 ## Requirements
 
