@@ -27,6 +27,7 @@ Verify: Against fixture issues on the test repository shaped like this project's
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
 - .claude/skills/bmad-agent-po/config/github-ticketing.toml
 - _bmad/custom/ticketing-store-config.toml
+- Built: https://github.com/mgd43b/plotroom/pull/147
 
 ## Notes
 

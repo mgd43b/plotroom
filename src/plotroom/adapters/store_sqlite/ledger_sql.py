@@ -21,6 +21,7 @@ from plotroom.adapters.store_sqlite import (
 from plotroom.core.actions import Action
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
+from plotroom.core.github_projection import GitHubResource
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
@@ -188,6 +189,16 @@ class SqliteTransaction:
     async def save_pull_request(self, pull: PullRequest) -> None:
         await github_sql.save_pull_request(self._live(), pull)
         self._branch_candidates.pop(pull.repository, None)
+
+    async def github_resource(
+        self, repository: str, resource: str, scope: str = ""
+    ) -> GitHubResource | None:
+        return await github_sql.github_resource(self._live(), repository, resource, scope)
+
+    async def save_github_resource(
+        self, repository: str, resource: str, scope: str, result: GitHubResource
+    ) -> None:
+        await github_sql.save_github_resource(self._live(), repository, resource, scope, result)
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         return await github_sql.fetch_cursor(self._live(), repository, resource)

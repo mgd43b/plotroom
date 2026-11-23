@@ -24,6 +24,7 @@ from plotroom.core.events import (
     validate_fields,
 )
 from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
+from plotroom.core.github_projection import GitHubResource
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item, ItemKind
 from plotroom.core.roles import role_family
@@ -112,6 +113,16 @@ class UnitOfWork:
 
     async def save_pull_request(self, pull: PullRequest) -> None:
         await self._tx.save_pull_request(pull)
+
+    async def github_resource(
+        self, repository: str, resource: str, scope: str = ""
+    ) -> GitHubResource | None:
+        return await self._tx.github_resource(repository, resource, scope)
+
+    async def save_github_resource(
+        self, repository: str, resource: str, scope: str, result: GitHubResource
+    ) -> None:
+        await self._tx.save_github_resource(repository, resource, scope, result)
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         return await self._tx.fetch_cursor(repository, resource)

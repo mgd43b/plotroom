@@ -30,6 +30,7 @@ from plotroom.adapters.store_sqlite.work_items_sql import ready_work_items
 from plotroom.core.actions import Action
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
+from plotroom.core.github_projection import GitHubResource
 from plotroom.core.next_items import Item
 from plotroom.ports.store import Board
 from plotroom.ports.work_items import WorkItem
@@ -212,6 +213,16 @@ class SqliteStore:
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         async with self._engine.connect() as connection:
             return await github_sql.pull_request(connection, repository, number)
+
+    async def github_resource(
+        self, repository: str, resource: str, scope: str = ""
+    ) -> GitHubResource | None:
+        async with self._engine.connect() as connection:
+            return await github_sql.github_resource(connection, repository, resource, scope)
+
+    async def github_pull_targets(self, repository: str) -> tuple[PullRequest, ...]:
+        async with self._engine.connect() as connection:
+            return await github_sql.github_pull_targets(connection, repository)
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         async with self._engine.connect() as connection:

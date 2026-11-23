@@ -97,7 +97,10 @@ async def endpoint(
 
     monkeypatch.setattr(Watchers, "waiting", observed)
 
-    async def pause_poller(_self: GitHubPoller) -> None:
+    async def pause_poller(
+        _self: GitHubPoller,
+        _after_pull: Callable[[httpx.AsyncClient], Awaitable[None]] | None = None,
+    ) -> None:
         await asyncio.Future[None]()
 
     monkeypatch.setattr(GitHubPoller, "run", pause_poller)

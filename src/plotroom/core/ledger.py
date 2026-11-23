@@ -23,6 +23,7 @@ from plotroom.core.events import (
     validate_fields,
 )
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
+from plotroom.core.github_projection import GitHubResource
 from plotroom.core.next_items import Item
 from plotroom.core.roles import OwnershipView, role_family
 from plotroom.core.unit_of_work import UnitOfWork
@@ -313,6 +314,14 @@ class Ledger:
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return await self._store.pull_request(repository, number)
+
+    async def github_resource(
+        self, repository: str, resource: str, scope: str = ""
+    ) -> GitHubResource | None:
+        return await self._store.github_resource(repository, resource, scope)
+
+    async def github_pull_targets(self, repository: str) -> tuple[PullRequest, ...]:
+        return await self._store.github_pull_targets(repository)
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         return await self._store.fetch_cursor(repository, resource)
