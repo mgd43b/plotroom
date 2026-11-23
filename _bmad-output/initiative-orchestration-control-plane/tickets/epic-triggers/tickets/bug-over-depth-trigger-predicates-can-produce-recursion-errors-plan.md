@@ -45,3 +45,4 @@ The regular ledger still owns recursive copying and command receipts. The trigge
 - Run the targeted trigger, command, and transport tests on managed Python 3.14 and 3.15.
 - Run the full pytest suite on both interpreters and the normal lint, format, typing, and dependency checks.
 - Independently review the exact diff before opening the PR.
+- [Built in PR #170](https://github.com/mgd43b/plotroom/pull/170)

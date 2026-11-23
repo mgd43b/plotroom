@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "118"
 remote: "https://github.com/mgd43b/plotroom/issues/118"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Search by meaning
