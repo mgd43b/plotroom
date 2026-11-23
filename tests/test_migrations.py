@@ -18,7 +18,9 @@ from plotroom.adapters.store_sqlite import SqliteStore, head_revision, script_he
 from plotroom.adapters.store_sqlite.migrate import MIGRATIONS_DIR, alembic_config, upgrade_to_head
 from plotroom.app.config import GitHubConfig
 from plotroom.app.serve import Daemon
+from plotroom.core.ask_checks import Ask
 from plotroom.core.catalog import build_catalog
+from plotroom.core.checklists import Checklist, ChecklistStep
 from plotroom.core.claims import TICKET_TREE_MOVE
 from plotroom.core.events import NewEvent
 from plotroom.core.github import PR_MERGED, PR_OPENED, ObservedPull, apply_comments
@@ -207,12 +209,33 @@ async def test_search_upgrade_preserves_existing_messages(tmp_path: Path) -> Non
 
 
 async def test_search_records_migration_preserves_populated_fts(tmp_path: Path) -> None:
-    prior = alembic_config(_migrations_at(tmp_path / "before-search-records", "0021"))
+    prior = alembic_config(_migrations_at(tmp_path / "before-search-records", "0018"))
     store = SqliteStore("demo", tmp_path)
-    ledger = Ledger(store, build_catalog(), FixedClock())
+    ledger = Ledger(store, build_catalog(frozenset({"fixture"})), FixedClock())
     try:
         await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
         ledger.start()
+        await ledger.execute(
+            "orchestrator",
+            "lane_start",
+            "legacy-lane",
+            {"lane": "lane", "worker": "fixture", "branch": "work", "work_items": []},
+        )
+        budget = await ledger.execute(
+            "orchestrator",
+            "budget_open",
+            "legacy-budget",
+            {
+                "run": "fixture-run",
+                "lane": "lane",
+                "cap_usd": 10,
+                "provider": "fixture",
+                "key_scope": "staging",
+            },
+        )
+        await ledger.execute(
+            "orchestrator", "route", "legacy-route", {"action_kind": "build", "lane": "lane"}
+        )
         original = (
             await ledger.append(
                 "system",
@@ -243,6 +266,7 @@ async def test_search_records_migration_preserves_populated_fts(tmp_path: Path) 
         await store.migrate()
         assert await store.revision() == head_revision()
         assert script_heads() == [head_revision()]
+        assert await ledger.budget_status("orchestrator") == [budget.result]
         page = await store.query("demo", "needle", None, 10)
         assert page.total == 1
         assert [(hit.id, hit.kind, hit.excerpt) for hit in page.hits] == [
@@ -256,6 +280,9 @@ async def test_search_records_migration_preserves_populated_fts(tmp_path: Path) 
                 original.seq,
             )
             assert db.execute("SELECT record_id FROM message_vectors").fetchone() == (original.id,)
+            assert db.execute("SELECT action_kind, lane FROM routes").fetchall() == [
+                ("build", "lane")
+            ]
     finally:
         await ledger.stop()
         await store.close()
@@ -722,4 +749,129 @@ async def test_clerk_import_upgrade_keeps_populated_lane_and_trigger(tmp_path: P
         assert trigger.import_note is None
         assert not trigger.notify_on_fire
     finally:
+        await store.close()
+
+
+async def test_guardrail_upgrade_preserves_existing_ledger_and_enables_budgets_and_routes(
+    tmp_path: Path,
+) -> None:
+    guardrails = ScriptDirectory.from_config(alembic_config()).get_revision("0018")
+    assert guardrails is not None
+    assert guardrails.down_revision == "0021"
+    prior = alembic_config(_migrations_at(tmp_path / "before-guardrails", "0021"))
+    store = SqliteStore("demo", tmp_path)
+    catalog = build_catalog(frozenset({"fixture"}))
+    ledger = Ledger(store, catalog, FixedClock())
+    try:
+        await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
+        assert await store.revision() == "0021"
+        ledger.start()
+        await ledger.execute(
+            "orchestrator",
+            "lane_start",
+            "legacy-lane",
+            {"lane": "lane", "worker": "fixture", "branch": "work", "work_items": []},
+        )
+        checklist = Checklist(
+            "lane",
+            2,
+            "fixture/project",
+            "work",
+            7,
+            "a" * 40,
+            "active",
+            (ChecklistStep("smoke", "fixture", "check-7", "verified"),),
+        )
+
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.execute(
+                "UPDATE lanes SET imported_channel = ?, imported_trigger_id = ? WHERE id = ?",
+                ("switchboard", "fixture-trigger", "lane"),
+            )
+        await ledger.run("system", lambda uow: uow.save_checklist(checklist))
+        message = await ledger.append(
+            "system",
+            NewEvent(
+                "switchboard",
+                "switchboard.message",
+                "before-guardrails",
+                {"sender": "fixture"},
+                "migrationneedle",
+            ),
+        )
+        ask = Ask(
+            "ask_fixture",
+            "fixture/project",
+            7,
+            "Where should the fixture run?",
+            ("local", "defer"),
+            12,
+            "2026-11-23T00:00:00Z",
+            "2026-11-23T00:00:00Z",
+        )
+        await ledger.run("system", lambda uow: uow.save_ask(ask))
+        decision = await ledger.execute(
+            "orchestrator",
+            "decide",
+            "legacy-decision",
+            {
+                "who": "fixture",
+                "exact_words": "Use local fixtures",
+                "where_ref": {"kind": "chat", "ref": "fixture-decision"},
+                "governs": ["fixture-ticket"],
+                "settles": [],
+            },
+        )
+        [saved_decision] = await ledger.list_decisions("orchestrator", "fixture-ticket")
+        assert saved_decision["decision_id"] == decision.result["decision_id"]
+        original = await ledger.events_after(0)
+        assert len(original) == 3
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.execute(
+                "INSERT INTO message_fts (rowid, body) VALUES (?, ?)",
+                (message.event.seq, message.event.body),
+            )
+        await ledger.stop()
+        await store.migrate()
+        ledger = Ledger(store, catalog, FixedClock(), search=store)
+        ledger.start()
+        assert await store.revision() == head_revision()
+        assert await ledger.events_after(0) == original
+        (hit,) = (await ledger.search("migrationneedle", None, 10)).hits
+        assert hit.id == message.event.id
+        assert await ledger.run("system", lambda uow: uow.find_checklist("lane")) == checklist
+        lane = await ledger.run("system", lambda uow: uow.find_lane("lane"))
+        assert lane is not None
+        assert (lane.imported_channel, lane.imported_trigger_id) == (
+            "switchboard",
+            "fixture-trigger",
+        )
+        assert await ledger.run("system", lambda uow: uow.find_ask(ask.ask_id)) == ask
+        assert await ledger.list_decisions("orchestrator", "fixture-ticket") == [saved_decision]
+        assert await ledger.budget_status("orchestrator") == []
+        expected: list[dict[str, Any]] = []
+        for scope in ("production", "staging"):
+            opened = await ledger.execute(
+                "orchestrator",
+                "budget_open",
+                f"open-{scope}",
+                {
+                    "run": f"fixture-{scope}",
+                    "lane": "lane",
+                    "cap_usd": 10,
+                    "provider": "fixture",
+                    "key_scope": scope,
+                },
+            )
+            expected.append(opened.result)
+        assert await ledger.budget_status("orchestrator") == expected
+        assigned = await ledger.execute(
+            "orchestrator", "route", "assign", {"action_kind": "build", "lane": "lane"}
+        )
+        routed = await ledger.execute(
+            "orchestrator", "route_request", "request", {"action_kind": "build"}
+        )
+        assert routed.result == assigned.result == {"action_kind": "build", "lane": "lane"}
+    finally:
+        await ledger.stop()
         await store.close()

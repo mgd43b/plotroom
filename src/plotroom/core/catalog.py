@@ -17,6 +17,13 @@ from plotroom.core.branch_updates import (
     BRANCH_UPDATED_FIELDS,
 )
 from plotroom.core.briefs import BRIEF
+from plotroom.core.budgets import (
+    BUDGET_ARGS,
+    BUDGET_ITEM,
+    BUDGET_THRESHOLD,
+    BUDGET_THRESHOLD_FIELDS,
+    budget_open,
+)
 from plotroom.core.checklists import CHECKLIST_ARG, CHECKLIST_EMPTY, CHECKLIST_EMPTY_FIELDS
 from plotroom.core.claims import CLAIM_OVERLAP, PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, claim, release
 from plotroom.core.clerk_import import (
@@ -61,6 +68,7 @@ from plotroom.core.next_items import ItemKind, ack, owns_ack
 from plotroom.core.outbox import complete_outbox, lease_outbox
 from plotroom.core.reports import DEPLOY_ARGS, DEPLOY_FIELDS, DEPLOY_STATUS, deploy_report
 from plotroom.core.roles import WriterRule, WriterRules
+from plotroom.core.routing import ACTION_KIND, MISSING_ROUTE, route, route_request
 from plotroom.core.run_reports import RUN_FIELDS, RUN_ID, RUN_STATE, RUN_STATUS, run_report
 from plotroom.core.trigger_actions import (
     ARCHIVE_ITEM,
@@ -119,6 +127,11 @@ def build_catalog(
         workers=workers,
         read_roles={BRIEF: frozenset({"orchestrator"})},
     )
+    catalog.commands.register(
+        Command("budget_open", BUDGET_ARGS, budget_open), rules=(WriterRule("orchestrator"),)
+    )
+    events.register(EventKind(BUDGET_THRESHOLD, BUDGET_THRESHOLD_FIELDS, frozenset({"system"})))
+    catalog.register_item(BUDGET_ITEM)
     catalog.commands.register(
         Command(
             "ack",
@@ -179,6 +192,11 @@ def build_catalog(
     )
     lane = FieldSpec("lane", "str")
     orchestrator = (WriterRule("orchestrator"),)
+    catalog.register_item(MISSING_ROUTE)
+    catalog.commands.register(Command("route", (ACTION_KIND, lane), route), rules=orchestrator)
+    catalog.commands.register(
+        Command("route_request", (ACTION_KIND,), route_request), rules=orchestrator
+    )
     catalog.commands.register(
         Command("freeze", (FieldSpec("reason", "str"),), freeze), rules=orchestrator
     )

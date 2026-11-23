@@ -31,6 +31,7 @@ from plotroom.core.merge_controller import ACTIVE_MERGE_ITEMS, reconcile_merge_c
 from plotroom.core.merge_gate import GatePolicy, GateSnapshot, GateVerdict, evaluate_gate
 from plotroom.core.next_items import Item
 from plotroom.core.roles import OwnershipView, role_family
+from plotroom.core.run_reports import validate_identity
 from plotroom.core.search_sources import PRIVATE_KINDS, SEARCH_KINDS
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.watchers import Watchers
@@ -357,6 +358,14 @@ class Ledger:
     async def events_after(self, seq: int, limit: int = 100) -> list[Event]:
         """Committed events above ``seq``, ascending."""
         return await self._store.events_after(seq, limit)
+
+    async def budget_status(self, role: str, run: str | None = None) -> list[dict[str, Any]]:
+        """Return current committed budget rows, optionally for one run."""
+        if _check_role(role) != "orchestrator":
+            raise LedgerError("forbidden", "only the orchestrator may read budgets")
+        if run is not None:
+            validate_identity(run, "run")
+        return [budget.render() for budget in await self._store.read_budgets(run)]
 
     def stop_waiting(self) -> None:
         self._stopping.set()

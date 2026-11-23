@@ -21,8 +21,10 @@ from plotroom.adapters.claude_desktop import SESSION_ID
 from plotroom.adapters.github import RECONCILE_EVERY, github_secret_name
 from plotroom.adapters.github.ticket_tree import validate_tree_path
 from plotroom.core.briefs import BriefSettings
+from plotroom.core.events import LedgerError
 from plotroom.core.merge_gate import GatePolicy
 from plotroom.core.roles import role_family
+from plotroom.core.routing import validate_route_label
 from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, MIN_BOARD_BUDGET
 from plotroom.core.trigger_actions import DeliveryRoute
 from plotroom.ports.search import EmbeddingModel
@@ -129,6 +131,7 @@ class Config:
     github_ticket_trees: Mapping[str, tuple[str, Path]] = field(default_factory=lambda: {})
     github_issue_sources: Mapping[str, GitHubIssuesConfig] = field(default_factory=lambda: {})
     delivery_routes: Mapping[str, Mapping[str, DeliveryRoute]] = field(default_factory=lambda: {})
+    routes: Mapping[str, Mapping[str, str]] = field(default_factory=lambda: {})
     briefs: Mapping[str, BriefSettings] = field(default_factory=lambda: {})
     human_logins: Mapping[str, str] = field(default_factory=lambda: {})
     ask_stale_days: Mapping[str, int] = field(default_factory=lambda: {})
@@ -231,6 +234,7 @@ def load_config(
         briefs=_brief_settings(projects, raw.get("projects")),
         embedders=_embedders(projects, raw.get("projects")),
         delivery_routes=_delivery_routes(projects, switchboards, worker_sessions, drain_sessions),
+        routes=_routes(projects, raw.get("projects")),
         human_logins=_human_logins(projects, raw.get("projects")),
         ask_stale_days=_ask_stale_days(projects, raw.get("projects")),
         wait_cap=_integer("wait_cap", raw.get("wait_cap", 240), minimum=1),
@@ -512,6 +516,28 @@ def _worker_sessions(
                 raise ConfigError(f"{label}: Claude session IDs must be valid and unique")
             sessions[session] = worker
         configured[project_id] = sessions
+    return configured
+
+
+def _routes(projects: tuple[str, ...], table: Any) -> dict[str, Mapping[str, str]]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, Mapping[str, str]] = {}
+    for project_id in projects:
+        project = entries.get(project_id, {})
+        if "routes" not in project:
+            continue
+        label = f"projects.{project_id}.routes"
+        raw: Any = project["routes"]
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{label} must be a table of action kinds mapped to lane IDs")
+        routes: dict[str, str] = {}
+        for action_kind, lane in cast("dict[str, Any]", raw).items():
+            try:
+                kind = validate_route_label(action_kind, f"{label} action kind")
+                routes[kind] = validate_route_label(lane, f"{label}.{kind}")
+            except LedgerError as exc:
+                raise ConfigError(exc.message) from exc
+        configured[project_id] = routes
     return configured
 
 

@@ -19,6 +19,7 @@ from typing import Any
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.actions import BRANCH_UPDATE, CONTROLLER_MERGE, Action, QueuedAction
 from plotroom.core.ask_checks import ASK_STALE, Ask, IssueComment, comment_time
+from plotroom.core.budgets import Budget
 from plotroom.core.catalog import Catalog
 from plotroom.core.checklists import Checklist
 from plotroom.core.claims import OVERLAP_KINDS, Claim
@@ -85,6 +86,16 @@ class FixedClock:
         self._now += timedelta(seconds=seconds)
 
 
+def _outbox_deliverable(
+    message: OutboxMessage, actions: dict[str, Action], lanes: dict[str, Lane]
+) -> bool:
+    if not message.action_key.startswith("budget:"):
+        return True
+    action = actions.get(message.action_key)
+    lane = lanes.get(action.payload["lane"]) if action is not None else None
+    return lane is not None and lane.state != "archived" and lane.worker == message.worker
+
+
 class _MemoryTransaction:
     """Works on staged copies; ``MemoryStore.transaction`` publishes them on commit."""
 
@@ -103,6 +114,8 @@ class _MemoryTransaction:
         self.decisions: list[Decision] = []
         self.asks: dict[str, Ask] = {}
         self.lanes: dict[str, Lane] = {}
+        self.budgets: dict[str, Budget] = {}
+        self.routes: dict[str, str] = {}
         self.checklists: dict[str, Checklist] = {}
         self.claims: dict[tuple[str, str], Claim] = {}
         self.work_items: tuple[WorkItem, ...] = ()
@@ -171,6 +184,30 @@ class _MemoryTransaction:
     async def find_lane(self, lane_id: str) -> Lane | None:
         self._live()
         return self.lanes.get(lane_id)
+
+    async def find_budget(self, run: str) -> Budget | None:
+        self._live()
+        return self.budgets.get(run)
+
+    async def insert_budget(self, budget: Budget) -> None:
+        self._live()
+        self.budgets[budget.run] = budget
+
+    async def update_budget_spend(self, budget: Budget) -> None:
+        self._live()
+        self.budgets[budget.run] = budget
+
+    async def has_routes(self) -> bool:
+        self._live()
+        return bool(self.routes)
+
+    async def find_route(self, action_kind: str) -> str | None:
+        self._live()
+        return self.routes.get(action_kind)
+
+    async def save_route(self, action_kind: str, lane: str) -> None:
+        self._live()
+        self.routes[action_kind] = lane
 
     async def worker_lane(self, worker: str) -> Lane | None:
         self._live()
@@ -335,8 +372,10 @@ class _MemoryTransaction:
     async def lease_outbox(self, lease_id: str, now: str, expires_at: str) -> OutboxLease | None:
         self._live()
         for key, message in self.outbox.items():
-            if key not in self.delivered and (
-                key not in self.leases or self.leases[key].expires_at <= now
+            if (
+                key not in self.delivered
+                and (key not in self.leases or self.leases[key].expires_at <= now)
+                and _outbox_deliverable(message, self.actions, self.lanes)
             ):
                 lease = OutboxLease(message, lease_id, expires_at)
                 self.leases[key] = lease
@@ -350,6 +389,15 @@ class _MemoryTransaction:
                 self.delivered.add(key)
                 return key
         return None
+
+    async def retire_stale_outbox(self, now: str) -> None:
+        self._live()
+        self.delivered.update(
+            key
+            for key, message in self.outbox.items()
+            if (key not in self.leases or self.leases[key].expires_at <= now)
+            and not _outbox_deliverable(message, self.actions, self.lanes)
+        )
 
     async def find_trigger(self, trigger_id: str) -> Trigger | None:
         self._live()
@@ -543,6 +591,8 @@ class MemoryStore:
         self._decisions: list[Decision] = []
         self._asks: dict[str, Ask] = {}
         self._lanes: dict[str, Lane] = {}
+        self._budgets: dict[str, Budget] = {}
+        self._routes: dict[str, str] = {}
         self._checklists: dict[str, Checklist] = {}
         self._claims: dict[tuple[str, str], Claim] = {}
         self._work_items: tuple[WorkItem, ...] = ()
@@ -583,6 +633,8 @@ class MemoryStore:
         tx.decisions = copy.deepcopy(self._decisions)
         tx.asks = self._asks.copy()
         tx.lanes = self._lanes.copy()
+        tx.budgets = self._budgets.copy()
+        tx.routes = self._routes.copy()
         tx.checklists = self._checklists.copy()
         tx.claims = self._claims.copy()
         tx.work_items = self._work_items
@@ -608,6 +660,8 @@ class MemoryStore:
             self._decisions = tx.decisions
             self._asks = tx.asks
             self._lanes = tx.lanes
+            self._budgets = tx.budgets
+            self._routes = tx.routes
             self._checklists = tx.checklists
             self._claims = tx.claims
             self._work_items = tx.work_items
@@ -626,11 +680,16 @@ class MemoryStore:
     async def head_seq(self) -> int:
         return self._seq
 
+    async def read_budgets(self, run: str | None) -> list[Budget]:
+        return [budget for key, budget in sorted(self._budgets.items()) if run in (None, key)]
+
     async def outbox_readiness(self, now: str) -> OutboxReadiness:
         ready: list[int] = []
         expiries: list[str] = []
         for key, message in self._outbox.items():
-            if key in self._delivered:
+            if key in self._delivered or not _outbox_deliverable(
+                message, self._actions, self._lanes
+            ):
                 continue
             lease = self._leases.get(key)
             if lease is None or lease.expires_at <= now:

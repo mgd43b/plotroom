@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from plotroom.adapters.store_sqlite import (
     actions_sql,
     asks_sql,
+    budgets_sql,
     checklists_sql,
     claims_sql,
     embedding_sql,
@@ -21,6 +22,7 @@ from plotroom.adapters.store_sqlite import (
     items_sql,
     lanes_sql,
     outbox_sql,
+    routes_sql,
     search_sql,
     triggers_sql,
     work_items_sql,
@@ -38,6 +40,7 @@ from plotroom.ports.search import EmbeddedMessage, EmbeddingModel, SearchRecord
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
+    from plotroom.core.budgets import Budget
     from plotroom.core.checklists import Checklist
     from plotroom.core.human_queue import Decision
     from plotroom.core.outbox import OutboxLease, OutboxMessage
@@ -311,6 +314,24 @@ class SqliteTransaction:
     async def find_lane(self, lane_id: str) -> Lane | None:
         return await lanes_sql.find_lane(self._live(), lane_id)
 
+    async def find_budget(self, run: str) -> Budget | None:
+        return await budgets_sql.find_budget(self._live(), run)
+
+    async def insert_budget(self, budget: Budget) -> None:
+        await budgets_sql.insert_budget(self._live(), budget)
+
+    async def update_budget_spend(self, budget: Budget) -> None:
+        await budgets_sql.update_budget_spend(self._live(), budget)
+
+    async def has_routes(self) -> bool:
+        return await routes_sql.has_routes(self._live())
+
+    async def find_route(self, action_kind: str) -> str | None:
+        return await routes_sql.find_route(self._live(), action_kind)
+
+    async def save_route(self, action_kind: str, lane: str) -> None:
+        await routes_sql.save_route(self._live(), action_kind, lane)
+
     async def worker_lane(self, worker: str) -> Lane | None:
         return await lanes_sql.worker_lane(self._live(), worker)
 
@@ -396,6 +417,9 @@ class SqliteTransaction:
 
     async def complete_outbox(self, lease_id: str, now: str) -> str | None:
         return await outbox_sql.complete_outbox(self._live(), lease_id, now)
+
+    async def retire_stale_outbox(self, now: str) -> None:
+        await outbox_sql.retire_stale_outbox(self._live(), now)
 
     async def find_trigger(self, trigger_id: str) -> Trigger | None:
         return await triggers_sql.find_trigger(self._live(), trigger_id)

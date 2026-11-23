@@ -10,7 +10,7 @@ from typing import Annotated, Any, Literal
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.requests import Request
@@ -598,6 +598,59 @@ def build_app(
     ) -> dict[str, Any]:
         """Release the requested path claims for a lane."""
         return await execute_command(ctx, "release", request_id, {"lane": lane, "globs": globs})
+
+    @server.tool()
+    async def route(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], action_kind: str, lane: str, request_id: str
+    ) -> dict[str, Any]:
+        """Assign a lane to a hands-on action kind."""
+        return await execute_command(
+            ctx, "route", request_id, {"action_kind": action_kind, "lane": lane}
+        )
+
+    @server.tool()
+    async def route_request(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], action_kind: str, request_id: str
+    ) -> dict[str, Any]:
+        """Return the assigned lane or raise a next item for the missing route."""
+        return await execute_command(ctx, "route_request", request_id, {"action_kind": action_kind})
+
+    @server.tool()
+    async def budget_open(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        run: str,
+        lane: str,
+        cap_usd: StrictFloat,
+        provider: str,
+        key_scope: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Register a run's spend cap and owning lane. Supply only the name of the key scope."""
+        return await execute_command(
+            ctx,
+            "budget_open",
+            request_id,
+            {
+                "run": run,
+                "lane": lane,
+                "cap_usd": cap_usd,
+                "provider": provider,
+                "key_scope": key_scope,
+            },
+        )
+
+    @server.tool()
+    async def budget_status(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], run: str | None = None
+    ) -> dict[str, Any]:
+        """Show current cumulative spend against caps, optionally for one run."""
+        try:
+            caller = board_access(ctx)
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            return ok({"budgets": await caller.ledger.budget_status(caller.identity.role, run)})
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
 
     @server.tool()
     async def run_report(  # pyright: ignore[reportUnusedFunction]
