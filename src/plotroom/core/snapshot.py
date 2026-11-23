@@ -42,7 +42,11 @@ def _add(
 
 def render_search(page: SearchPage, budget: int) -> dict[str, Any]:
     hits: list[dict[str, Any]] = []
-    data = {"hits": hits, "omitted": page.total}
+    data: dict[str, Any] = {"hits": hits, "omitted": page.total}
+    if page.mode is not None:
+        data["mode"] = page.mode
+    if page.fallback_reason is not None:
+        data["fallback_reason"] = page.fallback_reason
     if not _fits(data, budget):
         raise LedgerError("unavailable", "search reply exceeds the configured token budget")
     for hit in page.hits:

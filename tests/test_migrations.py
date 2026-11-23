@@ -34,6 +34,7 @@ from plotroom.core.github_projection import (
 from plotroom.core.lanes import Lane
 from plotroom.core.ledger import Ledger
 from plotroom.core.unit_of_work import UnitOfWork
+from plotroom.ports.search import EmbeddingModel, EmbeddingRevision
 from test_daemon import bearer, make_config, run_daemon, stop
 
 
@@ -272,14 +273,18 @@ async def test_search_records_migration_preserves_populated_fts(tmp_path: Path) 
         assert [(hit.id, hit.kind, hit.excerpt) for hit in page.hits] == [
             (original.id, original.kind, "legacy needle")
         ]
+        index = store.embedding_index(EmbeddingModel("fixture", 1))
+        assert await index.cursor() == 0
+        assert await index.revisions_after(0, 32) == [EmbeddingRevision(original.seq, None)]
+        assert (await index.query_vector("demo", (0,), 10)).hits[0].id == original.id
         with closing(sqlite3.connect(store.path)) as db:
             assert db.execute(
                 "SELECT seq, kind, record_id, body FROM search_records"
             ).fetchall() == [(original.seq, original.kind, original.id, original.body)]
-            assert db.execute("SELECT index_seq FROM embedding_cursors").fetchone() == (
-                original.seq,
-            )
-            assert db.execute("SELECT record_id FROM message_vectors").fetchone() == (original.id,)
+            assert db.execute("SELECT index_seq FROM embedding_cursors").fetchall() == []
+            assert db.execute(
+                "SELECT model, dimension, record_seq, vector FROM search_vectors"
+            ).fetchall() == [("fixture", 1, original.seq, bytes(4))]
             assert db.execute("SELECT action_kind, lane FROM routes").fetchall() == [
                 ("build", "lane")
             ]

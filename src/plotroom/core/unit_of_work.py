@@ -57,7 +57,7 @@ from plotroom.ports.search import (
     BackfillPage,
     BackfillPosition,
     BackfillSource,
-    EmbeddedMessage,
+    EmbeddedRecord,
     EmbeddingIndex,
     Search,
     SearchBackfill,
@@ -154,7 +154,7 @@ class UnitOfWork:
         index: EmbeddingIndex,
         expected: int,
         through: int,
-        records: tuple[EmbeddedMessage, ...],
+        records: tuple[EmbeddedRecord, ...],
     ) -> bool:
         if self._role != "system":
             raise LedgerError("forbidden", "only core may update the embedding index")

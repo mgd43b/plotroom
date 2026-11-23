@@ -12,7 +12,8 @@ FIND_RECORD = text("""
     SELECT seq, body FROM search_records WHERE kind = :kind AND record_id = :id
 """)
 INSERT_RECORD = text("""
-    INSERT INTO search_records (kind, record_id, body) VALUES (:kind, :id, :body)
+    INSERT INTO search_records (kind, record_id, body, embeddable)
+    VALUES (:kind, :id, :body, :embeddable)
     RETURNING seq
 """)
 DELETE_RECORD = text("DELETE FROM search_records WHERE seq = :seq")
@@ -53,7 +54,11 @@ async def index_record(
             return
         await connection.execute(DELETE_MESSAGE, {"seq": current.seq})
         await connection.execute(DELETE_RECORD, {"seq": current.seq})
-    seq = (await connection.execute(INSERT_RECORD, params)).scalar_one()
+    seq = (
+        await connection.execute(
+            INSERT_RECORD, {**params, "embeddable": bool(record.body.strip())}
+        )
+    ).scalar_one()
     # SQLite's text functions can stop at a NUL. Index it as a word separator.
     await connection.execute(INSERT_MESSAGE, {"seq": seq, "body": record.body.replace("\x00", " ")})
 

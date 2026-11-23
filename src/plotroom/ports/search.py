@@ -37,6 +37,8 @@ class SearchHit:
 class SearchPage:
     hits: tuple[SearchHit, ...]
     total: int
+    mode: str | None = None
+    fallback_reason: str | None = None
 
 
 class Search(Protocol):
@@ -103,6 +105,10 @@ class EmbeddingError(Exception):
     """The provider failed to return a usable batch."""
 
 
+class EmbeddingPending(Exception):
+    """At least one requested source is still being indexed."""
+
+
 @dataclass(frozen=True)
 class EmbeddingModel:
     name: str
@@ -110,9 +116,17 @@ class EmbeddingModel:
 
 
 @dataclass(frozen=True)
-class EmbeddedMessage:
+class EmbeddedRecord:
+    seq: int
+    kind: str
     id: str
     vector: bytes
+
+
+@dataclass(frozen=True)
+class EmbeddingRevision:
+    seq: int
+    record: SearchRecord | None
 
 
 class Embedder(Protocol):
@@ -130,12 +144,23 @@ class EmbeddingIndex(Protocol):
 
     async def cursor(self) -> int: ...
 
+    async def revisions_after(self, after: int, limit: int) -> list[EmbeddingRevision]: ...
+
+    async def ready_count(self, kinds: tuple[str, ...]) -> int | None:
+        """Return the eligible count, or None while requested sources are incomplete."""
+        ...
+
     async def commit(
-        self, tx: Transaction, expected: int, through: int, records: tuple[EmbeddedMessage, ...]
+        self, tx: Transaction, expected: int, through: int, records: tuple[EmbeddedRecord, ...]
     ) -> bool:
         """Write the batch and advance its cursor together, or return False for a stale attempt."""
         ...
 
     async def query_vector(
-        self, project: str, vector: tuple[float, ...], limit: int
+        self,
+        project: str,
+        vector: tuple[float, ...],
+        limit: int,
+        *,
+        kinds: tuple[str, ...] | None = None,
     ) -> SearchPage: ...

@@ -63,9 +63,10 @@ from plotroom.ports.search import (
     BackfillPage,
     BackfillPosition,
     BackfillSource,
-    EmbeddedMessage,
+    EmbeddedRecord,
     EmbeddingError,
     EmbeddingModel,
+    EmbeddingRevision,
     SearchPage,
     SearchRecord,
 )
@@ -145,14 +146,29 @@ class SqliteEmbeddingIndex:
         async with self._engine.connect() as connection:
             return await embedding_sql.read_cursor(connection, self.model)
 
+    async def revisions_after(self, after: int, limit: int) -> list[EmbeddingRevision]:
+        async with self._engine.connect() as connection:
+            return await embedding_sql.read_page(connection, self.model, after, limit)
+
+    async def ready_count(self, kinds: tuple[str, ...]) -> int | None:
+        async with self._engine.connect() as connection:
+            return await embedding_sql.ready_count(connection, self.model, kinds)
+
     async def commit(
-        self, tx: Transaction, expected: int, through: int, records: tuple[EmbeddedMessage, ...]
+        self, tx: Transaction, expected: int, through: int, records: tuple[EmbeddedRecord, ...]
     ) -> bool:
         if not isinstance(tx, SqliteTransaction):
             raise TypeError("the SQLite embedding index requires a SQLite writer transaction")
         return await tx.commit_embedding_batch(self._engine, self.model, expected, through, records)
 
-    async def query_vector(self, project: str, vector: tuple[float, ...], limit: int) -> SearchPage:
+    async def query_vector(
+        self,
+        project: str,
+        vector: tuple[float, ...],
+        limit: int,
+        *,
+        kinds: tuple[str, ...] | None = None,
+    ) -> SearchPage:
         if project != self.project_id:
             raise LedgerError("forbidden", "search is restricted to the current project")
         if not 1 <= limit <= MAX_SEARCH_LIMIT:
@@ -169,7 +185,7 @@ class SqliteEmbeddingIndex:
                 raise LedgerError(
                     "unavailable", "SQLite vector search requires sqlite-vec"
                 ) from exc
-            return await embedding_sql.query_vectors(connection, self.model, query, limit)
+            return await embedding_sql.query_vectors(connection, self.model, query, limit, kinds)
 
 
 class SqliteStore:
