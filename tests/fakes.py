@@ -14,13 +14,17 @@ from pathlib import Path
 from typing import Any
 
 from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.core.actions import Action
 from plotroom.core.catalog import Catalog, build_catalog
 from plotroom.core.commands import Command, CommandError
 from plotroom.core.events import AppendResult, EventKind, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
+from plotroom.core.lanes import Lane
 from plotroom.core.ledger import Ledger
+from plotroom.core.next_items import Item, visible
 from plotroom.core.roles import WriterRule
 from plotroom.core.unit_of_work import UnitOfWork
+from plotroom.ports.work_items import WorkItem
 
 FIXTURES = Path(__file__).parent / "fixtures"
 START = datetime(2026, 11, 22, 12, 0, 0, tzinfo=UTC)
@@ -46,6 +50,11 @@ class _MemoryTransaction:
         self, events: list[StoredEvent], seq: int, on_allocate: Callable[[], None] | None = None
     ) -> None:
         self.events = events
+        self.items: dict[str, Item] = {}
+        self.changes: list[Item] = []
+        self.actions: dict[str, Action] = {}
+        self.lanes: dict[str, Lane] = {}
+        self.work_items: tuple[WorkItem, ...] = ()
         self.seq = seq
         self.expired = False
         self._on_allocate = on_allocate
@@ -62,6 +71,50 @@ class _MemoryTransaction:
                 return copy.deepcopy(event)
         return None
 
+    async def ready_work_items(self) -> tuple[WorkItem, ...]:
+        self._live()
+        return self.work_items
+
+    async def replace_work_items(self, items: tuple[WorkItem, ...]) -> None:
+        self._live()
+        self.work_items = items
+
+    async def claimed_work_items(self) -> set[str]:
+        self._live()
+        return {
+            ref
+            for lane in self.lanes.values()
+            if lane.state != "archived"
+            for ref in lane.work_items
+        }
+
+    async def find_lane(self, lane_id: str) -> Lane | None:
+        self._live()
+        return self.lanes.get(lane_id)
+
+    async def worker_lane(self, worker: str) -> Lane | None:
+        self._live()
+        return next(
+            (
+                lane
+                for lane in self.lanes.values()
+                if lane.worker == worker and lane.state != "archived"
+            ),
+            None,
+        )
+
+    async def save_lane(self, lane: Lane) -> None:
+        self._live()
+        self.lanes[lane.id] = lane
+
+    async def insert_action(self, action: Action) -> None:
+        self._live()
+        self.actions.setdefault(action.key, copy.deepcopy(action))
+
+    async def update_action(self, action: Action) -> None:
+        self._live()
+        self.actions[action.key] = copy.deepcopy(action)
+
     async def insert_event(self, event: StoredEvent) -> None:
         self._live()
         await asyncio.sleep(0)
@@ -71,6 +124,23 @@ class _MemoryTransaction:
         ):
             raise RuntimeError("duplicate event identity reached the store")
         self.events.append(copy.deepcopy(event))
+
+    async def find_item(self, item_id: str) -> Item | None:
+        self._live()
+        return copy.deepcopy(self.items.get(item_id))
+
+    async def active_item(self, key: str) -> Item | None:
+        self._live()
+        return copy.deepcopy(
+            next(
+                (i for i in self.items.values() if i.dedup_key == key and i.state != "closed"), None
+            )
+        )
+
+    async def save_item(self, item: Item) -> None:
+        self._live()
+        self.items[item.id] = copy.deepcopy(item)
+        self.changes.append(copy.deepcopy(item))
 
     async def allocate_seq(self) -> int:
         self._live()
@@ -88,6 +158,11 @@ class MemoryStore:
         self._project_id = project_id
         self._events: list[StoredEvent] = []
         self._seq = 0
+        self._items: dict[str, Item] = {}
+        self._changes: list[Item] = []
+        self._actions: dict[str, Action] = {}
+        self._lanes: dict[str, Lane] = {}
+        self._work_items: tuple[WorkItem, ...] = ()
         self._open = False
         self.commits = 0
         self.on_allocate: Callable[[], None] | None = None
@@ -107,13 +182,22 @@ class MemoryStore:
             raise RuntimeError("a writer transaction is already open on this store")
         self._open = True
         tx = _MemoryTransaction(copy.deepcopy(self._events), self._seq, self.on_allocate)
+        tx.items = copy.deepcopy(self._items)
+        tx.changes = self._changes.copy()
+        tx.actions = copy.deepcopy(self._actions)
+        tx.lanes = self._lanes.copy()
+        tx.work_items = self._work_items
         try:
             yield tx
         except BaseException:
             self.rollbacks += 1
             raise
         else:
-            self._events, self._seq = tx.events, tx.seq
+            self._events, self._seq, self._items = tx.events, tx.seq, tx.items
+            self._changes = tx.changes
+            self._actions = tx.actions
+            self._lanes = tx.lanes
+            self._work_items = tx.work_items
             self.commits += 1
         finally:
             tx.expired = True
@@ -124,6 +208,24 @@ class MemoryStore:
 
     async def events_after(self, seq: int, limit: int = 100) -> list[StoredEvent]:
         return [copy.deepcopy(e) for e in self._events if e.seq > seq][: max(limit, 0)]
+
+    async def read_board(self, role: str) -> tuple[int, list[Item], dict[str, int]]:
+        items = [
+            copy.deepcopy(i) for i in self._items.values() if i.state == "open" and visible(i, role)
+        ]
+        return self._seq, sorted(items, key=lambda i: (i.rank_class, i.opened_seq)), {}
+
+    async def ready_work_items(self) -> tuple[WorkItem, ...]:
+        return self._work_items
+
+    async def first_item_change(self, role: str, cursor: int) -> tuple[int, dict[str, Any] | None]:
+        found = next((i for i in self._changes if i.seq > cursor and visible(i, role)), None)
+        return self._seq, asdict(found) if found is not None else None
+
+    async def pending_action(self) -> Action | None:
+        return copy.deepcopy(
+            next((a for a in self._actions.values() if a.state == "pending"), None)
+        )
 
     async def close(self) -> None:
         self.closed = True

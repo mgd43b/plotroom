@@ -8,18 +8,26 @@ from __future__ import annotations
 
 import copy
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import replace
+from typing import Any
 
+from plotroom.core.actions import Action
 from plotroom.core.events import (
     AppendResult,
     Event,
     EventRegistry,
+    LedgerError,
     NewEvent,
     format_time,
     validate_fields,
 )
+from plotroom.core.lanes import Lane
+from plotroom.core.next_items import Item, ItemKind
+from plotroom.core.roles import role_family
 from plotroom.ports.clock import Clock
 from plotroom.ports.store import Transaction
+from plotroom.ports.work_items import WorkItem
 
 
 def new_event_id() -> str:
@@ -40,6 +48,7 @@ class UnitOfWork:
         clock: Clock,
         *,
         role: str,
+        items: Mapping[str, ItemKind] | None = None,
         append_role: str | None = None,
         id_factory: Callable[[], str] = new_event_id,
     ) -> None:
@@ -47,6 +56,7 @@ class UnitOfWork:
         self._events = events
         self._clock = clock
         self._role = role
+        self._items: Mapping[str, ItemKind] = items if items is not None else {}
         self._append_role = append_role if append_role is not None else role
         self._id_factory = id_factory
 
@@ -60,6 +70,88 @@ class UnitOfWork:
     async def allocate_seq(self) -> int:
         """The project's next ``seq``; rolled back with the transaction."""
         return await self._tx.allocate_seq()
+
+    async def ready_work_items(self) -> tuple[WorkItem, ...]:
+        return await self._tx.ready_work_items()
+
+    async def replace_work_items(self, items: tuple[WorkItem, ...]) -> None:
+        await self._tx.replace_work_items(items)
+
+    async def claimed_work_items(self) -> set[str]:
+        return await self._tx.claimed_work_items()
+
+    async def find_lane(self, lane_id: str) -> Lane | None:
+        return await self._tx.find_lane(lane_id)
+
+    async def worker_lane(self, worker: str) -> Lane | None:
+        return await self._tx.worker_lane(worker)
+
+    async def save_lane(self, lane: Lane) -> None:
+        await self._tx.save_lane(lane)
+
+    async def enqueue_action(
+        self, cause: Event, kind: str, payload: dict[str, Any], *, discriminator: str = ""
+    ) -> str:
+        """Queue an effect in its causing transaction. Reusing a key preserves the first effect."""
+        if not kind or ":" in kind:
+            raise LedgerError("invalid", "action kind must be nonempty and contain no colon")
+        key = f"{cause.id}:{kind}:{discriminator}"
+        await self._tx.insert_action(Action(key, kind, cause.id, payload))
+        return key
+
+    async def update_action(self, action: Action) -> None:
+        if self._append_role != "system":
+            raise LedgerError("forbidden", "only core may update a committed action")
+        await self._tx.update_action(action)
+
+    def item_kind(self, kind: str) -> ItemKind:
+        if kind not in self._items:
+            raise LedgerError("invalid", f"unknown next item kind {kind!r}")
+        return self._items[kind]
+
+    async def find_item(self, item_id: str) -> Item | None:
+        return await self._tx.find_item(item_id)
+
+    async def save_item(self, item: Item) -> None:
+        await self._tx.save_item(item)
+
+    async def raise_item(
+        self, kind: str, subject_ref: str, role: str, context: dict[str, Any]
+    ) -> Item:
+        """Open an occurrence or update the active one when its condition changes."""
+        registered = self.item_kind(kind)
+        role_family(role)
+        key = f"{kind}:{subject_ref}"
+        current = await self._tx.active_item(key)
+        if current is not None:
+            if not registered.state_backed or current.context == context:
+                return current
+            item = replace(current, state="open", context=context, seq=await self.allocate_seq())
+        else:
+            seq = await self.allocate_seq()
+            item = Item(
+                f"item_{seq}",
+                kind,
+                subject_ref,
+                key,
+                role,
+                registered.rank_class,
+                "open",
+                seq,
+                None,
+                seq,
+                context,
+                registered.suggested_actions,
+            )
+        await self.save_item(item)
+        return item
+
+    async def clear_item(self, kind: str, subject_ref: str) -> None:
+        if not self.item_kind(kind).state_backed:
+            raise LedgerError("invalid", f"{kind!r} is not state-backed")
+        if (item := await self._tx.active_item(f"{kind}:{subject_ref}")) is not None:
+            seq = await self.allocate_seq()
+            await self.save_item(replace(item, state="closed", closed_seq=seq, seq=seq))
 
     async def append(self, event: NewEvent) -> AppendResult:
         """Validate, deduplicate, number and store ``event``.

@@ -48,6 +48,7 @@ class Command:
     name: str
     args: tuple[FieldSpec, ...]
     handler: CommandHandler
+    record_if: Callable[[dict[str, Any]], bool] | None = None
 
     def __post_init__(self) -> None:
         if not _NAME.fullmatch(self.name):

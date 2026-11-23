@@ -35,6 +35,7 @@ class ProjectWriter:
         self._queue: asyncio.Queue[_Item | None] | None = None
         self._task: asyncio.Task[None] | None = None
         self._accepting = False
+        self.commit_signal = asyncio.Event()
 
     @property
     def running(self) -> bool:
@@ -125,6 +126,8 @@ class ProjectWriter:
                         future.set_exception(_unavailable())
                     raise
                 else:
+                    committed, self.commit_signal = self.commit_signal, asyncio.Event()
+                    committed.set()
                     if not future.done():
                         future.set_result(result)
         finally:

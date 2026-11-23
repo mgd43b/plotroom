@@ -1,8 +1,10 @@
-from plotroom.core.snapshot import render_empty_snapshot, snapshot_result
+import json
+
+from plotroom.core.snapshot import estimate_tokens, render_snapshot
 
 
 def test_empty_board() -> None:
-    board = render_empty_snapshot("demo")
+    board = render_snapshot("demo", 0, [], {}, 2000)
     assert board == {
         "project": "demo",
         "cursor": 0,
@@ -13,10 +15,6 @@ def test_empty_board() -> None:
     }
 
 
-def test_snapshot_is_scoped_to_the_authenticated_project() -> None:
-    assert snapshot_result("demo", None) == {"ok": True, "data": render_empty_snapshot("demo")}
-
-
-def test_unavailable_wins() -> None:
-    result = snapshot_result("demo", "SQLite too old")
-    assert result == {"ok": False, "error": {"code": "unavailable", "message": "SQLite too old"}}
+def test_estimator_counts_utf8_bytes() -> None:
+    assert estimate_tokens("🧪🧪a") == 3
+    assert estimate_tokens(json.dumps({})) == 1

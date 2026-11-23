@@ -69,13 +69,13 @@ async def test_snapshot_through_the_stdio_proxy_is_the_same_board(
     assert tool_json(result) == EMPTY_BOARD
 
 
-async def test_only_snapshot_is_registered(
+async def test_next_item_tools_are_registered(
     server: tuple[Child, str], server_token: IssuedToken
 ) -> None:
     _, url = server
     async with authenticated_client(url, server_token.bearer) as client:
         tools = await client.list_tools()
-    assert [tool.name for tool in tools.tools] == ["snapshot"]
+    assert {tool.name for tool in tools.tools} >= {"snapshot", "next", "ack"}
 
 
 async def test_the_published_port_is_the_serving_port_and_answers(
@@ -185,7 +185,7 @@ def test_a_second_serve_on_the_same_directory_exits_with_the_lock_error(
     try:
         entry = second.wait_for_log("data directory is locked")
         assert "another plotroom serve owns" in entry["reason"]
-        assert second.process.wait(timeout=60) == EXIT_LOCKED
+        assert second.process.wait(timeout=60) == EXIT_LOCKED == 4
     finally:
         second.stop()
     assert first.process.poll() is None, "the first server must keep running"
