@@ -19,6 +19,7 @@ MAIN_CI_WINDOW = 30
 THREADS = "review_threads"
 FILES = "pull_files"
 LABELS = "pull_labels"
+PULL_TEXT = "pull_text"
 ISSUES = "issues"
 COMMENTS = "issue_comments"
 COMMENT_BACKFILL = "issue_comments_backfill"

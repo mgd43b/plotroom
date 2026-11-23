@@ -529,6 +529,15 @@ def _merge_gate_policy(label: str, settings: dict[str, Any], poll_seconds: int) 
         for login in cast("list[Any]", raw_logins)
     ):
         raise ConfigError(f"{label}.authorized_label_logins must be a list of GitHub logins")
+    controller_merges = settings.get("controller_merges", False)
+    if type(controller_merges) is not bool:
+        raise ConfigError(f"{label}.controller_merges must be a Boolean")
+    merge_method = settings.get("merge_method", "merge")
+    if merge_method not in ("merge", "squash", "rebase"):
+        raise ConfigError(f"{label}.merge_method must be merge, squash, or rebase")
+    skip_label = (
+        _string(f"{label}.skip_label", settings["skip_label"]) if "skip_label" in settings else None
+    )
     try:
         return GatePolicy(
             minimum,
@@ -538,6 +547,9 @@ def _merge_gate_policy(label: str, settings: dict[str, Any], poll_seconds: int) 
             ci_workflow=workflow,
             fix_label=fix_label,
             authorized_label_logins=tuple(login.lower() for login in cast("list[str]", raw_logins)),
+            skip_label=skip_label,
+            merge_method=merge_method,
+            controller_merges=controller_merges,
         )
     except OverflowError:
         raise ConfigError(f"{label}.poll_seconds is too large for the merge gate") from None

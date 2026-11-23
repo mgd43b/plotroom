@@ -25,7 +25,8 @@ from plotroom.core.events import (
 )
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
 from plotroom.core.github_projection import GitHubResource
-from plotroom.core.merge_gate import GatePolicy, GateVerdict, evaluate_gate
+from plotroom.core.merge_controller import ACTIVE_MERGE_ITEMS, reconcile_merge_controller
+from plotroom.core.merge_gate import GatePolicy, GateSnapshot, GateVerdict, evaluate_gate
 from plotroom.core.next_items import Item
 from plotroom.core.roles import OwnershipView, role_family
 from plotroom.core.unit_of_work import UnitOfWork
@@ -67,6 +68,10 @@ class Ledger:
         github_tree_path: str | None = None,
         session_workers: Mapping[str, str] | None = None,
         drain_enabled: bool = False,
+        live_merge_controller: bool = False,
+        merge_clerk: Callable[[], Awaitable[bool]] | None = None,
+        fixture_merge_enabled: bool = False,
+        fixture_branch_updates: bool = False,
     ) -> None:
         self._store = store
         self._catalog = catalog
@@ -77,6 +82,13 @@ class Ledger:
         self.github_repository = github_repository
         self._merge_gate_policy = merge_gate_policy or GatePolicy()
         self._github_tree_path = github_tree_path
+        self._live_merge_controller = live_merge_controller
+        self._merge_clerk = merge_clerk
+        self.confirm_merge_gate: Callable[[GateSnapshot], Awaitable[GateSnapshot | None]] | None = (
+            None
+        )
+        self._fixture_merge_enabled = fixture_merge_enabled
+        self._fixture_branch_updates = fixture_branch_updates
         self.github_error = "waiting for the first GitHub poll" if github_repository else None
         self.session_workers = dict(session_workers or {})
         self._drain_enabled = drain_enabled
@@ -94,10 +106,13 @@ class Ledger:
         return await self._store.pending_action()
 
     async def pending_actions(
-        self, *, after: int, skip_branch_updates: bool
+        self, *, after: int, skip_branch_updates: bool, skip_controller_merges: bool = False
     ) -> tuple[QueuedAction, ...]:
         return await self._store.pending_actions(
-            after=after, limit=ACTION_PAGE_SIZE, skip_branch_updates=skip_branch_updates
+            after=after,
+            limit=ACTION_PAGE_SIZE,
+            skip_branch_updates=skip_branch_updates,
+            skip_controller_merges=skip_controller_merges,
         )
 
     @property
@@ -107,6 +122,16 @@ class Ledger:
     def start(self) -> None:
         self._stopping.clear()
         self._writer.start()
+
+    async def clean_disabled_merge_items(self) -> None:
+        if not self._live_merge_controller:
+
+            async def clear(uow: UnitOfWork) -> None:
+                for kind in ACTIVE_MERGE_ITEMS:
+                    for subject in sorted(await uow.active_item_subjects(kind)):
+                        await uow.clear_item(kind, subject)
+
+            await self.run("system", clear)
 
     async def initialize_overlaps(self) -> None:
         """Materialize conflicts from facts already stored before the daemon opened."""
@@ -125,6 +150,39 @@ class Ledger:
         self.stop_waiting()
         await self._writer.stop()
 
+    def gate_availability(self, snapshot: GateSnapshot) -> GateSnapshot:
+        return replace(snapshot, github_unavailable=self.github_error is not None)
+
+    async def set_github_error(self, error: str | None) -> None:
+        if self.github_error != error:
+            self.github_error = error
+            await self.refresh_merge_controller()
+
+    async def refresh_merge_controller(self) -> None:
+        if self._live_merge_controller:
+
+            async def refresh(uow: UnitOfWork) -> None:
+                uow.all_merge_pulls = True
+
+            await self.run("system", refresh)
+
+    async def _refresh_merge_controller(self, uow: UnitOfWork) -> None:
+        if (
+            self._live_merge_controller
+            and self.github_repository is not None
+            and (uow.all_merge_pulls or uow.merge_pull_numbers or uow.merge_check_heads)
+        ):
+            clerk = await self._merge_clerk() if self._merge_clerk is not None else False
+            await reconcile_merge_controller(
+                uow,
+                self.github_repository,
+                self.merge_gate_policy,
+                github_unavailable=self.github_error is not None,
+                clerk=clerk,
+                stage_fixture_merges=self._fixture_merge_enabled,
+                branch_updates=self._fixture_branch_updates,
+            )
+
     async def _evaluate_triggers(self, tx: Transaction) -> None:
         if (leaves := self._catalog.trigger_leaves) is not None:
             uow = UnitOfWork(
@@ -142,6 +200,7 @@ class Ledger:
             )
             result = await work(uow)
             await uow.refresh_overlaps(self.github_repository, self._github_tree_path)
+            await self._refresh_merge_controller(uow)
             await self._evaluate_triggers(tx)
             return result
 
@@ -237,6 +296,7 @@ class Ledger:
                         },
                     )
                 )
+            await self._refresh_merge_controller(uow)
             await self._evaluate_triggers(tx)
             return CommandResult(result, False)
 
@@ -363,17 +423,65 @@ class Ledger:
             raise LedgerError("forbidden", "only the orchestrator may list triggers")
         return [trigger.render() for trigger in await self._store.list_triggers(lane)]
 
-    async def merge_gate(self, role: str, pr: int) -> GateVerdict:
+    async def merge_gate(
+        self,
+        role: str,
+        pr: int,
+        *,
+        expected_head_sha: str | None = None,
+        expected_main_sha: str | None = None,
+    ) -> GateVerdict:
         if _check_role(role) not in {"clerk", "orchestrator"}:
             raise LedgerError(
                 "forbidden", "only the clerk and orchestrator may query the merge gate"
             )
         if not 1 <= pr <= 2**63 - 1:
             raise LedgerError("invalid", "pr must be a positive SQLite integer")
-        snapshot = await self._store.read_merge_gate(self.github_repository, pr)
-        if self.github_error is not None:
-            snapshot = replace(snapshot, github_unavailable=True)
-        return evaluate_gate(snapshot, self._merge_gate_policy, self._clock.now())
+
+        async def current() -> GateSnapshot:
+            return self.gate_availability(
+                await self._store.read_merge_gate(self.github_repository, pr)
+            )
+
+        def judge(snapshot: GateSnapshot) -> GateVerdict:
+            return evaluate_gate(
+                snapshot,
+                self._merge_gate_policy,
+                self._clock.now(),
+                expected_head_sha=expected_head_sha,
+                expected_main_sha=expected_main_sha,
+            )
+
+        snapshot = await current()
+        verdict = judge(snapshot)
+        if verdict.verdict != "MERGE" or (expected_head_sha is None and expected_main_sha is None):
+            return verdict
+        confirm = self.confirm_merge_gate
+        fresh = await confirm(snapshot) if confirm is not None else None
+        if fresh is None:
+            return judge(replace(snapshot, github_unavailable=True))
+
+        # Local policy (freeze, branch ownership and availability) can change while reading.
+        latest = await current()
+        latest_verdict = judge(latest)
+        if latest_verdict.verdict != "MERGE":
+            return latest_verdict
+        if latest.pull != snapshot.pull and (
+            latest.pull is None
+            or snapshot.pull is None
+            or replace(latest.pull, as_of=snapshot.pull.as_of) != snapshot.pull
+        ):
+            return judge(replace(latest, github_unavailable=True))
+        return judge(
+            replace(
+                fresh,
+                freeze_reason=latest.freeze_reason,
+                lane=latest.lane,
+                earlier_pull=latest.earlier_pull,
+                ambiguous_lane=latest.ambiguous_lane,
+                github_unavailable=latest.github_unavailable,
+            )
+        )
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return await self._store.pull_request(repository, number)

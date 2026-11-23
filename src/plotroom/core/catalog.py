@@ -11,6 +11,8 @@ from plotroom.core.branch_updates import (
     BRANCH_UPDATE_CONFLICT,
     BRANCH_UPDATE_FIELDS,
     BRANCH_UPDATE_STAGED,
+    BRANCH_UPDATED,
+    BRANCH_UPDATED_FIELDS,
 )
 from plotroom.core.claims import CLAIM_OVERLAP, PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, claim, release
 from plotroom.core.commands import Command, CommandRegistry
@@ -34,6 +36,7 @@ from plotroom.core.lanes import (
     start_lane,
     update_lane,
 )
+from plotroom.core.merge_controller import MERGE_EVENTS, MERGE_ITEMS
 from plotroom.core.merge_flakes import (
     FAILURE_FIELDS,
     FLAKE_CANDIDATE,
@@ -108,6 +111,11 @@ def build_catalog(
         ItemKind(BRANCH_UPDATE_CONFLICT, 10, False, ("Resolve the branch update conflict",))
     )
     events.register(EventKind(BRANCH_UPDATE_STAGED, BRANCH_UPDATE_FIELDS, frozenset({"system"})))
+    events.register(EventKind(BRANCH_UPDATED, BRANCH_UPDATED_FIELDS, frozenset({"system"})))
+    for kind, fields in MERGE_EVENTS.items():
+        events.register(EventKind(kind, fields, frozenset({"system"})))
+    for item_kind in MERGE_ITEMS:
+        catalog.register_item(item_kind)
     events.register(EventKind("core.tick", (), frozenset({"system"})))
     events.register(EventKind(FLAKE_EVENT, FLAKE_FIELDS, frozenset({"system"})))
     events.register(EventKind(MAIN_FLAKE_EVENT, FAILURE_FIELDS, frozenset({"system"})))
@@ -167,6 +175,7 @@ def build_catalog(
                 FieldSpec("worker", "str"),
                 FieldSpec("branch", "str"),
                 FieldSpec("work_items", "array"),
+                FieldSpec("branch_pattern", "str", required=False),
             ),
             partial(start_lane, workers=workers),
         ),

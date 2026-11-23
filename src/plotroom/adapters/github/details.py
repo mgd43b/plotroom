@@ -1,7 +1,9 @@
 """Poll GitHub's read projections on the project's existing GitHub cadence."""
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import datetime
 from functools import partial
 from typing import Any
@@ -16,9 +18,14 @@ from plotroom.adapters.github.issue_details import (
     fetch_issue_tree,
     fetch_issues,
 )
-from plotroom.adapters.github.pr_details import fetch_files, fetch_labels, fetch_threads
+from plotroom.adapters.github.pr_details import (
+    fetch_files,
+    fetch_labels,
+    fetch_pull_text,
+    fetch_threads,
+)
 from plotroom.adapters.github.pull_comparison import fetch_pull_comparison
-from plotroom.adapters.github.read import GitHubReadClient
+from plotroom.adapters.github.read import GitHubReadClient, obj, string
 from plotroom.core.events import format_time
 from plotroom.core.github import (
     DETAILS,
@@ -39,6 +46,7 @@ from plotroom.core.github_projection import (
     MAIN,
     MAIN_CI,
     MAIN_CI_WINDOW,
+    PULL_TEXT,
     THREADS,
     GitHubRecord,
     GitHubResource,
@@ -55,6 +63,7 @@ from plotroom.core.merge_flakes import (
     record_pull_flakes,
     record_same_head,
 )
+from plotroom.core.merge_gate import GateSnapshot
 from plotroom.core.merge_overlap import PULL_COMPARISON, bind_overlap_labels
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.ports.clock import Clock
@@ -86,6 +95,72 @@ class GitHubDetailPoller:
         self.on_merge_evidence = on_merge_evidence
         self._comparison_cursor = 0
 
+    async def confirm_gate(self, snapshot: GateSnapshot) -> GateSnapshot | None:
+        """Read authoritative evidence on demand for a pinned clerk recheck."""
+        try:
+            async with (
+                asyncio.timeout(20),
+                httpx.AsyncClient(timeout=15, follow_redirects=False, trust_env=False) as client,
+            ):
+                return await self.read_gate_snapshot(client, snapshot)
+        except GitHubUnavailable, httpx.RequestError, TimeoutError, ValueError, KeyError, TypeError:
+            return None
+
+    async def read_gate_snapshot(
+        self, client: httpx.AsyncClient, snapshot: GateSnapshot
+    ) -> GateSnapshot | None:
+        pull = snapshot.pull
+        workflow = self.ci_workflow
+        if pull is None or workflow is None or await self.cooling_down():
+            return None
+        api, token = self.api, await self.credential.token()
+        observed_at = format_time(self.clock.now())
+        main_ci = await fetch_main_ci(api, client, token, workflow, snapshot.main_ci, None)
+        branch = main_ci.attributes["branch"]
+        head = main_ci.attributes["head_sha"]
+        main = GitHubResource(
+            (),
+            attributes={"branch": branch, "head_sha": head},
+            as_of=observed_at,
+        )
+        checks = await fetch_checks(api, client, token, pull.head_sha, snapshot.checks)
+        labels = await fetch_labels(api, client, token, pull)
+        threads = await fetch_threads(api, client, token, pull)
+        text = await fetch_pull_text(api, client, token, pull)
+        comparison = await fetch_pull_comparison(
+            api,
+            client,
+            token,
+            pull,
+            branch,
+            head,
+            snapshot.comparison,
+        )
+        current = obj(await api.get(client, token, f"/pulls/{pull.number}"))
+        draft = current["draft"]
+        identity = obj(current["head"])
+        if (
+            type(draft) is not bool
+            or current["state"] != "open"
+            or identity["sha"] != pull.head_sha
+            or identity["ref"] != pull.branch
+            or string(obj(identity["repo"])["full_name"]).lower() != pull.head_repository
+            or format_time(datetime.fromisoformat(string(current["updated_at"]))) != pull.updated_at
+        ):
+            return None
+        return replace(
+            snapshot,
+            pull=replace(pull, draft=draft, as_of=observed_at),
+            pull_cursor=None,
+            checks=replace(checks, as_of=observed_at),
+            main_ci=replace(main_ci, as_of=observed_at),
+            main=main,
+            threads=replace(threads, as_of=observed_at),
+            labels=replace(bind_overlap_labels(labels, snapshot.labels, pull), as_of=observed_at),
+            pull_text=replace(text, as_of=observed_at),
+            comparison=replace(comparison, as_of=observed_at),
+        )
+
     async def cooling_down(self) -> bool:
         repository = self.api.repository
         retry = await self.ledger.fetch_retry(repository, DETAILS)
@@ -94,7 +169,7 @@ class GitHubDetailPoller:
         return any(row and datetime.fromisoformat(row.until) > now for row in (retry, pr_retry))
 
     async def record_rate_limit(self, exc: GitHubRateLimited) -> None:
-        self.ledger.github_error = "GitHub rate limit reached"
+        await self.ledger.set_github_error("GitHub rate limit reached")
         repository = self.api.repository
         retry = await self.ledger.fetch_retry(repository, DETAILS)
         backoff = retry.next_backoff if retry else 60
@@ -231,6 +306,14 @@ class GitHubDetailPoller:
             watermark = f"{pull.updated_at}:{pull.version}" if complete else ""
             await self._record_pull_attempt(pull.number, watermark)
         await self._poll_main_flakes(client, token, history, checks)
+        if self.ci_workflow is not None:
+            for pull in pulls:
+                await self._refresh(
+                    PULL_TEXT,
+                    str(pull.number),
+                    lambda _, pull=pull: fetch_pull_text(api, client, token, pull),
+                    pull=pull,
+                )
         if self.on_merge_evidence is not None:
             for pull in pulls:
                 await self.on_merge_evidence(pull.number)

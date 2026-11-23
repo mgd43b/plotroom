@@ -1,4 +1,4 @@
-"""Read review resolution, changed files and label history for a pull request."""
+"""Read review resolution, changed files, text and label history for a pull request."""
 
 from datetime import datetime
 from typing import Any
@@ -8,6 +8,7 @@ import httpx
 from plotroom.adapters.github.read import GitHubReadClient, Row, number, obj, string
 from plotroom.core.github import PullRequest
 from plotroom.core.github_projection import GitHubRecord, GitHubResource
+from plotroom.core.merge_overlap import full_sha
 
 
 async def fetch_threads(
@@ -82,6 +83,44 @@ async def fetch_files(
     )
 
 
+async def fetch_pull_text(
+    api: GitHubReadClient, client: httpx.AsyncClient, token: str, pr: PullRequest
+) -> GitHubResource:
+    path = f"/pulls/{pr.number}"
+
+    async def confirm_pull() -> tuple[str, int]:
+        current = obj(await api.get(client, token, path))
+        if string(obj(current["head"])["sha"]) != pr.head_sha or datetime.fromisoformat(
+            string(current["updated_at"])
+        ) != datetime.fromisoformat(pr.updated_at):
+            raise ValueError("PR changed during text poll")
+        body = current["body"]
+        return "" if body is None else string(body), number(current["commits"])
+
+    body, expected = await confirm_pull()
+    commits: dict[str, str] = {}
+    async for row in api.pages(client, token, f"{path}/commits", verify_terminal=True):
+        sha = string(row["sha"])
+        if not full_sha(sha) or sha in commits or len(commits) >= expected:
+            raise ValueError("invalid PR commit list")
+        commits[sha] = string(obj(row["commit"])["message"])
+    if (body, expected) != await confirm_pull():
+        raise ValueError("PR body or commit count moved during text poll")
+    if len(commits) != expected or next(reversed(commits), None) != pr.head_sha:
+        raise ValueError("incomplete PR commit list")
+    return GitHubResource(
+        (),
+        attributes={
+            "head_sha": pr.head_sha,
+            "pull_version": pr.version,
+            "pull_updated_at": pr.updated_at,
+            "body": body,
+            "commit_count": expected,
+            "commit_messages": list(commits.values()),
+        },
+    )
+
+
 async def fetch_labels(
     api: GitHubReadClient, client: httpx.AsyncClient, token: str, pr: PullRequest
 ) -> GitHubResource:
@@ -128,6 +167,12 @@ async def fetch_labels(
             actors.pop(name, None)
             provenance.pop(name, None)
     if any(label in provenance for label in active):
+        latest = [
+            string(row["name"])
+            async for row in api.pages(client, token, f"/issues/{pr.number}/labels")
+        ]
+        if sorted(active) != sorted(latest):
+            raise ValueError("PR labels changed during label poll")
         current = obj(await api.get(client, token, f"/pulls/{pr.number}"))
         if string(obj(current["head"])["sha"]) != pr.head_sha or datetime.fromisoformat(
             string(current["updated_at"])

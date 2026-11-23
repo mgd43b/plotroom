@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -132,6 +133,16 @@ def _pull(value: Any) -> ObservedPull:
         cast("dict[str, Any]", head_repo).get("full_name") if isinstance(head_repo, dict) else None
     )
     head_repository = full_name.lower() if isinstance(full_name, str) and full_name else None
+    draft = row.get("draft")
+    if draft is not None and type(draft) is not bool:
+        raise ValueError("invalid pull request draft state")
+    merge_sha = row.get("merge_commit_sha")
+    if (
+        merged_at is not None
+        and merge_sha is not None
+        and (not isinstance(merge_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", merge_sha))
+    ):
+        raise ValueError("invalid merge commit SHA")
     return ObservedPull(
         number,
         branch,
@@ -140,6 +151,8 @@ def _pull(value: Any) -> ObservedPull:
         "merged" if merged_at is not None else state,
         normalized,
         body or "",
+        draft,
+        merge_sha if merged_at is not None else None,
     )
 
 
@@ -230,7 +243,7 @@ class GitHubPoller:
             default=None,
         )
         if self._retry_at is not None and self._clock.now() < self._retry_at:
-            self._ledger.github_error = "GitHub rate limit reached"
+            await self._ledger.set_github_error("GitHub rate limit reached")
             return False
         baseline = await self._ledger.fetch_cursor(self._repo, PULL_REQUESTS)
         # Inclusive overlap tolerates equal timestamps and rows moving between pages.
@@ -252,14 +265,14 @@ class GitHubPoller:
             reason = str(exc) if isinstance(exc, GitHubUnavailable) else "GitHub request failed"
             if self._ledger.github_error != reason:
                 log.warning(reason, extra={"project": self._ledger.project_id})
-            self._ledger.github_error = reason
+            await self._ledger.set_github_error(reason)
             return False
         as_of = format_time(self._clock.now())
         committed = await self._ledger.run(
             "system", lambda uow: apply_pull_poll(uow, self._repo, baseline, pulls, as_of)
         )
         if committed:
-            self._ledger.github_error = None
+            await self._ledger.set_github_error(None)
             self._retry_at = None
         return committed
 

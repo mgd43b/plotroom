@@ -212,14 +212,23 @@ def build_app(
 
     @server.tool()
     async def merge_gate(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context[Any, Request], pr: int
+        ctx: Context[Any, Request],
+        pr: int,
+        expected_head_sha: str | None = None,
+        expected_main_sha: str | None = None,
     ) -> dict[str, Any]:
         """Read the current merge readiness, checked head, and observation watermark for a PR."""
         try:
             caller = board_access(ctx)
             if caller.ledger is None:
                 raise LedgerError("unavailable", "the project ledger is unavailable")
-            return ok(asdict(await caller.ledger.merge_gate(caller.identity.role, pr)))
+            verdict = await caller.ledger.merge_gate(
+                caller.identity.role,
+                pr,
+                expected_head_sha=expected_head_sha,
+                expected_main_sha=expected_main_sha,
+            )
+            return ok(asdict(verdict))
         except LedgerError as exc:
             return err(exc.code, exc.message)
 
@@ -357,13 +366,17 @@ def build_app(
         branch: str,
         work_items: list[str],
         request_id: str,
+        branch_pattern: str | None = None,
     ) -> dict[str, Any]:
-        """Start a lane for a configured worker."""
+        """Start a lane with an optional case-sensitive branch glob for merge checks."""
+        args = {"lane": lane, "worker": worker, "branch": branch, "work_items": work_items}
+        if branch_pattern is not None:
+            args["branch_pattern"] = branch_pattern
         return await execute_command(
             ctx,
             "lane_start",
             request_id,
-            {"lane": lane, "worker": worker, "branch": branch, "work_items": work_items},
+            args,
         )
 
     @server.tool()
