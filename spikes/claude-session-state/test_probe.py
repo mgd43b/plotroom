@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import probe
 
@@ -13,7 +14,11 @@ CLI_ID = "cli-session-0001"
 
 
 def user(turn: int, origin: dict | None, turn_origin: str) -> dict:
-    row = {"type": "user", "turnPosition": {"promptIndex": 0, "turnIndex": turn}, "turnOrigin": turn_origin}
+    row = {
+        "type": "user",
+        "turnPosition": {"promptIndex": 0, "turnIndex": turn},
+        "turnOrigin": turn_origin,
+    }
     if origin is not None:
         row["origin"] = origin
     return row
@@ -52,7 +57,9 @@ class ProbeTest(unittest.TestCase):
         os.makedirs(os.path.join(home, "projects", "some-project"))
         os.makedirs(os.path.join(app, "claude-code-sessions", "acct", "org"))
         self.home, self.app = home, app
-        self.write(os.path.join(home, "sessions", "1.json"), {"sessionId": CLI_ID, "status": "busy"})
+        self.write(
+            os.path.join(home, "sessions", "1.json"), {"sessionId": CLI_ID, "status": "busy"}
+        )
         # A key file beside the registry must never be opened or parsed.
         self.write_raw(os.path.join(home, "sessions", "1.abc.key"), "not json, not read")
         self.write(
@@ -67,7 +74,8 @@ class ProbeTest(unittest.TestCase):
         )
         self.write_raw(
             os.path.join(home, "projects", "some-project", f"{CLI_ID}.jsonl"),
-            "\n".join(json.dumps(r) for r in ROWS) + '\n{"type": "assistant", "mess',  # cut-off last row
+            "\n".join(json.dumps(r) for r in ROWS)
+            + '\n{"type": "assistant", "mess',  # cut-off last row
         )
 
     def write(self, path: str, data: dict) -> None:
@@ -99,7 +107,7 @@ class ProbeTest(unittest.TestCase):
         message = [e for e in out if e["kind"] == "claude.session_message"]
         self.assertEqual(len(message), 1)
         self.assertEqual(message[0]["body"], "hello there")
-        report = [e for e in out if e["kind"] == "claude.turn_report" and e["turn"] == 2][0]
+        report = next(e for e in out if e["kind"] == "claude.turn_report" and e["turn"] == 2)
         self.assertEqual(report["report"], "the recap")
         self.assertTrue(report["has_recap"])
 
@@ -128,6 +136,37 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(event["turn_edge_at_ms"], 1700000000000)
         self.assertEqual(event["report_len"], 40)
         self.assertIsNone(probe.app_state_event("s", {"lastTurnReport": "x"}, include_text=False))
+
+    def test_interrupted_closed_turn_says_it_has_no_end_turn(self) -> None:
+        rows = probe.read_rows(probe.transcript_path(self.home, CLI_ID) or "")
+        reports = [
+            e for e in probe.events("s", rows, "idle", False) if e["kind"] == "claude.turn_report"
+        ]
+        self.assertEqual([e["has_end_turn"] for e in reports], [True, True, False])
+
+    def test_unknown_values_never_reach_default_output(self) -> None:
+        self.write(
+            os.path.join(self.home, "sessions", "2.json"),
+            {"sessionId": "other-cli-id", "status": "SECRET-VALUE"},
+        )
+        self.write(os.path.join(self.home, "sessions", "3.json"), {"sessionId": "no-status-cli-id"})
+        text = json.dumps(probe.survey(self.home, self.app), sort_keys=True)
+        self.assertNotIn("SECRET-VALUE", text)
+        self.assertEqual(probe.survey(self.home, self.app)["registry_statuses"]["other"], 2)
+
+    def test_key_files_are_never_opened(self) -> None:
+        real_open = open
+        opened: list[str] = []
+
+        def spy(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+            opened.append(str(path))
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch("builtins.open", spy):
+            probe.registry(self.home)
+            probe.survey(self.home, self.app)
+        self.assertTrue(opened)
+        self.assertFalse([p for p in opened if p.endswith(".key")])
 
     def test_missing_files_are_not_errors(self) -> None:
         empty = os.path.join(self.tmp.name, "nothing")
