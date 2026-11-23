@@ -22,7 +22,7 @@ from plotroom.core.github_projection import (
 from plotroom.core.reports import DEPLOY_STATUS, validate_deploy_environment, validate_report_sha
 from plotroom.core.roles import role_family
 from plotroom.core.run_reports import RUN_ID, validate_identity
-from plotroom.core.trigger_actions import validate_action
+from plotroom.core.trigger_actions import NOTIFY, validate_action
 
 if TYPE_CHECKING:
     from plotroom.core.github import PullRequest
@@ -54,9 +54,11 @@ class Trigger:
     mode: TriggerMode = "once"
     was_true: bool = False
     event_floors: dict[str, int] = field(default_factory=dict[str, int])
+    import_note: str | None = None
+    notify_on_fire: bool = False
 
     def render(self) -> dict[str, Any]:
-        return {
+        result = {
             "id": self.id,
             "lane": self.lane,
             "repository": self.repository,
@@ -69,6 +71,9 @@ class Trigger:
             "fired_seq": self.fired_seq,
             "action_key": self.action_key,
         }
+        if self.import_note is not None:
+            result["import_note"] = self.import_note
+        return result
 
 
 @dataclass
@@ -201,6 +206,8 @@ class LeafRegistry:
             NewEvent("core", TRIGGER_FIRED, uid, {"trigger_id": trigger.id}, lane_id=trigger.lane)
         )
         key = await uow.enqueue_action(fired.event, trigger.action_kind, trigger.action_payload)
+        if trigger.notify_on_fire:
+            await uow.enqueue_action(fired.event, NOTIFY, {"text": trigger.action_payload["text"]})
         return replace(
             trigger,
             state="fired" if trigger.mode == "once" else "open",
@@ -444,6 +451,9 @@ async def create_trigger(
     registry: LeafRegistry,
     repository: str | None,
     delivery_routes: Mapping[str, DeliveryRoute],
+    imported_id: str | None = None,
+    import_note: str | None = None,
+    notify_on_fire: bool = False,
 ) -> dict[str, Any]:
     predicate: dict[str, Any] = args["predicate"]
     registry.validate(predicate, repository=repository)
@@ -459,17 +469,24 @@ async def create_trigger(
     mode = args.get("mode", "once")
     if mode not in ("once", "every"):
         raise LedgerError("invalid", "mode must be once or every")
+    imported_fired = args.get("imported_fired", False)
+    if imported_fired and mode != "once":
+        raise LedgerError("invalid", "only once triggers can be imported as fired")
+    seq = await uow.allocate_seq()
     trigger = Trigger(
-        f"trigger_{uuid.uuid7()}",
+        imported_id or f"trigger_{uuid.uuid7()}",
         lane,
         repository,
         predicate,
         kind,
         payload,
-        "open",
+        "fired" if imported_fired else "open",
         {},
-        await uow.allocate_seq(),
+        seq,
+        fired_seq=seq if imported_fired else None,
         mode=mode,
+        import_note=import_note,
+        notify_on_fire=notify_on_fire,
     )
     await uow.save_trigger(trigger)
     return {"id": trigger.id}

@@ -55,6 +55,8 @@ TOOL_NAMES = {
     "lane_ready",
     "lane_archive",
     "checklist_done",
+    "checklist_import",
+    "clerk_import",
     "deploy_report",
     "run_report",
     "claim",
@@ -83,6 +85,7 @@ WRITER_TOOLS = {
     "lane_ready",
     "lane_archive",
     "checklist_done",
+    "checklist_import",
     "deploy_report",
     "run_report",
     "trigger",
@@ -500,6 +503,13 @@ async def test_every_registered_tool(endpoint: SearchEndpoint, transport: str, e
         assert (await call("ack", item=item["id"]))["state"] == "snoozed"
         assert (await call("lane_ready", lane="lane", pr=1, head_sha="a" * 40))["state"] == "ready"
         await call("checklist_done", lane="lane", step="fixture", error="conflict")
+        local_only = "forbidden" if transport == "http" else None
+        rows = [{"step": "Verify artifact", "owner": "fixture", "ref": "fixture:ledger"}]
+        checklist = await call("checklist_import", lane="lane", rows=rows, error=local_only)
+        imported = await call("clerk_import", triggers=[], pulls=[], skips=[], error=local_only)
+        if transport == "stdio":
+            assert checklist["steps"] == [{**rows[0], "completion_ref": None}]
+            assert imported == {"triggers": {}, "lanes": {}, "items": {}}
         assert (await call("claim", lane="lane", globs=["src/**"], reason="fixture"))["changed"]
         assert (await call("claims", lane="lane"))["claims"][0]["reason"] == "fixture"
         assert (await call("overlaps", lane="lane"))["items"] == []
@@ -567,6 +577,27 @@ async def test_every_registered_tool(endpoint: SearchEndpoint, transport: str, e
         )
         [firing] = [row for row in (await call("triggers"))["triggers"] if row["id"] == fired["id"]]
         assert firing["state"] == "fired"
+        prior = await call(
+            "trigger",
+            predicate={"pr_merged": {"number": 2}},
+            action={"notify_orchestrator": {"text": "historical fixture"}},
+            imported_fired=True,
+            error=local_only,
+        )
+        if transport == "stdio":
+            [historical] = [
+                row for row in (await call("triggers"))["triggers"] if row["id"] == prior["id"]
+            ]
+            assert historical["state"] == "fired"
+            assert historical["action_key"] is None
+            await call(
+                "trigger",
+                predicate={"pr_merged": {"number": 2}},
+                action={"notify_orchestrator": {"text": "historical fixture"}},
+                imported_fired=True,
+                mode="every",
+                error="invalid",
+            )
         assert called | {"outbox_lease", "outbox_done"} == names
 
     async with (
@@ -610,6 +641,8 @@ async def test_every_registered_tool(endpoint: SearchEndpoint, transport: str, e
             "lane_ready": {"lane": "fixture", "pr": 1, "head_sha": "a" * 40},
             "lane_archive": {"lane": "fixture"},
             "checklist_done": {"lane": "fixture", "step": "fixture"},
+            "checklist_import": {"lane": "fixture", "rows": []},
+            "clerk_import": {"triggers": [], "pulls": [], "skips": []},
             "ingest": {"kind": "claude.session_message", "session_id": "fixture", "body": "test"},
             "trigger": {
                 "predicate": {"pr_merged": {"number": 1}},

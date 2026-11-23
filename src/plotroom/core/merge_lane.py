@@ -12,7 +12,8 @@ if TYPE_CHECKING:
     from plotroom.ports.store import Transaction
 
 
-def _matches(lane: Lane, branch: str) -> bool:
+def lane_matches_branch(lane: Lane, branch: str) -> bool:
+    """Apply the merge gate branch rule to a current lane."""
     if lane.state == "archived":
         return False
     if lane.branch_pattern is None:
@@ -37,7 +38,9 @@ class MergeLaneIndex:
 
     def _matching(self, branch: str) -> tuple[Lane, ...]:
         if branch not in self._matches:
-            self._matches[branch] = tuple(lane for lane in self._lanes if _matches(lane, branch))
+            self._matches[branch] = tuple(
+                lane for lane in self._lanes if lane_matches_branch(lane, branch)
+            )
         return self._matches[branch]
 
     def evidence(self, pull: PullRequest | None) -> tuple[Lane | None, int | None, bool]:

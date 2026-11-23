@@ -19,6 +19,12 @@ from plotroom.core.branch_updates import (
 from plotroom.core.briefs import BRIEF
 from plotroom.core.checklists import CHECKLIST_ARG, CHECKLIST_EMPTY, CHECKLIST_EMPTY_FIELDS
 from plotroom.core.claims import CLAIM_OVERLAP, PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, claim, release
+from plotroom.core.clerk_import import (
+    CLERK_IMPORT_ENTRY,
+    CLERK_IMPORT_ENTRY_FIELDS,
+    CLERK_IMPORT_ITEMS,
+    clerk_import,
+)
 from plotroom.core.commands import Command, CommandRegistry
 from plotroom.core.deploy_window import freeze, unfreeze
 from plotroom.core.events import EventKind, EventRegistry, FieldSpec
@@ -37,6 +43,7 @@ from plotroom.core.lanes import (
     LANE_WAITING,
     archive_lane,
     checklist_done,
+    checklist_import,
     owns_lane,
     ready_lane,
     start_lane,
@@ -104,6 +111,7 @@ def build_catalog(
     """Every kind and command the server knows."""
     events = EventRegistry()
     leaves = build_leaf_registry(image_jobs=image_jobs, lane_idle_minutes=lane_idle_minutes)
+    routes: Mapping[str, DeliveryRoute] = delivery_routes if delivery_routes is not None else {}
     catalog = Catalog(
         events,
         CommandRegistry(events),
@@ -268,6 +276,37 @@ def build_catalog(
         ),
         rules=owner,
     )
+    catalog.commands.register(
+        Command(
+            "checklist_import",
+            (lane, FieldSpec("rows", "array")),
+            partial(checklist_import, repository=github_repository),
+            lane_scoped=True,
+        ),
+        rules=orchestrator,
+    )
+    events.register(EventKind(CLERK_IMPORT_ENTRY, CLERK_IMPORT_ENTRY_FIELDS, frozenset({"system"})))
+    for kind in CLERK_IMPORT_ITEMS:
+        catalog.register_item(kind)
+    catalog.commands.register(
+        Command(
+            "clerk_import",
+            (
+                FieldSpec("triggers", "array"),
+                FieldSpec("pulls", "array"),
+                FieldSpec("skips", "array"),
+                FieldSpec("ledger_repository", "str", required=False),
+            ),
+            partial(
+                clerk_import,
+                repository=github_repository,
+                workers=workers,
+                registry=leaves,
+                delivery_routes=routes,
+            ),
+        ),
+        rules=orchestrator,
+    )
     events.register(EventKind(RUN_STATUS, RUN_FIELDS, frozenset({"system"})))
     catalog.commands.register(
         Command("run_report", (lane, RUN_ID, RUN_STATE), run_report),
@@ -285,12 +324,13 @@ def build_catalog(
                 FieldSpec("predicate", "object"),
                 FieldSpec("action", "object"),
                 FieldSpec("lane", "str", required=False),
+                FieldSpec("imported_fired", "bool", required=False),
             ),
             partial(
                 create_trigger,
                 registry=leaves,
                 repository=github_repository,
-                delivery_routes=delivery_routes if delivery_routes is not None else {},
+                delivery_routes=routes,
             ),
         ),
         rules=orchestrator,

@@ -61,6 +61,7 @@ Given fixture asks spanning all four conditions, when projection updates and rep
 ## Plan Change Log
 
 - Integrated main at `60ac5ffd247dd21fff701d066db55df480e53c91` and attached `0021` to its merged `0020` head.
+- After the clerk import merged at `7e1fa13016bffa6e46a9f9e165c1f26537164ef0`, attached `0021` to its merged `0019` head.
 
 ## Review Triage Log
 
