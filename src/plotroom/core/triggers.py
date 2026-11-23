@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from functools import partial
@@ -33,6 +33,37 @@ if TYPE_CHECKING:
 TRIGGER_FIRED = "core.trigger_fired"
 TRIGGER_FIRED_FIELDS = (FieldSpec("trigger_id", "str"),)
 _MAX_DEPTH = 16
+# A valid predicate uses two containers per group, plus the command and leaf objects.
+_MAX_SNAPSHOT_CONTAINERS = 64
+
+
+def trigger_snapshot_is_too_deep(args: dict[str, Any]) -> bool:
+    """Detect trigger arguments that are too deeply nested for a recursive snapshot."""
+    parents: list[Iterator[Any]] = [iter(args.values())]
+    deepest_visit: dict[int, int] = {}
+    while parents:
+        try:
+            value = next(parents[-1])
+        except StopIteration:
+            parents.pop()
+            continue
+        if isinstance(value, dict):
+            children = iter(cast("dict[str, Any]", value).values())
+        elif isinstance(value, (list, tuple)):
+            children = iter(cast("list[Any] | tuple[Any, ...]", value))
+        else:
+            continue
+        depth = len(parents)
+        if depth >= _MAX_SNAPSHOT_CONTAINERS:
+            return True
+        # A deeper visit must still be checked, even when a shallower path reused this container.
+        identity = id(cast(object, value))
+        if deepest_visit.get(identity, -1) >= depth:
+            continue
+        deepest_visit[identity] = depth
+        parents.append(children)
+    return False
+
 
 type TriggerMode = Literal["once", "every"]
 

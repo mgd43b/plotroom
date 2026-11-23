@@ -3,7 +3,9 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -12,6 +14,7 @@ from fakes import FixedClock
 from plotroom.adapters.store_sqlite import SqliteStore, triggers_sql
 from plotroom.adapters.store_sqlite.ledger_sql import SqliteTransaction
 from plotroom.app.runtime import ProjectRuntime
+from plotroom.core import ledger as ledger_module
 from plotroom.core.actions import Action
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import LedgerError, NewEvent
@@ -268,15 +271,45 @@ async def test_glob_leaves_share_the_projection_read_in_a_writer_transaction(
         assert reads == [REPO, REPO]
 
 
-async def test_excessive_predicate_nesting_returns_invalid(tmp_path: Path) -> None:
+async def test_excessive_predicate_nesting_returns_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async with open_ledger(tmp_path) as (ledger, _):
         predicate = merged(1)
         for _ in range(2000):
             predicate = {"all_of": [predicate]}
+        deepcopy = Mock(wraps=ledger_module.copy.deepcopy)
+        monkeypatch.setattr(ledger_module, "copy", SimpleNamespace(deepcopy=deepcopy))
         with pytest.raises(LedgerError, match="nested too deeply") as exc:
             await ledger.execute(ORCHESTRATOR, "trigger", "depth", notification(predicate))
         assert exc.value.code == "invalid"
+        deepcopy.assert_not_called()
         assert not await ledger.list_triggers(ORCHESTRATOR, None)
+
+
+async def test_trigger_depth_boundary_and_replay(tmp_path: Path) -> None:
+    async with open_ledger(tmp_path) as (ledger, _):
+        at_limit = merged(1)
+        for _ in range(16):
+            at_limit = {"all_of": [at_limit]}
+        created = await ledger.execute(ORCHESTRATOR, "trigger", "at-limit", notification(at_limit))
+        beyond_limit = notification({"any_of": [at_limit]})
+        with pytest.raises(LedgerError, match="predicate nesting exceeds 16 levels") as exc:
+            await ledger.execute(ORCHESTRATOR, "trigger", "beyond-limit", beyond_limit)
+        assert exc.value.code == "invalid"
+        beyond_safe_copy: dict[str, Any] = at_limit
+        for _ in range(24):
+            beyond_safe_copy = {"all_of": [beyond_safe_copy]}
+        # The shared subtree is reachable both within and above the storage-copy bound.
+        shared = notification({"any_of": [at_limit, beyond_safe_copy]})
+        with pytest.raises(LedgerError, match="nested too deeply"):
+            await ledger.execute(ORCHESTRATOR, "trigger", "new-shared-depth", shared)
+        for replacement in (beyond_limit, shared):
+            replay = await ledger.execute(ORCHESTRATOR, "trigger", "at-limit", replacement)
+            assert replay.replayed
+            assert replay.result == created.result
+        [stored] = await ledger.list_triggers(ORCHESTRATOR, None)
+        assert stored["id"] == created.result["id"]
 
 
 async def test_pr_trigger_without_a_configured_repository_is_refused(tmp_path: Path) -> None:

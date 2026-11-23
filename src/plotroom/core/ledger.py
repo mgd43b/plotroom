@@ -34,6 +34,7 @@ from plotroom.core.roles import OwnershipView, role_family
 from plotroom.core.run_reports import validate_identity
 from plotroom.core.search import SemanticSearch
 from plotroom.core.search_sources import PRIVATE_KINDS, SEARCH_KINDS
+from plotroom.core.triggers import trigger_snapshot_is_too_deep
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.watchers import Watchers
 from plotroom.core.writer import ProjectWriter
@@ -291,7 +292,12 @@ class Ledger:
         # One snapshot is validated, copied to the handler and recorded in the receipt, so a caller
         # mutating its dict while the handler runs changes none of the three.
         try:
-            snapshot = copy.deepcopy(args)
+            # An overdeep trigger can still replay an existing receipt without copying its body.
+            snapshot = (
+                None
+                if command == "trigger" and trigger_snapshot_is_too_deep(args)
+                else copy.deepcopy(args)
+            )
         except RecursionError:
             raise LedgerError("invalid", f"{command}: arguments are nested too deeply") from None
         kind = command_kind(command)
@@ -311,16 +317,21 @@ class Ledger:
             receipt = recorded.fields if recorded is not None else None
             if receipt is None and registered.record_if is not None:
                 receipt = await tx.find_noop_receipt(command, upstream_id)
+            # A retry can supply different arguments. Authorize the actual target of the
+            # receipt, so new arguments cannot make a previous target visible.
+            target: dict[str, Any]
             if receipt is None:
+                if snapshot is None:
+                    raise LedgerError("invalid", f"{command}: arguments are nested too deeply")
+                target = snapshot
                 try:
-                    validate_fields(registered.args, snapshot, command)
+                    validate_fields(registered.args, target, command)
                 except RecursionError:
                     raise LedgerError(
                         "invalid", f"{command}: arguments are nested too deeply"
                     ) from None
-            # A retry can supply different arguments. Authorize the actual target of the
-            # receipt, so new arguments cannot make a previous target visible.
-            target: dict[str, Any] = snapshot if receipt is None else receipt["args"]
+            else:
+                target = receipt["args"]
             if rule.owns is not None:
                 view = OwnershipView(role, uow.find_event, uow.find_item, uow.find_lane)
                 if not await rule.owns(view, copy.deepcopy(target)):
@@ -329,14 +340,14 @@ class Ledger:
                     )
             if receipt is not None:
                 return CommandResult(receipt["result"], True)
-            result = await registered.handler(uow, copy.deepcopy(snapshot))
+            result = await registered.handler(uow, copy.deepcopy(target))
             if not isinstance(result, dict) or not is_json(result):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise TypeError(f"command {command!r} must return a JSON object")
             await uow.refresh_overlaps(self.github_repository, self._github_tree_path)
             await uow.refresh_asks(self.github_repository, self._human_login, self._ask_stale_days)
             if registered.record_if is not None and not registered.record_if(result):
                 await tx.insert_noop_receipt(
-                    command, upstream_id, {"args": snapshot, "result": result}
+                    command, upstream_id, {"args": target, "result": result}
                 )
             else:
                 await uow.append(
@@ -347,10 +358,10 @@ class Ledger:
                         fields={
                             "role": role,
                             "request_id": request_id,
-                            "args": copy.deepcopy(snapshot),
+                            "args": copy.deepcopy(target),
                             "result": result,
                         },
-                        lane_id=snapshot["lane"] if registered.lane_scoped else None,
+                        lane_id=target["lane"] if registered.lane_scoped else None,
                     )
                 )
             await self._refresh_merge_controller(uow)
