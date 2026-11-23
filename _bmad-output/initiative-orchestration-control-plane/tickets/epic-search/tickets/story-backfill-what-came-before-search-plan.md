@@ -3,7 +3,7 @@ title: 'Resume historical records into local search'
 type: feature
 ticket: 3
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: 'e5026784290ab18daf434f88e28828932bebf489'
 route: full
 route_source: pinned
@@ -65,3 +65,4 @@ Given a project upgraded from a populated prior schema, when lexical backfill st
 
 - `uv run --locked python -m pytest -q tests/test_search_backfill.py tests/test_search_sources.py tests/test_search.py tests/test_search_embeddings.py tests/test_migrations.py` passed all 61 tests.
 - `uv run --locked ruff check src tests` and `uv run --locked pyright` passed.
+- Combined verification after review remediations passed 986 tests on each of managed Python 3.14 and 3.15. Ruff, Pyright and the core dependency check passed.

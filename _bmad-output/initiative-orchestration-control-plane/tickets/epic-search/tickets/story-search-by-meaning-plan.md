@@ -3,7 +3,7 @@ title: 'Rank local search by meaning'
 type: feature
 ticket: 5
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '86cc0c3a2aa0cdd46837df20504bd9ff2232b48e'
 route: full
 route_source: pinned
@@ -66,3 +66,4 @@ Vectors are bound to immutable search record revisions. The migration preserves 
 
 - `uv run --locked python -m pytest -q tests/test_search_embeddings.py tests/test_search.py tests/test_search_backfill.py tests/test_transport_contract.py tests/test_migrations.py`
 - `uv run --locked ruff check src tests` and `uv run --locked pyright`
+- Combined verification after review remediations passed 986 tests on each of managed Python 3.14 and 3.15. Ruff, Pyright and the core dependency check passed.

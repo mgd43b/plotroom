@@ -3,7 +3,7 @@ title: 'Verify the search epic through the local daemon'
 type: feature
 ticket: 7
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '05b2af64a73babe369ae7522c5f71de69b2f5355'
 route: full
 route_source: pinned
@@ -57,3 +57,4 @@ Given the real daemon and synthetic fixture data, when each epic acceptance scen
 - `uv run --locked python -m pytest -q tests/test_search_e2e.py tests/test_transport_contract.py` passed all 16 tests.
 - The combined search, source indexing, backfill, embedding, epic acceptance, migration, and transport suites passed all 80 tests.
 - `uv run --locked ruff check src tests`, `uv run --locked pyright`, and the Ruff format check for `tests/test_search_e2e.py` passed.
+- Combined verification after review remediations passed 986 tests on each of managed Python 3.14 and 3.15. Ruff, Pyright and the core dependency check passed.

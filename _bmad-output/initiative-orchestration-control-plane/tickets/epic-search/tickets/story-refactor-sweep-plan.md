@@ -3,7 +3,7 @@ title: 'Address verified local search cleanup'
 type: refactor
 ticket: 6
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: 'e59d434dc9d476b581eb51ab6ecd9f88f8ed38ba'
 route: full
 route_source: pinned
@@ -37,7 +37,7 @@ Use fixtures and localhost. Scope is local search. Preserve the owned boundaries
 ## Tasks & Acceptance
 
 - [x] Verify the documented cleanup against source, fix the bounded excerpt case if reproducible, and record the disposition of residual findings.
-- [ ] Run the focused search tests and include full verification for the combined PR.
+- [x] Run the focused search tests and include full verification for the combined PR.
 
 Given a match up to the configured excerpt cap with long surrounding text, when the search returns the hit, then the actual matching text remains visible within the cap.
 
@@ -56,8 +56,8 @@ Given a match up to the configured excerpt cap with long surrounding text, when 
 | Finding | Disposition |
 | --- | --- |
 | A matching phrase can lose its tail within the character cap | Fixed and covered by both regression cases. |
-| A provider can permanently reject one record | The follower retries from the durable checkpoint with the full source text. Semantic queries that need the incomplete index fall back to lexical search. |
-| Unexpected storage failure can end the background input | The writer retains the last committed checkpoint. A daemon restart resumes the input from that checkpoint. Automatic input recovery would require a separate runtime change. |
+| A provider can permanently reject one record | Routed to the ticketer as a separate input-policy candidate. `HttpEmbedder.embed` splits size failures only when the batch can be divided. The singleton stays unchanged, and `follow_search_embeddings` retries at the durable checkpoint. Queries that need the incomplete index report `index_pending` and fall back to lexical. Any skip or truncation policy would need an explicit decision on preserving source text and advancing the cursor. |
+| Unexpected storage failure can end the background input | Routed to the ticketer as a separate runtime recovery candidate. `commit_backfill` and vector writes retain the last committed checkpoint on rollback. The daemon's existing background-input lifecycle leaves restart to resume there. A recovery change should prove bounded retries, a visible failure indication, and restart from the same checkpoint without duplicate records. |
 | Historical lexical indexing and MCP semantic integration | Covered by #117 and #118. |
 
 ## Verification
@@ -65,3 +65,4 @@ Given a match up to the configured excerpt cap with long surrounding text, when 
 - `uv run --locked python -m pytest -q tests/test_search.py tests/test_search_backfill.py tests/test_search_embeddings.py tests/test_search_sources.py tests/test_transport_contract.py` passed 55 tests.
 - `uv run --locked ruff check src tests`, `uv run --locked pyright`, and the Ruff format check for the changed Python files passed.
 - SQLite's query plan shows the limited rank set materialized before the second FTS lookup by row ID and phrase.
+- Combined verification after review remediations passed 986 tests on each of managed Python 3.14 and 3.15. Ruff, Pyright and the core dependency check passed.

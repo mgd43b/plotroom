@@ -3,7 +3,7 @@ title: 'Index every local search source'
 type: feature
 ticket: 2
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: 'fd50ef15eb92f354918c262d77cc5a0acd161894'
 route: full
 route_source: pinned
@@ -67,3 +67,4 @@ Given saved records with distinct source kinds and projects, when a matching aut
 - `uv run --locked python -m pytest -q tests/test_search.py tests/test_search_sources.py tests/test_search_embeddings.py tests/test_migrations.py tests/test_transport_contract.py`
 - `uv run --locked ruff check src tests` and `uv run --locked pyright`
 - At this slice, the targeted suite passed 70 tests, including populated upgrade, authenticated decision and ask visibility, and preexisting message vector compatibility. Ruff, format checks, and Pyright passed.
+- Combined verification after review remediations passed 986 tests on each of managed Python 3.14 and 3.15. Ruff, Pyright and the core dependency check passed.
