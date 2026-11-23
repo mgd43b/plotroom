@@ -29,7 +29,7 @@ slug = "epic-merge-controller"
 title = "Merge controller"
 description = "Every PR is judged by one gate over the GitHub projection, with freezes, flake candidates, automatic branch updates and a logged verdict per head SHA, and a MERGE verdict is executed by the orchestrator or clerk."
 covers = ["R10", "R11", "R12", "R25"]
-after = [{ epic = 2, needs = "the GitHub projection" }]
+after = [{ epic = 1, needs = "the action runner, workers and lanes, and wait()" }, { epic = 2, needs = "the GitHub projection" }]
 
 [[epic]]
 id = 5
@@ -37,7 +37,7 @@ slug = "epic-claims-and-overlaps"
 title = "Claims and overlaps"
 description = "Lanes claim paths, every PR diff and ticket-tree move is checked against other lanes' claims and open PRs, and each overlap reaches next() before review."
 covers = ["R13", "R14"]
-after = [{ epic = 2, needs = "changed files in the GitHub projection and the default-branch tree mirror" }]
+after = [{ epic = 1, needs = "workers and lanes" }, { epic = 2, needs = "changed files in the GitHub projection and the default-branch tree mirror" }]
 
 [[epic]]
 id = 6
@@ -53,7 +53,7 @@ slug = "epic-human-queue"
 title = "The human's queue"
 description = "Decisions are recorded in the human's exact words, asks on GitHub are flagged when buried, stale or unanswered, and goal() reports what is left and why."
 covers = ["R17", "R18", "R19"]
-after = [{ epic = 2, needs = "issues and comments in the GitHub projection" }]
+after = [{ epic = 1, needs = "the writer-rule table and ticks" }, { epic = 2, needs = "issues and comments in the GitHub projection" }]
 
 [[epic]]
 id = 8

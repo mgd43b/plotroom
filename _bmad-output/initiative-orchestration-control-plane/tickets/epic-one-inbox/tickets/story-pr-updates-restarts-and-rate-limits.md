@@ -16,7 +16,7 @@ tracker_status: backlog
 
 ## Description
 
-The poller adds pushes to a PR's head, closes without merging and reopens as new facts, each applied to the PR's state and the open-PR count, survives a server restart mid-poll without losing or repeating a fact, and backs off on GitHub's rate limit before resuming from its cursor.
+The poller adds pushes to a PR's head, closes without merging and reopens as new facts, records per PR when each fetcher last completed (the projection's as_of and completeness, which the gate reads), each applied to the PR's state and the open-PR count, survives a server restart mid-poll without losing or repeating a fact, and backs off on GitHub's rate limit before resuming from its cursor.
 
 ## Requirements
 

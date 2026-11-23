@@ -16,7 +16,7 @@ tracker_status: backlog
 
 ## Description
 
-A fetcher adds labels with who applied them and the files each PR changes; core derives a lane's PR by matching its branch, extends entry 7's lane-inference hook so every github.* event on that PR carries the lane, and checks lane_ready arguments against the projection (the handoff from epic 1 entry 8). Hands on: labels to epic 4, changed files to epic 5.
+A fetcher adds labels with who applied them and the files each PR changes, with each file's rename status and previous path; core derives a lane's PR by matching its branch, extends entry 7's lane-inference hook so every github.* event on that PR carries the lane, and checks lane_ready arguments against the projection (the handoff from epic 1 entry 8). Hands on: labels to epic 4 (fix, allow-overlap and keywords-ok labels), changed files and renames to epic 4 (stale CI, flakes, one PR per lane) and epic 5 (overlaps, tree moves).
 
 ## Requirements
 

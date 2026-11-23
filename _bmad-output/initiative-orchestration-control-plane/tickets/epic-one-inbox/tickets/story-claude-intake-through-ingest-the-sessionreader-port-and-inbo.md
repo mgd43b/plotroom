@@ -16,11 +16,11 @@ tracker_status: backlog
 
 ## Description
 
-ingest() appends only claude.* events (turn reports, session messages) from orchestrator, clerk and worker tokens, a worker's forced to its current lane, deduplicated on session and turn; the SessionReader port is defined, shaped by entry 1's finding, so a local reader can write the same events as well; an unhandled Codex message (entry 7), Claude session message or Claude turn report raises an inbound-message item that ack closes and that wakes plotroom watch. Hands on: the port to entry 18.
+ingest() appends only claude.* events (turn reports, session messages) from orchestrator, clerk and worker tokens, a worker's forced to its current lane; claude.turn_report takes an optional turn_index; every turn report, from ingest or from the local reader, records both its turn_index (when known) and a digest of its report text, and a later report for the same session matching either is a duplicate, so a turn seen both ways is stored once in either arrival order; the SessionReader port is defined, shaped by entry 1's finding, so a local reader can write the same events as well; an unhandled Codex message (entry 7), Claude session message or Claude turn report raises an inbound-message item that ack closes and that wakes plotroom watch. Hands on: the port to entry 18.
 
 ## Requirements
 
-Verify: A turn report sent through ingest twice is stored once; a worker token's report lands on its own lane whatever lane it names, and a github.* kind from it is refused; a turn report and a switchboard message each raise an item that wakes a running plotroom watch and closes on ack.
+Verify: A turn report sent through ingest twice is stored once, with or without turn_index; a worker token's report lands on its own lane whatever lane it names, and a github.* kind from it is refused; a turn report and a switchboard message each raise an item that wakes a running plotroom watch and closes on ack.
 
 ## References
 

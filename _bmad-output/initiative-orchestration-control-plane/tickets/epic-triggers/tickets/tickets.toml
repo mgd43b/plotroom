@@ -1,0 +1,126 @@
+# Entries of the Triggers epic, in build order. Ids are permanent; table order is build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Tracer: a pr_merged trigger notifies the orchestrator once"
+description = "The thinnest path: a leaf registry (name, argument schema of exact identities, evaluator, level or event) that later entries and epics append to; an orchestrator-only trigger command (with an optional lane, defaulting to the action's target) storing a predicate of one pr_merged(n) leaf and a notify_orchestrator(text) action; after every unit of work the engine evaluates open triggers, and a once trigger fires in the first unit of work its predicate holds (at creation too), its fired state and an actions row written in the same transaction; the action opens a next item. Hands on: the leaf registry to every later entry and to epics 6 (checklist_empty) and 8 (budget_ratio); trigger records and fired state to epic 9's import."
+verify = "A trigger on pr_merged for a test PR opens exactly one next item when the PR merges, and one created after the merge fires at creation; a worker token's trigger call is refused."
+covers = ["R1", "R2", "R7"]
+after = ["1.6", "1.7", "2.2"]
+hitl = false
+risk = "high"
+references = ["architecture-orchestration-control-plane/architecture-orchestration-control-plane.md#ad-15"]
+notes = ["Check beyond its criteria: a trigger evaluated during a burst of events fires once, not once per event."]
+
+[[entry]]
+id = 5
+type = "story"
+title = "Exactly once across restarts, and branch-glob binding"
+description = "Proves the engine's exactly-once rule: fired state survives restarts and replays; startup does not re-evaluate stored events into new firings; every PR leaf accepts a branch glob, which binds to the first matching PR (by its head branch in the projection) and records that binding so a later match does not rebind."
+verify = "Killing the server after a trigger's fire commits and before the action runner executes its action, then restarting, runs the action once with the same action key and does not fire the trigger again; a branch-glob trigger bound to the first matching PR ignores a second one."
+covers = ["R2", "R3"]
+after = [1]
+hitl = false
+risk = "high"
+notes = ["Check beyond its criteria: replaying the recorded inputs after a restart opens no second next item and writes no second actions row."]
+
+[[entry]]
+id = 8
+type = "story"
+title = "Listing and canceling triggers"
+description = "Adds triggers(lane?) and cancel(trigger_id) (orchestrator only), canceled triggers never firing, and trigger counts by state in snapshot()."
+verify = "triggers() lists open, fired and canceled triggers with their bindings and triggers(lane) only that lane's; a canceled trigger whose predicate then holds does not fire; a clerk or worker token's cancel is refused; snapshot() shows the counts."
+covers = ["R5", "R7"]
+after = [5]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 11
+type = "story"
+title = "Composition and predicate validation"
+description = "Adds all_of and any_of over registered leaves, and refuses a predicate with free text or an unknown leaf with the reason."
+verify = "all_of(pr_merged(a), pr_merged(b)) fires once when the second PR merges whichever merges first, also across a server restart between the merges; any_of fires on the first leaf; a predicate with a free-text leaf and one with an unknown leaf are each refused as invalid."
+covers = ["R1", "R2", "R3"]
+after = [8]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 2
+type = "story"
+title = "PR-state leaves"
+description = "Adds the leaves pr_green(n), pr_threads_resolved(n) and issue_closed(n) to the registry, level conditions over the projection."
+verify = "Each leaf holds exactly when the projection shows the state: a test PR's checks going green, its last thread resolving, and a test issue closing each fire one trigger."
+covers = ["R1"]
+after = [11, "2.3", "2.4", "2.5"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Run reports, run_finished and main_green_with_images"
+description = "Adds a run_report command a lane's worker token uses for its own lane's runs (run id, state), the run_finished(id) leaf over it, and main_green_with_images(sha?) holding once main's latest completed run is green and the configured image-build checks on that commit passed."
+verify = "A lane's run_report of a run finishing fires run_finished once, another lane's token is refused, and main_green_with_images holds only after both CI and the image-build checks pass on the same main commit."
+covers = ["R1", "R4"]
+after = [2, "1.8", "2.3"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Event leaves, deploys, idle lanes and every-triggers"
+description = "Adds message_from(worker) (an event newer than the trigger's last fired seq), deploy_finished(env, sha) over deploy events, lane_idle(lane) (no event on the lane for a configured number of minutes, judged on ticks), and every triggers firing on each false-to-true transition."
+verify = "An every trigger on message_from fires once per new message and not on replay; deploy_finished fires on a matching deploy event; lane_idle fires once after the configured quiet time under a fake Clock and again only after the lane was active."
+covers = ["R1", "R3"]
+after = [3, "2.7", "2.9", "2.11"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Actions: send, mark and propose_archive"
+description = "Completes the closed action set: send(worker, text), mark(lane, state) and propose_archive(lane) opening a next item; any other action is refused. send picks the channel from the worker's config (a Codex worker's switchboard address through epic 2's send, which a hosted instance turns into rows the bridge leases; a Claude lane through entry 7's outbox) and runs for any cause-derived action key, not only triggers'. Hands on: send to entry 7 and to epic 8's stop; propose_archive to epic 6."
+verify = "A fired trigger's send reaches the scripted switchboard participant once with its action key, mark changes the lane's state through the writer rules, propose_archive opens one archive item, and a trigger naming any other action is refused."
+covers = ["R6"]
+after = [1, "1.8", "2.17"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Claude-lane outbox and its drain"
+description = "A send to a Claude lane becomes an outbox action; the drain session named in the project's config wakes through wait(), takes rows with an outbox_lease command and completes them with outbox_done(act_id), both declared for the drain role in the writer-rule table, and delivers each with native session messaging; a lease that expires is offered again; each message carries its action key. Builds the drain stand-in entry 10 uses; a person runs one real drain session delivering to a real Claude lane. Hands on: the Claude channel to epic 8's stop."
+verify = "With a drain token, a fired send to a Claude lane is leased once, outbox_done completes it, an expired lease is offered again with the same action key, a drain token is refused every command but wait(), outbox_lease and outbox_done, and a real drain session delivers one message to a real Claude lane."
+covers = ["R6"]
+after = [6, "1.5", "1.9"]
+hitl = true
+risk = "high"
+notes = ["Check beyond its criteria: two drain sessions running by mistake never deliver the same row twice within a lease.", "Decision: 2026-11-22, leasing is its own outbox_lease command; wait() stays read-only and only wakes the drain."]
+
+[[entry]]
+id = 9
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings the epic deferred."
+verify = "Deferred findings are resolved or re-filed, and CI passes."
+covers = []
+after = [1, 5, 8, 11, 2, 3, 4, 6, 7]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 10
+type = "story"
+title = "End-to-end suite over the epic's Done when"
+description = "One suite runs every Done-when check of this epic against a real daemon with the test repository, a scripted switchboard participant and entry 7's drain stand-in."
+verify = "The suite passes in CI, one test per Done-when line."
+covers = ["R1", "R2", "R3", "R4", "R5", "R6", "R7"]
+after = [9]
+hitl = false
+risk = "low"
