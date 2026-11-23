@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "32"
 remote: "https://github.com/mgd43b/plotroom/issues/32"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # PR updates, restarts and rate limits

@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "20"
 remote: "https://github.com/mgd43b/plotroom/issues/20"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Local ticket-tree mirror and the idle-worker item

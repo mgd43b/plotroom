@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "17"
 remote: "https://github.com/mgd43b/plotroom/issues/17"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Next items, ack and snapshot()
