@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import socket
 import subprocess
 import sys
@@ -25,6 +26,26 @@ from mcp_types import TextContent
 from plotroom.app.tokens import IssuedToken, TokenRegistry
 
 CHILD_TIMEOUT = 60.0
+BRIEF_TICKET_REF = "1"
+BRIEF_TICKET_BODY = (
+    "---\nid: 1\ntype: story\ntitle: Fixture ticket\nrefined: true\n---\n"
+    "# Fixture ticket\n\nKeep {source_text} literal.\n"
+)
+
+
+def make_brief_ticket(directory: Path) -> tuple[Path, Path]:
+    """Create a local mirrored ticket and a trusted reader outside the mirror."""
+    installation = directory / "trusted"
+    script = Path("_bmad/method/scripts/tickets.py")
+    reader = installation / script
+    reader.parent.mkdir(parents=True)
+    shutil.copyfile(Path(__file__).resolve().parents[1] / script, reader)
+    tree = directory / "mirror" / "epic-brief"
+    tickets = tree / "tickets"
+    tickets.mkdir(parents=True)
+    (tree / "epic-brief.md").write_text("---\ntype: epic\n---\n", encoding="utf-8")
+    (tickets / "story-fixture-ticket.md").write_bytes(BRIEF_TICKET_BODY.encode())
+    return tree, installation
 
 
 def write_config(

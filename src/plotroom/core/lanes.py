@@ -1,8 +1,16 @@
 """Persistent lane lifecycle and worker ownership."""
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from plotroom.core.checklists import (
+    ARCHIVE_PROPOSAL,
+    Checklist,
+    activate_checklist,
+    complete_checklist_step,
+    declare_checklist,
+    invalidate_checklist,
+)
 from plotroom.core.events import LedgerError, NewEvent
 from plotroom.core.roles import OwnershipView
 from plotroom.core.work_items import refresh_idle_workers
@@ -12,7 +20,6 @@ if TYPE_CHECKING:
     from plotroom.core.unit_of_work import UnitOfWork
 
 LANE_WAITING = "lane_waiting"
-ARCHIVE_PROPOSAL = "archive_lane"
 
 
 @dataclass(frozen=True)
@@ -26,9 +33,34 @@ class Lane:
     pr: int | None = None
     head_sha: str | None = None
     branch_pattern: str | None = None
+    checklist: Checklist | None = None
+
+    def with_checklist(self, checklist: Checklist | None) -> Lane:
+        if checklist is None or checklist.state == "invalidated":
+            return self
+        return replace(
+            self,
+            checklist=checklist,
+            state="ready" if checklist.state == "pending" else self.state,
+            pr=checklist.pr,
+            head_sha=checklist.head_sha,
+        )
 
     def render(self) -> dict[str, Any]:
-        return {**asdict(self), "work_items": list(self.work_items)}
+        result: dict[str, Any] = {
+            "id": self.id,
+            "worker": self.worker,
+            "work_items": list(self.work_items),
+            "branch": self.branch,
+            "state": self.state,
+            "waiting_on": self.waiting_on,
+            "pr": self.pr,
+            "head_sha": self.head_sha,
+            "branch_pattern": self.branch_pattern,
+        }
+        if self.checklist is not None:
+            result["checklist"] = self.checklist.render()
+        return result
 
 
 def with_projected_pr(lane: Lane, number: int | None, head_sha: str | None) -> Lane:
@@ -116,17 +148,37 @@ async def ready_lane(
         pr = await uow.open_branch_pull(repository, lane.branch)
         if pr is None or pr.number != args["pr"] or pr.head_sha != args["head_sha"]:
             raise LedgerError("conflict", "the PR and head must match the open GitHub projection")
+    await declare_checklist(uow, lane, repository, args)
     return await _save(
         uow, replace(lane, state="ready", waiting_on=None, pr=args["pr"], head_sha=args["head_sha"])
     )
 
 
-async def refresh_ready_lane(uow: UnitOfWork, repository: str, branch: str) -> None:
-    lane = await uow.branch_lane(branch)
-    if lane is None or lane.state != "ready":
-        return
-    pr = await uow.open_branch_pull(repository, branch)
-    if pr is None or (pr.number, pr.head_sha) != (lane.pr, lane.head_sha):
+async def refresh_ready_lanes(uow: UnitOfWork, repository: str, branch: str) -> None:
+    lanes = await uow.branch_lanes(branch)
+    for lane in lanes:
+        if lane.state != "ready":
+            continue
+        checklist = await uow.find_checklist(lane.id)
+        if checklist is not None and checklist.state == "pending":
+            if checklist.repository != repository:
+                continue
+            projected = await uow.pull_request(repository, checklist.pr)
+            state = (
+                projected.state if projected is not None and checklist.matches(projected) else None
+            )
+            if state == "open":
+                continue
+            if state == "merged":
+                await activate_checklist(uow, checklist)
+            else:
+                await invalidate_checklist(uow, checklist)
+        else:
+            if len(lanes) != 1:
+                continue  # The legacy lane binding requires an unambiguous branch.
+            pr = await uow.open_branch_pull(repository, branch)
+            if pr is not None and (pr.number, pr.head_sha) == (lane.pr, lane.head_sha):
+                continue
         await _save(uow, replace(lane, state="active", pr=None, head_sha=None))
 
 
@@ -134,6 +186,11 @@ async def archive_lane(
     uow: UnitOfWork, args: dict[str, Any], *, workers: frozenset[str]
 ) -> dict[str, Any]:
     lane = await _current(uow, args["lane"])
+    checklist = await uow.find_checklist(lane.id)
+    if checklist is not None and checklist.state == "active" and (steps := checklist.open_steps()):
+        names = ", ".join(repr(step.step) for step in steps)
+        raise LedgerError("conflict", f"the lane has open checklist steps: {names}")
+    await invalidate_checklist(uow, checklist)
     result = await _save(uow, replace(lane, state="archived", waiting_on=None))
     await uow.delete_claims(lane.id)
     await uow.clear_item(ARCHIVE_PROPOSAL, lane.id)
@@ -141,11 +198,17 @@ async def archive_lane(
     return result
 
 
+async def checklist_done(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
+    lane = await _current(uow, args["lane"])
+    return await complete_checklist_step(uow, lane.id, args["step"], args.get("ref"))
+
+
 async def mark_lane(uow: UnitOfWork, action: Action, *, repository: str | None) -> None:
     """Apply a system-owned mark using the normal current-lane and ready rules."""
     lane = await _current(uow, action.payload["lane"])
     state = action.payload["state"]
     if state == "active":
+        await invalidate_checklist(uow, await uow.find_checklist(lane.id))
         await _save(uow, replace(lane, state="active"))
     elif state == "ready":
         pr, head = lane.pr, lane.head_sha

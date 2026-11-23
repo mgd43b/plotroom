@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from plotroom.adapters.store_sqlite import (
     actions_sql,
+    checklists_sql,
     claims_sql,
     github_sql,
     items_sql,
@@ -30,6 +31,7 @@ from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
+    from plotroom.core.checklists import Checklist
     from plotroom.core.outbox import OutboxLease, OutboxMessage
     from plotroom.core.triggers import Trigger
 
@@ -270,6 +272,9 @@ class SqliteTransaction:
     async def branch_lane(self, branch: str) -> Lane | None:
         return await lanes_sql.branch_lane(self._live(), branch)
 
+    async def branch_lanes(self, branch: str) -> list[Lane]:
+        return await lanes_sql.branch_lanes(self._live(), branch)
+
     async def active_lanes(self) -> list[Lane]:
         return await lanes_sql.board_lanes(self._live(), "orchestrator")
 
@@ -318,6 +323,19 @@ class SqliteTransaction:
 
     async def save_lane(self, lane: Lane) -> None:
         await lanes_sql.save_lane(self._live(), lane)
+
+    async def find_checklist(self, lane: str) -> Checklist | None:
+        return await checklists_sql.find_checklist(self._live(), lane)
+
+    async def save_checklist(self, checklist: Checklist) -> None:
+        await checklists_sql.save_checklist(self._live(), checklist)
+
+    async def set_checklist_step_completion(
+        self, lane: str, version: int, step: str, completion_ref: str
+    ) -> bool:
+        return await checklists_sql.set_checklist_step_completion(
+            self._live(), lane, version, step, completion_ref
+        )
 
     async def insert_action(self, action: Action) -> None:
         await actions_sql.insert_action(self._live(), action)

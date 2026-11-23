@@ -56,6 +56,17 @@ BRANCH_HEADS = text("""
       AND pr.state = 'open' AND pr.complete
     GROUP BY pr.branch HAVING COUNT(*) = 1
 """)
+PENDING_CHECKLIST_HEADS = text("""
+    SELECT checklist.lane, checklist.pr, checklist.head_sha
+    FROM json_each(:ready_lanes) AS requested
+    JOIN lane_checklists AS checklist ON checklist.lane = requested.value
+    JOIN github_pull_requests AS pr
+      ON pr.repository = checklist.repository AND pr.number = checklist.pr
+     AND pr.head_repository = checklist.repository AND pr.branch = checklist.branch
+     AND pr.head_sha = checklist.head_sha
+    WHERE checklist.repository = :repository AND checklist.state = 'pending'
+      AND pr.state = 'open' AND pr.complete
+""")
 RETRY = text("""
     SELECT until, next_backoff FROM github_fetch_retries
     WHERE repository = :repository AND resource = :resource
@@ -116,7 +127,18 @@ async def project_lane_heads(
     matches: dict[str, tuple[int | None, str | None]] = {
         row.branch: (row.number, row.head_sha) for row in rows
     }
-    return [with_projected_pr(lane, *matches.get(lane.branch, (None, None))) for lane in lanes]
+    pending: dict[str, tuple[int, str]] = {}
+    ready_lanes = [lane.id for lane in lanes if lane.state == "ready"]
+    if ready_lanes:
+        headers = await connection.execute(
+            PENDING_CHECKLIST_HEADS,
+            {"repository": repository, "ready_lanes": json.dumps(ready_lanes)},
+        )
+        pending = {row.lane: (row.pr, row.head_sha) for row in headers}
+    return [
+        with_projected_pr(lane, *pending.get(lane.id, matches.get(lane.branch, (None, None))))
+        for lane in lanes
+    ]
 
 
 async def save_pull_request(connection: AsyncConnection, pull: PullRequest) -> None:

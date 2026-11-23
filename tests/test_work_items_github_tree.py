@@ -13,7 +13,7 @@ from plotroom.adapters.github import LocalGitHubCredential
 from plotroom.adapters.github.read import GitHubReadClient, Row
 from plotroom.adapters.github.ticket_tree import GitHubTicketTree, validate_tree_path
 from plotroom.adapters.store_sqlite import SqliteStore
-from plotroom.adapters.work_items_bmad import BmadTicketTree, read_ticket_tree
+from plotroom.adapters.work_items_bmad import BmadTicketTree, read_ticket_body, read_ticket_tree
 from plotroom.app.runtime import ProjectRuntime
 from plotroom.core.catalog import build_catalog
 from plotroom.core.ledger import Ledger
@@ -112,6 +112,7 @@ class GitFixture:
             LocalGitHubCredential("FIXTURE_TOKEN", {"FIXTURE_TOKEN": TOKEN}, None),
             path,
             partial(read_ticket_tree, installation),
+            read_body=partial(read_ticket_body, installation),
             transport=httpx.MockTransport(self.handle),
         )
 
@@ -233,6 +234,36 @@ async def test_default_branch_tick_matches_checkout_and_preserves_last_good_view
     finally:
         await ledger.stop()
         await store.close()
+
+
+async def test_body_uses_the_current_pinned_commit_and_configured_scope(
+    checkout_and_reader: tuple[Path, Path],
+) -> None:
+    checkout, installation = checkout_and_reader
+    github = GitFixture()
+    source = github.source(installation)
+    own_path = f"{SOURCE}/tickets/story-always-ready.md"
+    sibling_path = "nested/initiative-demo/tickets/epic-prep/tickets/story-prerequisite.md"
+    first = "---\nid: 1\ntype: story\n---\n# Always ready\n\nFirst body.\n"
+    second = first.replace("First body.", "New body with {paths}.")
+    write(checkout, own_path, first)
+    write(checkout, sibling_path, first)
+    github.head = github.snapshot(checkout)
+    assert await source.body("2.1") == first
+    assert any(request.startswith("/git/blobs/") for request in github.requests)
+    github.requests.clear()
+    assert await source.body("2.1") == first
+    assert github.requests == ["", "/branches/release/default"]
+    assert await source.body("1.1") is None
+
+    write(checkout, own_path, second)
+    github.head = github.snapshot(checkout)
+    github.truncated = True
+    with pytest.raises(ValueError, match="incomplete ticket tree"):
+        await source.body("2.1")
+    github.truncated = False
+    assert await source.body("2.1") == second
+    assert f"/git/blobs/{object_id(second.encode())}" in github.requests
 
 
 async def test_rate_limit_stops_requests_for_retry_window(

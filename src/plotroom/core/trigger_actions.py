@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from plotroom.core.actions import Action
+from plotroom.core.checklists import ARCHIVE_PROPOSAL, propose_lane_archive
 from plotroom.core.events import FieldSpec, LedgerError, validate_fields
-from plotroom.core.lanes import ARCHIVE_PROPOSAL, mark_lane
+from plotroom.core.lanes import mark_lane
 from plotroom.core.next_items import ItemKind
 
 if TYPE_CHECKING:
@@ -85,4 +86,4 @@ async def apply_local_action(uow: UnitOfWork, action: Action, repository: str | 
     elif action.kind == PROPOSE_ARCHIVE:
         lane = await uow.find_lane(action.payload["lane"])
         if lane is not None and lane.state != "archived":
-            await uow.raise_item(ARCHIVE_ITEM.name, lane.id, "orchestrator", {"lane": lane.id})
+            await propose_lane_archive(uow, lane.id)

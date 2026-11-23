@@ -55,6 +55,14 @@ async def branch_lane(connection: AsyncConnection, branch: str) -> Lane | None:
     return _lane(rows[0]) if len(rows) == 1 else None
 
 
+async def branch_lanes(connection: AsyncConnection, branch: str) -> list[Lane]:
+    rows = await connection.execute(
+        text("SELECT * FROM lanes WHERE branch = :branch AND state != 'archived' ORDER BY id"),
+        {"branch": branch},
+    )
+    return [_lane(row) for row in rows]
+
+
 async def save_lane(connection: AsyncConnection, lane: Lane) -> None:
     fields = asdict(lane)
     fields["work_items"] = json.dumps(lane.work_items)
