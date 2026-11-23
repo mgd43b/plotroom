@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "70"
 remote: "https://github.com/mgd43b/plotroom/issues/70"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Rule 6, live evaluation and the merge log
