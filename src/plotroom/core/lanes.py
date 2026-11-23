@@ -230,16 +230,23 @@ async def checklist_import(
     """Attach legacy post-merge work to the lane's complete, unambiguous projected PR."""
     lane = await _current(uow, args["lane"])
     pull = await uow.open_branch_pull(repository, lane.branch) if repository is not None else None
-    if pull is None or not pull.complete or pull.repository != pull.head_repository:
+    if (
+        pull is None
+        or not pull.complete
+        or pull.repository != pull.head_repository
+        or not pull.head_sha.strip()
+    ):
         raise LedgerError("conflict", "checklist import requires a complete open projected PR")
     current = await uow.find_checklist(lane.id)
     if current is not None:
         raise LedgerError("conflict", "the lane already has a checklist")
-    await ready_lane(
+    await declare_checklist(
         uow,
-        {"lane": lane.id, "pr": pull.number, "head_sha": pull.head_sha, "checklist": args["rows"]},
-        repository=repository,
+        lane,
+        repository,
+        {"pr": pull.number, "head_sha": pull.head_sha, "checklist": args["rows"]},
     )
+    await uow.save_lane(replace(lane, state="ready", pr=pull.number, head_sha=pull.head_sha))
     imported = await uow.find_checklist(lane.id)
     if imported is None:
         raise RuntimeError("a declared checklist must exist in the writer transaction")

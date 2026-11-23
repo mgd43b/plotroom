@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("plotroom")
 
+_LINE_END = re.compile(r"\r\n?|\n")
 _HEADING = re.compile(r" {0,3}##[ \t]+(.+?)[ \t]*")
 _COMMENT_START = re.compile(r" {0,3}<!--")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -35,6 +36,7 @@ _FIRED = re.compile(r"FIRED ([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9:.+Z-]+) ([0-9a-f
 _MESSAGE = re.compile(r'- Message `([^`]+)`:[ \t]*"(.+)"')
 _NOTIFY = re.compile(r'- Tell the coordinator:[ \t]*"(.+?)"( Don\'t message the lane\.)?')
 _ARCHIVE_OWNER = re.compile(r'- Owner: [^`]+ `[^`]+`\. Its post-merge list is "none"\.')
+_TRIGGER_TITLE = "# Clerk triggers"
 _LEDGER_TITLE = re.compile(r"# Clerk ledger: ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
 _OPEN_HEADER = ("pr", "owner (lane)", "kind", "channel", "state", "after merge")
 _SKIP_HEADER = ("pr", "why, and who asked")
@@ -44,7 +46,7 @@ def _sections(text: str) -> list[tuple[str, list[str]]]:
     sections: list[tuple[str, list[str]]] = []
     fence = ""
     comment = False
-    for line in text.splitlines():
+    for line in _LINE_END.split(text):
         if not fence and (comment or _COMMENT_START.match(line)):
             # Never treat heading-like lines inside Markdown comments as live records.
             rest = line
@@ -63,8 +65,9 @@ def _sections(text: str) -> list[tuple[str, list[str]]]:
         if marker is not None:
             delimiter, rest = marker.groups()
             if not fence:
-                fence = delimiter
-            elif delimiter.startswith(fence) and not rest.strip():
+                if delimiter.startswith("~") or "`" not in rest:
+                    fence = delimiter
+            elif delimiter.startswith(fence) and not rest.strip(" \t"):
                 fence = ""
         heading = _HEADING.fullmatch(line) if not (fence or marker) else None
         if heading is not None:
@@ -72,6 +75,12 @@ def _sections(text: str) -> list[tuple[str, list[str]]]:
         elif sections:
             sections[-1][1].append(line)
     return sections
+
+
+def _document_title(text: str) -> str:
+    line = next((line for line in _LINE_END.split(text) if line.strip(" \t")), "")
+    title = line.lstrip(" ")
+    return title.rstrip(" \t") if len(line) - len(title) <= 3 else ""
 
 
 def _number(text: str) -> int | None:
@@ -160,7 +169,7 @@ def parse_triggers(text: str) -> list[TriggerImportRow]:
         if label in rows and rows[label] != row:
             raise ValueError(f"triggers template contains conflicting entries for {label}")
         rows[label] = row
-    if not rows and not any(line.strip() == "# Clerk triggers" for line in text.splitlines()):
+    if not rows and _document_title(text) != _TRIGGER_TITLE:
         raise ValueError("expected a clerk triggers template")
     return list(rows.values())
 
@@ -222,8 +231,7 @@ def _pull_number(cell: str) -> int:
 
 def parse_ledger(text: str) -> tuple[str, list[PullImportRow], list[SkipImportRow]]:
     """Read the two supported tables. Flake receipts and historical audit stay in the source."""
-    title = next((line.strip() for line in text.splitlines() if line.strip()), "")
-    match = _LEDGER_TITLE.fullmatch(title)
+    match = _LEDGER_TITLE.fullmatch(_document_title(text))
     if match is None:
         raise ValueError("expected a clerk ledger with an owner/repository title")
     pulls: dict[int, PullImportRow] = {}
@@ -293,7 +301,12 @@ def run_import(
         log.error("import requires --triggers, --ledger, or both")
         return 2
     try:
-        trigger_rows = parse_triggers(triggers.read_text(encoding="utf-8-sig")) if triggers else []
+        trigger_rows: list[TriggerImportRow] = []
+        if triggers is not None:
+            source = triggers.read_text(encoding="utf-8-sig")
+            if _document_title(source) != _TRIGGER_TITLE:
+                raise ValueError("expected a clerk triggers file with its template title")
+            trigger_rows = parse_triggers(source)
         repository, pulls, skips = (
             parse_ledger(ledger.read_text(encoding="utf-8-sig")) if ledger else (None, [], [])
         )

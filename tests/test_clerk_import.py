@@ -7,9 +7,14 @@ from typing import Any
 
 import pytest
 
+from conftest import write_config
 from fakes import FixedClock
+from plotroom.adapters.mcp.proxy import LocalEndpoint
 from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.app import clerk_import as clerk_cli
+from plotroom.app import daemon_start
 from plotroom.app.clerk_import import parse_ledger, parse_triggers
+from plotroom.app.config import load_config
 from plotroom.core import clerk_import
 from plotroom.core import lanes as lane_commands
 from plotroom.core.catalog import build_catalog
@@ -313,6 +318,18 @@ async def test_updated_hold_context_reuses_the_single_pr_item(
     assert hold.context["reason"] == "Owner updated the fixture hold"
     assert hold.state == "open"
 
+    overlapping = {
+        **original,
+        "skips": [original["skips"][0], {"pr": 46, "reason": "Another fixture hold"}],
+    }
+    older_row = await ledger.execute(
+        "orchestrator", "clerk_import", "old-hold-in-batch", overlapping
+    )
+    assert older_row.result["items"]["skip:44"] == item_id
+    _, current = await store.read_next("orchestrator", 0, 50)
+    [hold] = [item for item in current if item.id == item_id]
+    assert hold.context["reason"] == "Owner updated the fixture hold"
+
 
 async def test_a_prior_bind_also_reserves_the_trigger_label(
     board: tuple[Ledger, SqliteStore],
@@ -346,8 +363,11 @@ async def test_a_prior_bind_also_reserves_the_trigger_label(
     assert [step.step for step in lane.checklist.steps] == ["Trigger T1"]
 
 
+@pytest.mark.parametrize(
+    "held_state", ["Holding for coordinator review", "On hold — awaiting review"]
+)
 async def test_open_pr_state_holds_share_the_skip_advisory(
-    board: tuple[Ledger, SqliteStore],
+    board: tuple[Ledger, SqliteStore], held_state: str
 ) -> None:
     ledger, store = board
     text = (FIXTURES / "ledger.md").read_text()
@@ -360,10 +380,10 @@ async def test_open_pr_state_holds_share_the_skip_advisory(
     )
     text = text.replace(
         "`relay:fixture-worker` | waiting",
-        "`relay:fixture-worker` | Holding for coordinator review",
+        f"`relay:fixture-worker` | {held_state}",
     ).replace("`coordinator-only` | waiting", "`coordinator-only` | Hold until the next window")
     repo, pulls, _ = parse_ledger(text)
-    assert pulls[0]["state"] == "Holding for coordinator review"
+    assert pulls[0]["state"] == held_state
     data = await ledger.execute(
         "orchestrator",
         "clerk_import",
@@ -380,7 +400,7 @@ async def test_open_pr_state_holds_share_the_skip_advisory(
         item.id: item.context["reason"] for item in current if item.kind.endswith("skipped_pull")
     }
     assert holds == {
-        data.result["items"]["skip:41"]: "Holding for coordinator review",
+        data.result["items"]["skip:41"]: held_state,
         data.result["items"]["skip:42"]: "Explicit fixture skip",
     }
     assert data.result["lanes"] == initial.result["lanes"]
@@ -424,3 +444,124 @@ async def test_import_refreshes_idle_workers_once(
     assert calls == [frozenset({"fixture", "peer"})]
     await ledger.execute("orchestrator", "clerk_import", "same-rows", inputs())
     assert calls == [frozenset({"fixture", "peer"})]
+
+
+def test_backtick_code_span_does_not_open_a_fence() -> None:
+    [record] = parse_triggers(
+        "# Clerk triggers\n\n```example```\n"
+        '## T1: #41 merges\n- Tell the coordinator: "Live fixture."\n'
+    )
+    assert record["predicate"] == {"pr_merged": {"number": 41}}
+
+
+@pytest.mark.parametrize("suffix", ["\u00a0", "\u0085", "\u2028"])
+def test_non_ascii_space_does_not_close_a_fence(suffix: str) -> None:
+    assert (
+        parse_triggers(
+            f"# Clerk triggers\n\n```markdown\n```{suffix}\n"
+            '## T1: #41 merges\n- Tell the coordinator: "Hidden example."\n'
+        )
+        == []
+    )
+
+
+def test_cli_refuses_a_ledger_in_the_triggers_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def unexpected(*_args: object) -> int:
+        pytest.fail("a misfiled ledger must not be sent to the daemon")
+
+    monkeypatch.setattr(clerk_cli, "_submit", unexpected)
+    assert clerk_cli.run_import(None, None, FIXTURES / "ledger.md", None) == 2
+    indented = tmp_path / "indented-triggers.md"
+    indented.write_text("    " + (FIXTURES / "triggers.md").read_text(), encoding="utf-8")
+    assert clerk_cli.run_import(None, None, indented, None) == 2
+    with pytest.raises(ValueError, match="owner/repository title"):
+        parse_ledger("    " + (FIXTURES / "ledger.md").read_text())
+
+
+async def test_existing_local_probe_can_follow_a_publication_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    location = daemon_start.DaemonLocation(load_config(write_config(tmp_path), {}))
+    old = LocalEndpoint("http://127.0.0.1:41/mcp", "127.0.0.1:41", "/fixture/old", 41)
+    new = LocalEndpoint("http://127.0.0.1:42/mcp", "127.0.0.1:42", "/fixture/new", 42)
+    published = iter((old, new, new, new))
+    probed: list[LocalEndpoint] = []
+
+    async def current(_location: daemon_start.DaemonLocation) -> LocalEndpoint | None:
+        return next(published)
+
+    async def probe(target: LocalEndpoint, *, within: float) -> int:
+        assert within > 0
+        probed.append(target)
+        return 401
+
+    monkeypatch.setattr(daemon_start.DaemonLocation, "current_endpoint", current)
+    monkeypatch.setattr(daemon_start, "probe_status", probe)
+    assert await daemon_start.require_daemon(location, within=10) == new
+    assert probed == [old, new]
+
+
+async def test_import_preserves_the_gate_binding_of_an_existing_pattern_lane(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, store = board
+    await ledger.execute(
+        "orchestrator",
+        "lane_start",
+        "pattern",
+        {
+            "lane": "existing",
+            "worker": "peer",
+            "branch": "legacy",
+            "branch_pattern": "fixture/project*",
+            "work_items": [],
+        },
+    )
+    args = inputs()
+    result = await ledger.execute(
+        "orchestrator",
+        "clerk_import",
+        "pattern-conflict",
+        {**args, "pulls": args["pulls"][:1], "triggers": [], "skips": []},
+    )
+    assert result.result["lanes"] == {}
+    _, items = await store.read_next("orchestrator", 0, 50)
+    [review] = [item for item in items if item.id == result.result["items"]["pull:41"]]
+    assert review.context["reason"] == "The worker, branch, or PR already has a lane"
+    snapshot = await store.read_merge_gate(REPO, 41)
+    assert snapshot.lane is not None
+    assert snapshot.lane.id == "existing"
+    assert not snapshot.ambiguous_lane
+
+
+async def test_checklist_import_preserves_an_outstanding_wait(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, store = board
+    await ledger.execute(
+        "orchestrator",
+        "lane_start",
+        "start",
+        {"lane": "existing", "worker": "fixture", "branch": PULLS[0].branch, "work_items": []},
+    )
+    await ledger.execute(
+        "worker:fixture", "lane_update", "wait", {"lane": "existing", "waiting_on": "orchestrator"}
+    )
+    _, before = await store.read_next("orchestrator", 0, 50)
+    [waiting] = [item for item in before if item.kind == "lane_waiting"]
+    imported = await ledger.execute(
+        "orchestrator",
+        "checklist_import",
+        "rows",
+        {
+            "lane": "existing",
+            "rows": [{"step": "Check receipt", "owner": "fixture", "ref": "local"}],
+        },
+    )
+    assert (imported.result["pr"], imported.result["state"]) == (41, "pending")
+    board_lanes = (await ledger.snapshot_board("orchestrator"))[0][3]
+    assert next(lane for lane in board_lanes if lane.id == "existing").waiting_on == "orchestrator"
+    _, after = await store.read_next("orchestrator", 0, 50)
+    assert waiting in after

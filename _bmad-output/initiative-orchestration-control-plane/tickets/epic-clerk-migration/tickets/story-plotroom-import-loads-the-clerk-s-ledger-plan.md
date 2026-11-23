@@ -58,6 +58,11 @@ An orchestrator can bring supported clerk ledger rows into the same local import
 - False, opening Kodus review. A trigger-linked lane gets its current PR and head from the GitHub projection on board reads. A head-movement assertion now covers this path without introducing another source of PR identity.
 - Medium, opening Kodus review. Starting lanes repeated the idle-worker scan in a single batch. The importer refreshes idle items once after creating lanes.
 
+- Low, CodeRabbit review. An explicit hold with an em dash separator now creates the same advisory, covered alongside the template wording.
+- Medium, CodeRabbit review. An exact-branch check missed an existing lane pattern. The importer uses the gate’s matcher and preserves the existing binding.
+- False, CodeRabbit review. A historical hold row in an overlapping batch is a replay with no ordering information. The later known advisory stays current, verified with a second unrelated hold in the old row’s batch.
+- Medium, CodeRabbit review. Importing checklist work cleared an outstanding worker wait. Checklist import now preserves that wait and its existing item while pinning the post-merge work.
+
 ## Verification
 
 - `uv run --locked python -m pytest -q tests/test_clerk_import.py tests/test_migrations.py`

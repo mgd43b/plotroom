@@ -55,8 +55,14 @@ An orchestrator can import the clerk trigger template locally through the runnin
 
 - Follow-up review verified code-block indentation and literal quoted comment text.
 
+- Low, CodeRabbit review. A backtick code span could hide valid records. Fence openers now retain the delimiter rules for both backticks and tildes.
+- Medium, CodeRabbit review. Non-ASCII whitespace and line separators could expose a fenced example. Fence closure now accepts only spaces or tabs, and the parser splits only Markdown line endings.
+- Medium, CodeRabbit review. A swapped input file could submit a ledger as trigger binds. The CLI validates the first content line as a Markdown trigger title before submitting.
+- Low, CodeRabbit review. A local daemon replacing its publication during readiness could refuse a usable import. The CLI re-probes once within the remaining deadline.
+
 ## Verification
 
 - `uv run --locked python -m pytest -q tests/test_clerk_import.py` for import, auth and replay.
 - Run Ruff and Pyright for changes and the existing trigger suite.
 - On the reviewed opening tree, 841 local Python 3.14 tests passed. The 40 affected tests passed on Python 3.14 and 3.15.
+- After the CodeRabbit follow-up, the 144 affected import, pilot, migration, transport, lane, and daemon-start tests passed on Python 3.14 and 3.15. Independent follow-up verified the parser and receipt regressions.

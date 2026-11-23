@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from plotroom.core.events import FieldSpec, LedgerError, NewEvent, validate_fields
 from plotroom.core.lanes import checklist_import, start_lane
+from plotroom.core.merge_lane import lane_matches_branch
 from plotroom.core.next_items import ItemKind
 from plotroom.core.trigger_actions import NOTIFY, SEND, DeliveryRoute
 from plotroom.core.triggers import LeafRegistry, create_trigger
@@ -28,7 +29,7 @@ CLERK_IMPORT_ITEMS = (BIND_TRIGGER, REVIEW_PULL, SKIPPED_PULL)
 
 _PLACEHOLDER_NOTE = "Imported fire-time fields such as [sha8] and [N] are literal text."
 _HOLD_STATE = re.compile(
-    r"(?:on[ \t]+hold|hold(?:ing)?|held)(?:$|[ \t]+(?:for|by|until|pending)\b|[ \t]*[:(])",
+    r"(?:on[ \t]+hold|hold(?:ing)?|held)(?:$|[ \t]+(?:for|by|until|pending)\b|[ \t]*[:(—])",
     re.IGNORECASE,
 )
 _TRIGGER_REF = re.compile(r"(?:Trigger[ \t]+)?(?:(T[0-9]+)|`(T[0-9]+)`)", re.IGNORECASE)
@@ -255,7 +256,10 @@ async def _import_pull(
     if (
         await uow.find_lane(lane) is not None
         or await uow.worker_lane(worker) is not None
-        or await uow.branch_lanes(pull.branch)
+        or any(
+            active.branch == pull.branch or lane_matches_branch(active, pull.branch)
+            for active in await uow.active_lanes()
+        )
     ):
         return await _review_pull(uow, row, "The worker, branch, or PR already has a lane")
     after_merge = row["after_merge"]
