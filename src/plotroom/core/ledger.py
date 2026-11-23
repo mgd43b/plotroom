@@ -20,6 +20,7 @@ from plotroom.core.events import (
     is_json,
     validate_fields,
 )
+from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.core.roles import OwnershipView, role_family
 from plotroom.core.unit_of_work import UnitOfWork
@@ -140,23 +141,29 @@ class Ledger:
                 items=self._catalog.items,
             )
             recorded = await uow.find_event("core", kind, upstream_id)
-            if recorded is None:
+            receipt = recorded.fields if recorded is not None else None
+            if receipt is None and registered.record_if is not None:
+                receipt = await tx.find_noop_receipt(command, upstream_id)
+            if receipt is None:
                 validate_fields(registered.args, snapshot, command)
             # A retry can supply different arguments. Authorize the actual target of the
             # receipt, so new arguments cannot make a previous target visible.
-            target: dict[str, Any] = snapshot if recorded is None else recorded.fields["args"]
+            target: dict[str, Any] = snapshot if receipt is None else receipt["args"]
             if rule.owns is not None:
                 view = OwnershipView(role, uow.find_event, uow.find_item, uow.find_lane)
                 if not await rule.owns(view, copy.deepcopy(target)):
                     raise LedgerError(
                         "forbidden", f"role {role!r} does not own the target of {command}"
                     )
-            if recorded is not None:
-                return CommandResult(recorded.fields["result"], True)
+            if receipt is not None:
+                return CommandResult(receipt["result"], True)
             result = await registered.handler(uow, copy.deepcopy(snapshot))
             if not isinstance(result, dict) or not is_json(result):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise TypeError(f"command {command!r} must return a JSON object")
             if registered.record_if is not None and not registered.record_if(result):
+                await tx.insert_noop_receipt(
+                    command, upstream_id, {"args": snapshot, "result": result}
+                )
                 return CommandResult(result, False)
             await uow.append(
                 NewEvent(
@@ -234,5 +241,5 @@ class Ledger:
     async def ready_work_items(self) -> tuple[WorkItem, ...]:
         return await self._store.ready_work_items()
 
-    async def read_board(self, role: str) -> tuple[int, list[Item], dict[str, int]]:
+    async def read_board(self, role: str) -> tuple[int, list[Item], dict[str, int], list[Lane]]:
         return await self._store.read_board(role)

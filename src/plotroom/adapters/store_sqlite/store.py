@@ -17,7 +17,7 @@ from sqlalchemy.pool import ConnectionPoolEntry
 
 from plotroom.adapters.store_sqlite.actions_sql import pending_action
 from plotroom.adapters.store_sqlite.items_sql import first_change, open_items
-from plotroom.adapters.store_sqlite.lanes_sql import lane_counts
+from plotroom.adapters.store_sqlite.lanes_sql import board_lanes, lane_counts
 from plotroom.adapters.store_sqlite.ledger_sql import (
     EVENTS_AFTER,
     HEAD_SEQ,
@@ -28,6 +28,7 @@ from plotroom.adapters.store_sqlite.migrate import upgrade_to_head
 from plotroom.adapters.store_sqlite.work_items_sql import ready_work_items
 from plotroom.core.actions import Action
 from plotroom.core.events import Event
+from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
 
@@ -163,10 +164,15 @@ class SqliteStore:
             result = await connection.execute(EVENTS_AFTER, {"seq": seq, "limit": limit})
             return [event_from_row(row) for row in result]
 
-    async def read_board(self, role: str) -> tuple[int, list[Item], dict[str, int]]:
+    async def read_board(self, role: str) -> tuple[int, list[Item], dict[str, int], list[Lane]]:
         async with self._engine.connect() as connection:
             cursor = int((await connection.execute(HEAD_SEQ)).scalar_one())
-            return cursor, await open_items(connection, role), await lane_counts(connection, role)
+            return (
+                cursor,
+                await open_items(connection, role),
+                await lane_counts(connection, role),
+                await board_lanes(connection, role),
+            )
 
     async def first_item_change(self, role: str, cursor: int) -> tuple[int, dict[str, Any] | None]:
         async with self._engine.connect() as connection:

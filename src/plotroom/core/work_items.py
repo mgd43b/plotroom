@@ -11,8 +11,8 @@ IDLE_WORKER = "idle_worker"
 async def refresh_idle_workers(uow: UnitOfWork, workers: frozenset[str]) -> None:
     claimed = await uow.claimed_work_items()
     eligible = [item.ref for item in await uow.ready_work_items() if item.ref not in claimed]
-    for worker in sorted(workers):
-        if eligible and await uow.worker_lane(worker) is None:
+    for worker in sorted(workers | await uow.active_item_subjects(IDLE_WORKER)):
+        if worker in workers and eligible and await uow.worker_lane(worker) is None:
             await uow.raise_item(
                 IDLE_WORKER,
                 worker,

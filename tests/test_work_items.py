@@ -95,3 +95,48 @@ title = "In progress"
     finally:
         await ledger.stop()
         await store.close()
+
+
+async def test_slow_tick_skips_elapsed_intervals_and_removed_conditions_close(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    clock = FixedClock()
+    workers = frozenset({"fixture"})
+    catalog = build_catalog(workers)
+    ledger = Ledger(store, catalog, clock, watcher_roles=("clerk",))
+    ledger.start()
+
+    class SlowSource:
+        async def ready_items(self) -> tuple[WorkItem, ...]:
+            clock.advance(8)
+            return (WorkItem("1.1", "Ready"),)
+
+    try:
+        runtime = ProjectRuntime(
+            ledger,
+            clock,
+            tick_seconds=5,
+            action_attempts=3,
+            workers=workers,
+            work_items=SlowSource(),
+        )
+        clock.advance(5)
+        assert await runtime.tick_if_due()
+        assert not await runtime.tick_if_due()
+        assert {item.kind for item in (await ledger.read_board("orchestrator"))[1]} == {
+            "idle_worker",
+            "watcher_not_running",
+        }
+        await ledger.stop()
+        ledger = Ledger(store, build_catalog(), clock)
+        ledger.start()
+        runtime = ProjectRuntime(ledger, clock, tick_seconds=5, action_attempts=3)
+        clock.advance(5)
+        assert await runtime.tick_if_due()
+        assert not (await ledger.read_board("orchestrator"))[1]
+        assert not await ledger.ready_work_items()
+    finally:
+        await ledger.stop()
+        await store.close()

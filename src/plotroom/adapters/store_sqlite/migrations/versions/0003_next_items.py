@@ -15,6 +15,13 @@ depends_on = None
 
 def upgrade() -> None:
     op.create_table(
+        "noop_command_receipts",
+        sa.Column("command", sa.Text(), primary_key=True),
+        sa.Column("request_key", sa.Text(), primary_key=True),
+        sa.Column("receipt", sa.Text(), nullable=False),
+        sa.CheckConstraint("json_valid(receipt)"),
+    )
+    op.create_table(
         "next_items",
         sa.Column("id", sa.Text(), primary_key=True),
         sa.Column("kind", sa.Text(), nullable=False),

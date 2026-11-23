@@ -65,7 +65,8 @@ class ProjectRuntime:
 
         await self.ledger.run("system", tick)
         # Keep the cadence after delays without replaying a burst of stale ticks.
-        self.next_tick += ((now - self.next_tick) // self.interval + 1) * self.interval
+        finished = max(now, self.clock.now())
+        self.next_tick += ((finished - self.next_tick) // self.interval + 1) * self.interval
         return True
 
     async def run_one_action(self) -> bool:
@@ -75,16 +76,22 @@ class ProjectRuntime:
         if action.attempts >= self.action_attempts:
             await self.ledger.run("system", lambda uow: finish_action(uow, action, "failed"))
             return True
-        attempted = await self.ledger.run("system", lambda uow: record_attempt(uow, action))
+        failed = False
         try:
-            await self.handlers[attempted.kind](attempted)
+            await self.handlers[action.kind](action)
         except Exception:
             # Action payloads and exception text may be sensitive. The item points to the key.
-            log.warning("action attempt failed", extra={"kind": attempted.kind})
-            if attempted.attempts >= self.action_attempts:
-                await self.ledger.run("system", lambda uow: finish_action(uow, attempted, "failed"))
-        else:
-            await self.ledger.run("system", lambda uow: finish_action(uow, attempted, "done"))
+            log.warning("action attempt failed", extra={"kind": action.kind})
+            failed = True
+
+        async def commit_attempt(uow: UnitOfWork) -> None:
+            completed = await record_attempt(uow, action)
+            if not failed:
+                await finish_action(uow, completed, "done")
+            elif completed.attempts >= self.action_attempts:
+                await finish_action(uow, completed, "failed")
+
+        await self.ledger.run("system", commit_attempt)
         return True
 
     def start(self) -> None:

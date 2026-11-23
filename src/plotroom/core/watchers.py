@@ -27,8 +27,9 @@ class Watchers:
                 del self._active[role]
 
     async def reconcile(self, uow: UnitOfWork) -> None:
-        for role in self.roles:
-            if self._active[role]:
+        roles = set(self.roles)
+        for role in sorted(roles | await uow.active_item_subjects(MISSING_WATCHER)):
+            if role not in roles or self._active[role]:
                 await uow.clear_item(MISSING_WATCHER, role)
             else:
                 await uow.raise_item(MISSING_WATCHER, role, "orchestrator", {"role": role})

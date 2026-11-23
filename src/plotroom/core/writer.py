@@ -45,6 +45,7 @@ class ProjectWriter:
         """Start the writer task. Needs a running event loop."""
         if self._task is not None and not self._task.done():
             raise RuntimeError("the writer is already running")
+        self.commit_signal = asyncio.Event()
         queue: asyncio.Queue[_Item | None] = asyncio.Queue()
         self._queue = queue
         self._accepting = True

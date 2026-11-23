@@ -10,7 +10,7 @@ route_source: auto
 risk: medium
 review: thorough
 review_source: pinned
-lenses_ran: []
+lenses_ran: [native-codex]
 review_loop_iteration: 0
 context: []
 ---
@@ -46,6 +46,8 @@ Given a BMad repo fixture and an idle worker, when a tick reads ready entries an
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Native Codex review. A tick closes idle items for workers removed from configuration. The reconfiguration regression also verifies that disabling the source clears its stale mirror.
 
 ## Verification
 

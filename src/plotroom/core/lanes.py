@@ -42,8 +42,8 @@ async def start_lane(
     work_items: list[Any] = args["work_items"]
     if worker not in workers:
         raise LedgerError("invalid", "worker is not configured for this project")
-    if not lane_id.strip() or not branch.strip():
-        raise LedgerError("invalid", "lane and branch must be non-empty")
+    if not lane_id.strip() or len(lane_id.encode()) > 128 or not branch.strip():
+        raise LedgerError("invalid", "lane must be 1-128 UTF-8 bytes and branch must be non-empty")
     if not all(isinstance(item, str) and item.strip() for item in work_items):
         raise LedgerError("invalid", "work_items must contain non-empty strings")
     if await uow.find_lane(lane_id) is not None:

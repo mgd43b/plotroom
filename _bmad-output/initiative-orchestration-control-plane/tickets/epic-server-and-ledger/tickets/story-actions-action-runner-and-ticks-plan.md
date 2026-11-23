@@ -10,7 +10,7 @@ route_source: auto
 risk: medium
 review: thorough
 review_source: pinned
-lenses_ran: []
+lenses_ran: [native-codex]
 review_loop_iteration: 0
 context: []
 ---
@@ -46,6 +46,8 @@ Given a fixture action and fake clock, when the action fails repeatedly and the 
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Native Codex review. An interrupted handler does not consume a completed attempt. At the final retry limit the same action key can still deliver after restart. The next tick targets the first future interval after a slow source refresh.
 
 ## Verification
 

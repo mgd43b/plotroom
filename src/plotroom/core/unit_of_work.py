@@ -146,6 +146,9 @@ class UnitOfWork:
         await self.save_item(item)
         return item
 
+    async def active_item_subjects(self, kind: str) -> set[str]:
+        return await self._tx.active_item_subjects(kind)
+
     async def clear_item(self, kind: str, subject_ref: str) -> None:
         if not self.item_kind(kind).state_backed:
             raise LedgerError("invalid", f"{kind!r} is not state-backed")

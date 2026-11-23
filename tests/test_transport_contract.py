@@ -15,6 +15,7 @@ from conftest import write_config
 from plotroom.app.config import load_config
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import IssuedToken, TokenRegistry
+from plotroom.core.snapshot import estimate_tokens
 from plotroom.core.watchers import Watchers
 from rawproxy import ERAS, MODERN, initialize_request, modern_call, spawn_proxy
 
@@ -167,10 +168,15 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         listed = await send(message(era, 1, "tools/list"))
         names = {tool["name"] for tool in listed["result"]["tools"]}
         assert names == TOOL_NAMES
+        for tool in listed["result"]["tools"]:
+            if tool["name"] == "ack" or tool["name"].startswith("lane_"):
+                assert "request_id" in tool["inputSchema"]["required"]
         called: set[str] = set()
 
         async def call(name: str, **args: Any) -> dict[str, Any]:
             called.add(name)
+            if name == "ack" or name.startswith("lane_"):
+                args["request_id"] = name
             reply = await send(
                 message(era, len(called) + 2, "tools/call", name=name, arguments=args)
             )
@@ -304,3 +310,41 @@ async def test_modern_listen_stays_open_while_tools_answer(
             finally:
                 await proxy.close()
             assert proxy.process.returncode == 0
+
+
+async def test_snapshot_and_next_text_respect_the_budget(endpoint: Endpoint) -> None:
+    branch = "x" * 7550
+    async with asyncio.timeout(10), connection(endpoint, "http", "legacy") as send:
+
+        async def call(number: int, name: str, **args: Any) -> str:
+            result = await send(message("legacy", number, "tools/call", name=name, arguments=args))
+            return str(result["result"]["content"][0]["text"])
+
+        assert json.loads(
+            await call(
+                1,
+                "lane_start",
+                request_id="start",
+                lane="lane",
+                worker="fixture",
+                branch=branch,
+                work_items=[],
+            )
+        )["ok"]
+        assert json.loads(
+            await call(2, "lane_update", request_id="wait", lane="lane", waiting_on="orchestrator")
+        )["ok"]
+        snapshot = await call(3, "snapshot")
+        assert estimate_tokens(snapshot) <= 2000
+        board = json.loads(snapshot)["data"]
+        assert board["left_out"] == 1
+        assert board["lane_details"] == [{"id": "lane", "details_omitted": True}]
+        page = await call(4, "next")
+        assert estimate_tokens(page) <= 2000
+        item = json.loads(page)["data"]["items"][0]
+        assert item["details_omitted"] is True
+        assert (
+            json.loads(await call(5, "next", item=item["id"]))["data"]["context"]["branch"]
+            == branch
+        )
+        assert json.loads(await call(6, "snapshot", lane="lane"))["data"]["branch"] == branch

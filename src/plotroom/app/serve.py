@@ -280,6 +280,7 @@ class Daemon:
                 authenticate=TokenRegistry(config.data_dir).authenticate,
                 unavailable=problem,
                 snapshot_budget=config.snapshot_budget,
+                next_budget=config.next_budget,
             )
             uvicorn_config = uvicorn.Config(
                 app,

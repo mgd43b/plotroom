@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from plotroom.core.roles import role_family
-from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET
+from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, MIN_BOARD_BUDGET
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -33,6 +33,7 @@ _TOP_LEVEL_KEYS = {
     "log_max_bytes",
     "log_backups",
     "snapshot_budget",
+    "next_budget",
     "tick_seconds",
     "action_attempts",
     "wait_cap",
@@ -59,6 +60,7 @@ class Config:
     workers: Mapping[str, frozenset[str]] = field(default_factory=lambda: {})
     ticket_trees: Mapping[str, tuple[Path, Path]] = field(default_factory=lambda: {})
     snapshot_budget: int = DEFAULT_SNAPSHOT_BUDGET
+    next_budget: int = DEFAULT_SNAPSHOT_BUDGET
     tick_seconds: int = 60
     action_attempts: int = 3
     wait_cap: int = 240
@@ -151,7 +153,12 @@ def load_config(
         watchers=_watchers(projects, raw.get("projects"), drain_sessions),
         wait_cap=_integer("wait_cap", raw.get("wait_cap", 240), minimum=1),
         snapshot_budget=_integer(
-            "snapshot_budget", raw.get("snapshot_budget", DEFAULT_SNAPSHOT_BUDGET), minimum=1
+            "snapshot_budget",
+            raw.get("snapshot_budget", DEFAULT_SNAPSHOT_BUDGET),
+            minimum=MIN_BOARD_BUDGET,
+        ),
+        next_budget=_integer(
+            "next_budget", raw.get("next_budget", DEFAULT_SNAPSHOT_BUDGET), minimum=MIN_BOARD_BUDGET
         ),
         tick_seconds=_integer("tick_seconds", raw.get("tick_seconds", 60), minimum=1),
         action_attempts=_integer("action_attempts", raw.get("action_attempts", 3), minimum=1),

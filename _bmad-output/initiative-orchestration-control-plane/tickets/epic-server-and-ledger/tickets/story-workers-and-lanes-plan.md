@@ -10,7 +10,7 @@ route_source: auto
 risk: medium
 review: thorough
 review_source: pinned
-lenses_ran: []
+lenses_ran: [native-codex]
 review_loop_iteration: 0
 context: []
 ---
@@ -46,6 +46,8 @@ Given one fixture worker and an orchestrator, when both transports call lane too
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Native Codex review. Snapshot includes role-scoped current lane records and can page or fetch a named lane. The smoke verifies an active record after restart and a ready record after the waiting item clears. Mutating tools require caller-generated request IDs.
 
 ## Verification
 

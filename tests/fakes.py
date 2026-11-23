@@ -52,6 +52,7 @@ class _MemoryTransaction:
         self.events = events
         self.items: dict[str, Item] = {}
         self.changes: list[Item] = []
+        self.receipts: dict[tuple[str, str], dict[str, Any]] = {}
         self.actions: dict[str, Action] = {}
         self.lanes: dict[str, Lane] = {}
         self.work_items: tuple[WorkItem, ...] = ()
@@ -125,6 +126,22 @@ class _MemoryTransaction:
             raise RuntimeError("duplicate event identity reached the store")
         self.events.append(copy.deepcopy(event))
 
+    async def find_noop_receipt(self, command: str, key: str) -> dict[str, Any] | None:
+        self._live()
+        return copy.deepcopy(self.receipts.get((command, key)))
+
+    async def insert_noop_receipt(self, command: str, key: str, receipt: dict[str, Any]) -> None:
+        self._live()
+        self.receipts[command, key] = copy.deepcopy(receipt)
+
+    async def active_item_subjects(self, kind: str) -> set[str]:
+        self._live()
+        return {
+            item.subject_ref
+            for item in self.items.values()
+            if item.kind == kind and item.state != "closed"
+        }
+
     async def find_item(self, item_id: str) -> Item | None:
         self._live()
         return copy.deepcopy(self.items.get(item_id))
@@ -160,6 +177,7 @@ class MemoryStore:
         self._seq = 0
         self._items: dict[str, Item] = {}
         self._changes: list[Item] = []
+        self._receipts: dict[tuple[str, str], dict[str, Any]] = {}
         self._actions: dict[str, Action] = {}
         self._lanes: dict[str, Lane] = {}
         self._work_items: tuple[WorkItem, ...] = ()
@@ -184,6 +202,7 @@ class MemoryStore:
         tx = _MemoryTransaction(copy.deepcopy(self._events), self._seq, self.on_allocate)
         tx.items = copy.deepcopy(self._items)
         tx.changes = self._changes.copy()
+        tx.receipts = copy.deepcopy(self._receipts)
         tx.actions = copy.deepcopy(self._actions)
         tx.lanes = self._lanes.copy()
         tx.work_items = self._work_items
@@ -195,6 +214,7 @@ class MemoryStore:
         else:
             self._events, self._seq, self._items = tx.events, tx.seq, tx.items
             self._changes = tx.changes
+            self._receipts = tx.receipts
             self._actions = tx.actions
             self._lanes = tx.lanes
             self._work_items = tx.work_items
@@ -209,11 +229,11 @@ class MemoryStore:
     async def events_after(self, seq: int, limit: int = 100) -> list[StoredEvent]:
         return [copy.deepcopy(e) for e in self._events if e.seq > seq][: max(limit, 0)]
 
-    async def read_board(self, role: str) -> tuple[int, list[Item], dict[str, int]]:
+    async def read_board(self, role: str) -> tuple[int, list[Item], dict[str, int], list[Lane]]:
         items = [
             copy.deepcopy(i) for i in self._items.values() if i.state == "open" and visible(i, role)
         ]
-        return self._seq, sorted(items, key=lambda i: (i.rank_class, i.opened_seq)), {}
+        return self._seq, sorted(items, key=lambda i: (i.rank_class, i.opened_seq)), {}, []
 
     async def ready_work_items(self) -> tuple[WorkItem, ...]:
         return self._work_items

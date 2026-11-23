@@ -10,7 +10,7 @@ route_source: auto
 risk: medium
 review: thorough
 review_source: pinned
-lenses_ran: []
+lenses_ran: [native-codex]
 review_loop_iteration: 0
 context: []
 ---
@@ -46,6 +46,9 @@ Given ranked fixture items of both kinds, when read, acknowledged twice and rend
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Native Codex review. The ack receipt is preserved even when a second acknowledgment has no board effect. The regression reopens the item and confirms that the old request ID still replays its no-op.
+- Native Codex review. Next pages preserve rank and expose full open-item detail by ID. Snapshot and next budgets are measured against the indented MCP text envelope.
 
 ## Verification
 

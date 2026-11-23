@@ -9,6 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from plotroom.core.next_items import Item
 
+_ACTIVE_SUBJECTS = text(
+    "SELECT subject_ref FROM next_items WHERE kind = :kind AND state != 'closed'"
+)
 _BY_ID = text("SELECT * FROM next_items WHERE id = :id")
 _ACTIVE = text("SELECT * FROM next_items WHERE dedup_key = :key AND state != 'closed'")
 _OPEN = text(
@@ -48,6 +51,12 @@ def _item(row: Row[Any]) -> Item:
     fields["context"] = json.loads(row.context)
     fields["suggested_actions"] = tuple(json.loads(row.suggested_actions))
     return Item(**fields)
+
+
+async def active_item_subjects(connection: AsyncConnection, kind: str) -> set[str]:
+    return {
+        str(row.subject_ref) for row in await connection.execute(_ACTIVE_SUBJECTS, {"kind": kind})
+    }
 
 
 async def find_item(connection: AsyncConnection, item_id: str) -> Item | None:

@@ -49,6 +49,7 @@ async def test_local_lane_smoke(transport: str, tmp_path: Path, token_home: Path
         url = f"http://127.0.0.1:{port}/mcp"
         args = {
             "lane": "demo-lane",
+            "request_id": "start",
             "worker": "fixture",
             "work_items": ["fixture.1"],
             "branch": "demo",
@@ -63,7 +64,8 @@ async def test_local_lane_smoke(transport: str, tmp_path: Path, token_home: Path
             assert started["data"]["worker"] == "fixture"
             update = tool_json(
                 await worker_client.call_tool(
-                    "lane_update", {"lane": "demo-lane", "waiting_on": "orchestrator"}
+                    "lane_update",
+                    {"lane": "demo-lane", "waiting_on": "orchestrator", "request_id": "waiting"},
                 )
             )
             assert update["data"]["waiting_on"] == "orchestrator"
@@ -73,12 +75,14 @@ async def test_local_lane_smoke(transport: str, tmp_path: Path, token_home: Path
             assert waiting["items"] == [item]
             assert waiting["lanes"] == {"active": 1}
             assert tool_json(await worker_client.call_tool("next", {}))["data"]["items"] == []
-            ack_args = {"item": item["id"]}
+            ack_args = {"item": item["id"], "request_id": "ack-first"}
             acked = tool_json(await orchestrator.call_tool("ack", ack_args))["data"]
             assert acked["state"] == "snoozed"
             assert acked["changed"] is True
             before = tool_json(await orchestrator.call_tool("snapshot", {}))
-            again = tool_json(await orchestrator.call_tool("ack", ack_args))["data"]
+            again = tool_json(
+                await orchestrator.call_tool("ack", {**ack_args, "request_id": "ack-repeat"})
+            )["data"]
             assert again["changed"] is False
             assert tool_json(await orchestrator.call_tool("snapshot", {})) == before
             next_before = tool_json(await orchestrator.call_tool("next", {}))
@@ -94,13 +98,20 @@ async def test_local_lane_smoke(transport: str, tmp_path: Path, token_home: Path
             assert tool_json(await orchestrator.call_tool("next", {})) == next_before
             ready = tool_json(
                 await orchestrator.call_tool(
-                    "lane_ready", {"lane": "demo-lane", "pr": 1, "head_sha": "a" * 40}
+                    "lane_ready",
+                    {"lane": "demo-lane", "pr": 1, "head_sha": "a" * 40, "request_id": "ready"},
                 )
             )
             assert ready["data"]["state"] == "ready"
             assert ready["data"]["work_items"] == ["fixture.1"]
+            board = tool_json(await orchestrator.call_tool("snapshot", {}))["data"]
+            assert board["lane_details"] == [ready["data"]]
+            assert before["data"]["lane_details"][0]["waiting_on"] == "orchestrator"
+            assert before["data"]["items"] == []
             archived = tool_json(
-                await orchestrator.call_tool("lane_archive", {"lane": "demo-lane"})
+                await orchestrator.call_tool(
+                    "lane_archive", {"lane": "demo-lane", "request_id": "archive"}
+                )
             )
             assert archived["data"]["state"] == "archived"
     finally:

@@ -29,7 +29,7 @@ async def test_rank_dedup_ack_and_snapshot_budget(tmp_path: Path) -> None:
             "system", lambda uow: uow.raise_item("fixture_event", "b", "orchestrator", {})
         )
         assert same == event
-        cursor, items, lanes = await ledger.read_board("orchestrator")
+        cursor, items, lanes, _ = await ledger.read_board("orchestrator")
         assert cursor == 2
         assert items == [event, state]
         board = render_snapshot("demo", cursor, items, lanes, 100)
@@ -50,6 +50,10 @@ async def test_rank_dedup_ack_and_snapshot_budget(tmp_path: Path) -> None:
         )
         assert changed.id == state.id
         assert changed.state == "open"
+        replay = await ledger.execute("orchestrator", "ack", f"{state.id}:2", {"item": state.id})
+        assert replay.replayed
+        assert replay.result == {"item": state.id, "state": "snoozed", "changed": False}
+        assert await ledger.head_seq() == changed.seq
         await ledger.run("system", lambda uow: uow.clear_item("fixture_state", "a"))
         assert (await ledger.read_board("orchestrator"))[1] == []
     finally:

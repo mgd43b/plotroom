@@ -10,7 +10,7 @@ route_source: auto
 risk: medium
 review: thorough
 review_source: pinned
-lenses_ran: []
+lenses_ran: [native-codex]
 review_loop_iteration: 0
 context: []
 ---
@@ -46,6 +46,8 @@ Given a two-second server cap and a CLI watcher, when the watcher passes multipl
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Native Codex review. Tick reconciliation closes items for removed watcher roles. Restart resets the commit signal. The focused fixtures verify both transitions.
 
 ## Verification
 
