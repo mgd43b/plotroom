@@ -291,6 +291,16 @@ async def test_ticket_tree_move_lists_editing_prs_first(
         assert all(entry["context"]["coordination_required"] for entry in cycle)
         assert all(entry["context"]["suggested_order"] == [] for entry in cycle)
 
+        repository.pull(20, "bob", f"{TREE}/second-new.md", first, previous=second, version=4)
+        repository.pull(70, "first", f"{TREE}/first-new.md", previous=first, version=2)
+        repository.pull(80, "second", first, second, version=2)
+        await repository.refresh()
+        orders = {
+            entry["context"]["moving_pr"]: entry["context"]["suggested_order"]
+            for entry in await items(orch, TICKET_TREE_MOVE)
+        }
+        assert orders == {20: [80, 20], 70: [80, 20, 70]}
+
 
 async def test_conflicting_claim_reported_when_made(tmp_path: Path, repository: Repository) -> None:
     assert not repository.pulls
@@ -298,7 +308,7 @@ async def test_conflicting_claim_reported_when_made(tmp_path: Path, repository: 
         await start(orch, "alice")
         await start(orch, "bob")
         await claim(alice, "alice", "src//a/**", "src/a/**")
-        await claim(orch, "bob", "src/a/x.py", "src/a/y.py")
+        await claim(orch, "bob", "src/a/x.py", "src/a/y.py", "src/aa/y.py")
         (opened,) = await items(orch, CLAIM_OVERLAP)
         assert opened["context"]["lanes"] == ["alice", "bob"]
         assert [entry["glob"] for entry in opened["context"]["claims"]] == [
@@ -406,4 +416,12 @@ async def test_worker_can_claim_only_own_lane(tmp_path: Path, repository: Reposi
             "claims": [{"lane": "bob", "glob": "src/bob", "reason": "owned by bob"}],
             "changed": True,
         }
+        assert (await call(orch, "snapshot"))["claims"] == 1
+        await claim(alice, "alice", "src/dir /.", request_id="space")
+        saved = await call(alice, "claims", lane="alice")
+        glob = next(entry["glob"] for entry in saved["claims"] if entry["glob"] != "src/alice")
+        assert glob == "src/dir\\ "
+        assert (await call(alice, "release", lane="alice", globs=[glob], request_id="space"))[
+            "changed"
+        ]
         assert (await call(orch, "snapshot"))["claims"] == 1

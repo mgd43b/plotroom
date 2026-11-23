@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from dataclasses import dataclass
+from graphlib import CycleError, TopologicalSorter
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -87,17 +88,19 @@ async def _reconcile_pr_claims(
     await sync_items(uow, PR_CLAIM_OVERLAP, desired)
 
 
-def _depends_on_itself(number: int, dependencies: dict[int, set[int]]) -> bool:
-    pending = list(dependencies[number])
+def _merge_order(mover: int, dependencies: dict[int, set[int]]) -> list[int]:
+    pending = [mover]
     visited: set[int] = set()
     while pending:
-        editor = pending.pop()
-        if editor == number:
-            return True
-        if editor not in visited:
-            visited.add(editor)
-            pending.extend(dependencies.get(editor, ()))
-    return False
+        pr = pending.pop()
+        if pr not in visited:
+            visited.add(pr)
+            pending.extend(dependencies.get(pr, ()))
+    graph = {pr: sorted(dependencies.get(pr, ())) for pr in sorted(visited)}
+    try:
+        return list(TopologicalSorter(graph).static_order())
+    except CycleError:
+        return []
 
 
 async def _reconcile_moves(uow: UnitOfWork, pulls: list[_PullFiles]) -> None:
@@ -123,7 +126,7 @@ async def _reconcile_moves(uow: UnitOfWork, pulls: list[_PullFiles]) -> None:
     for mover, edits in conflicts.items():
         editors = sorted(dependencies[mover])
         prs = [*editors, mover]
-        cyclic = _depends_on_itself(mover, dependencies)
+        order = _merge_order(mover, dependencies)
         context: dict[str, object] = {
             "lanes": sorted(
                 {lane for number in prs if (lane := by_number[number].lane) is not None}
@@ -132,9 +135,9 @@ async def _reconcile_moves(uow: UnitOfWork, pulls: list[_PullFiles]) -> None:
             "moving_pr": mover,
             "editing_prs": editors,
             "edits": edits,
-            "suggested_order": [] if cyclic else prs,
+            "suggested_order": order,
         }
-        if cyclic:
+        if not order:
             context["coordination_required"] = True
         desired[str(mover)] = context
     await sync_items(uow, TICKET_TREE_MOVE, desired)

@@ -85,6 +85,11 @@ Claims and conflicts are distinct reads. Claims use lane visibility. Overlaps us
 - Low, patched. Normalize and compile bracket expressions before splitting path components. A slash inside a character class does not split the glob.
 - Medium, patched. Moves participating in cyclic edit dependencies show the involved PRs and request coordination without a contradictory merge order.
 - Medium, referred to the ticketer. The existing PR projection confirms file lists by head SHA. Detecting a retarget with an unchanged head and an unavailable refresh needs a base identity in that projection.
+- Medium, patched after automatic review. The prefix index compares claims against neighboring prefixes and preserves the same conservative coverage. The fixture checks a sibling path stays disjoint.
+- Medium, patched after automatic review. The merge order follows transitive editor prerequisites and stops prescribing an order when the dependency graph has a cycle.
+- Low, patched after automatic review. Normalization escapes trailing literal spaces exposed by removing a path component. The daemon regression releases the exact returned glob.
+- Low, retained and tested. Git matches a pattern containing a slash in a bracket class from the root. A direct `git check-ignore` fixture confirmed the existing anchoring.
+- Low, referred to the ticketer. PR reconciliation uses existing projection reads. Batching the resource and lane queries is a separate storage optimization.
 
 ## Verification
 

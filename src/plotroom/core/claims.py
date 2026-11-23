@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from bisect import bisect_left
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from itertools import combinations
@@ -20,6 +21,7 @@ TICKET_TREE_MOVE = "ticket_tree_move"
 OVERLAP_KINDS = (CLAIM_OVERLAP, PR_CLAIM_OVERLAP, TICKET_TREE_MOVE)
 _GLOB_TOKEN = re.compile(r"\\(.)|([*?\[])")
 _TRAILING_ESCAPE = re.compile(r"(?<!\\)(?:\\\\)*\\$")
+_TRAILING_SPACES = re.compile(r"(?<!\\)((?:\\\\)*)( +)$")
 _BRACKET_PART = r"(?:\\.|\[:[a-z]+:\]|[^\\\]])"
 _BRACKET = re.compile(rf"\[(?P<negate>[!^]?+)(?P<contents>\]{_BRACKET_PART}*|{_BRACKET_PART}+)\]")
 _CLASS_TOKEN = re.compile(r"\\(.)|\[:([a-z]+):\]|(.)")
@@ -71,7 +73,7 @@ def _path_components(pattern: str) -> list[str]:
 def normalize_glob(pattern: str) -> str:
     # Git ignores unescaped trailing spaces. Preserve an escaped space and the
     # leading slash on a single component, which makes it root-relative.
-    pattern = re.sub(r"(?<!\\)((?:\\\\)*) +$", r"\1", pattern)
+    pattern = _TRAILING_SPACES.sub(r"\1", pattern)
     pattern = re.sub(r"(?<!\\)((?:\\\\)*)\\/", r"\1/", pattern)
     if pattern.startswith("!") or any(ord(char) < 32 for char in pattern):
         raise LedgerError("invalid", "claim glob cannot be negated or contain control characters")
@@ -81,6 +83,9 @@ def normalize_glob(pattern: str) -> str:
     anchored = parts[0].startswith("!") or (len(parts) == 1 and "/" in pattern.rstrip("/"))
     root = "/" if anchored else ""
     directory = "/" if pattern.endswith("/") else ""
+    if not directory:
+        # Removing a final "." component can expose literal spaces at the end.
+        parts[-1] = _TRAILING_SPACES.sub(lambda match: match[1] + r"\ " * len(match[2]), parts[-1])
     return root + "/".join(parts) + directory
 
 
@@ -253,26 +258,39 @@ async def sync_items(uow: UnitOfWork, kind: str, desired: dict[str, dict[str, An
         await uow.raise_item(kind, subject, "orchestrator", context)
 
 
+def _shortest_prefixes(entries: list[tuple[Claim, str]]) -> list[str]:
+    """Drop descendants so each candidate needs only two neighbor checks."""
+    shortest: list[str] = []
+    for prefix in sorted({prefix for _, prefix in entries}):
+        if not shortest or not prefix.startswith(shortest[-1]):
+            shortest.append(prefix)
+    return shortest
+
+
+def _comparable_prefix(prefix: str, ordered: list[str]) -> bool:
+    index = bisect_left(ordered, prefix)
+    return (index > 0 and prefix.startswith(ordered[index - 1])) or (
+        index < len(ordered) and ordered[index].startswith(prefix)
+    )
+
+
 async def reconcile_claim_pairs(uow: UnitOfWork, claims: list[Claim]) -> None:
     by_lane: dict[str, list[tuple[Claim, str]]] = defaultdict(list)
     for entry in claims:
         by_lane[entry.lane].append((entry, literal_prefix(entry.glob)))
+    indexes = {lane: _shortest_prefixes(entries) for lane, entries in by_lane.items()}
     desired: dict[str, dict[str, Any]] = {}
     for left, right in combinations(sorted(by_lane), 2):
-        participants: set[Claim] = set()
-        for first, first_prefix in by_lane[left]:
-            for second, second_prefix in by_lane[right]:
-                if first_prefix.startswith(second_prefix) or second_prefix.startswith(first_prefix):
-                    participants.update((first, second))
+        participants = [
+            entry.render()
+            for lane, other in ((left, right), (right, left))
+            for entry, prefix in by_lane[lane]
+            if _comparable_prefix(prefix, indexes[other])
+        ]
         if participants:
             desired[json.dumps([left, right])] = {
                 "lanes": [left, right],
                 "prs": [],
-                "claims": [
-                    entry.render()
-                    for lane in (left, right)
-                    for entry, _ in by_lane[lane]
-                    if entry in participants
-                ],
+                "claims": participants,
             }
     await sync_items(uow, CLAIM_OVERLAP, desired)

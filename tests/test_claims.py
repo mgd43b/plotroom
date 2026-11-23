@@ -34,6 +34,7 @@ AT = "2026-11-22T12:00:00Z"
         ("src/[!x]file", "src/[!x]file", "src/", "src/bfile", "src/xfile"),
         ("src/[]]", "src/[]]", "src/", "src/]", "src/x"),
         ("src/[!/]", "src/[!/]", "src/", "src/x", "other/x"),
+        ("file[!/].py", "/file[!/].py", "file", "file1.py", "src/file1.py"),
         ("src/??", "src/??", "src/", "src/é", "src/z"),
         ("src/é", "src/é", "src/é/", "src/é", "src/e"),
         (r"src\/file", "src/file", "src/file/", "src/file", "src/other"),
