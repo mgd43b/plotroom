@@ -142,10 +142,10 @@ def build_app(
             caller = board_access(ctx)
             if lane_offset < 0:
                 return err("invalid", "lane_offset must be nonnegative")
-            cursor, items, lanes, details = (
-                (0, [], {}, [])
+            (cursor, items, lanes, details), github = (
+                ((0, [], {}, []), None)
                 if caller.ledger is None
-                else await caller.ledger.read_board(caller.identity.role)
+                else await caller.ledger.snapshot_board(caller.identity.role)
             )
             if lane is not None:
                 for detail in details:
@@ -161,6 +161,8 @@ def build_app(
                     snapshot_budget,
                     lane_details=details,
                     lane_offset=lane_offset,
+                    github=github,
+                    github_error=None if caller.ledger is None else caller.ledger.github_error,
                 )
             )
         except LedgerError as exc:

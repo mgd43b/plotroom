@@ -9,6 +9,7 @@ from typing import Any
 
 from plotroom.core.envelope import ok
 from plotroom.core.events import LedgerError
+from plotroom.core.github import GitHubSummary
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 
@@ -45,6 +46,8 @@ def render_snapshot(
     *,
     lane_details: list[Lane] | None = None,
     lane_offset: int = 0,
+    github: GitHubSummary | None = None,
+    github_error: str | None = None,
 ) -> dict[str, Any]:
     listed: list[dict[str, Any]] = []
     board: dict[str, Any] = {
@@ -55,6 +58,11 @@ def render_snapshot(
         "items": listed,
         "left_out": len(items),
     }
+    if github is not None:
+        board["open_prs"] = github.open_prs
+        board["github"] = {"available": github_error is None, "as_of": github.as_of}
+        if github_error is not None:
+            board["github"]["error"] = github_error
     page: list[dict[str, Any]] = []
     if lane_details:
         board["lane_details"] = page

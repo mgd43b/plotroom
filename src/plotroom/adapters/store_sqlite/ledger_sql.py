@@ -8,9 +8,16 @@ from typing import Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from plotroom.adapters.store_sqlite import actions_sql, items_sql, lanes_sql, work_items_sql
+from plotroom.adapters.store_sqlite import (
+    actions_sql,
+    github_sql,
+    items_sql,
+    lanes_sql,
+    work_items_sql,
+)
 from plotroom.core.actions import Action
 from plotroom.core.events import Event
+from plotroom.core.github import FetchCursor, PullRequest
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
@@ -153,6 +160,21 @@ class SqliteTransaction:
 
     async def worker_lane(self, worker: str) -> Lane | None:
         return await lanes_sql.worker_lane(self._live(), worker)
+
+    async def branch_lane(self, branch: str) -> Lane | None:
+        return await lanes_sql.branch_lane(self._live(), branch)
+
+    async def pull_request(self, repository: str, number: int) -> PullRequest | None:
+        return await github_sql.pull_request(self._live(), repository, number)
+
+    async def save_pull_request(self, pull: PullRequest) -> None:
+        await github_sql.save_pull_request(self._live(), pull)
+
+    async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
+        return await github_sql.fetch_cursor(self._live(), repository, resource)
+
+    async def save_fetch_cursor(self, repository: str, resource: str, cursor: FetchCursor) -> None:
+        await github_sql.save_fetch_cursor(self._live(), repository, resource, cursor)
 
     async def save_lane(self, lane: Lane) -> None:
         await lanes_sql.save_lane(self._live(), lane)

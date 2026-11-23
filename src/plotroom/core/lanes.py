@@ -28,9 +28,14 @@ class Lane:
         return {**asdict(self), "work_items": list(self.work_items)}
 
 
-async def infer_lane(uow: UnitOfWork, *, worker: str | None) -> str | None:
-    """Resolve a provider's worker binding against the current lane in the input transaction."""
-    lane = await uow.worker_lane(worker) if worker is not None else None
+async def infer_lane(
+    uow: UnitOfWork, *, worker: str | None = None, branch: str | None = None
+) -> str | None:
+    """Resolve an upstream binding against the current lane in the input transaction."""
+    if worker is not None:
+        lane = await uow.worker_lane(worker)
+    else:
+        lane = await uow.branch_lane(branch) if branch is not None else None
     return lane.id if lane is not None else None
 
 

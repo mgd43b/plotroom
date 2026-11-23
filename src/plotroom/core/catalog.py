@@ -8,6 +8,7 @@ from functools import partial
 from plotroom.core.actions import ACTION_FIELDS, FAILED_ACTION
 from plotroom.core.commands import Command, CommandRegistry
 from plotroom.core.events import EventKind, EventRegistry, FieldSpec
+from plotroom.core.github import PR_FIELDS, PR_MERGED, PR_OPENED
 from plotroom.core.intake import (
     CLAUDE_APPENDERS,
     INBOUND_MESSAGE,
@@ -66,6 +67,8 @@ def build_catalog(workers: frozenset[str] = frozenset()) -> Catalog:
     )
     catalog.register_item(ItemKind(FAILED_ACTION, 10, False, ("Inspect the failed action",)))
     events.register(EventKind("core.tick", (), frozenset({"system"})))
+    for kind in (PR_OPENED, PR_MERGED):
+        events.register(EventKind(kind, PR_FIELDS, frozenset({"system"})))
     events.register(
         EventKind("switchboard.message", (FieldSpec("sender", "str"),), frozenset({"system"}))
     )

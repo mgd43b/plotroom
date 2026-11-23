@@ -20,14 +20,14 @@ from plotroom.core.events import (
     is_json,
     validate_fields,
 )
-from plotroom.core.lanes import Lane
+from plotroom.core.github import FetchCursor, GitHubSummary, PullRequest
 from plotroom.core.next_items import Item
 from plotroom.core.roles import OwnershipView, role_family
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.watchers import Watchers
 from plotroom.core.writer import ProjectWriter
 from plotroom.ports.clock import Clock
-from plotroom.ports.store import Store, Transaction
+from plotroom.ports.store import Board, Store, Transaction
 from plotroom.ports.work_items import WorkItem
 
 
@@ -57,6 +57,7 @@ class Ledger:
         *,
         watcher_roles: tuple[str, ...] = (),
         wait_cap: int = 240,
+        github_repository: str | None = None,
     ) -> None:
         self._store = store
         self._catalog = catalog
@@ -64,6 +65,8 @@ class Ledger:
         self._writer = ProjectWriter(store)
         self.watchers = Watchers(watcher_roles)
         self._wait_cap = wait_cap
+        self.github_repository = github_repository
+        self.github_error = "waiting for the first GitHub poll" if github_repository else None
         self._stopping = asyncio.Event()
 
     @property
@@ -247,5 +250,16 @@ class Ledger:
     async def read_open_item(self, role: str, item_id: str) -> Item | None:
         return await self._store.read_open_item(role, item_id)
 
-    async def read_board(self, role: str) -> tuple[int, list[Item], dict[str, int], list[Lane]]:
+    async def read_board(self, role: str) -> Board:
         return await self._store.read_board(role)
+
+    async def snapshot_board(self, role: str) -> tuple[Board, GitHubSummary | None]:
+        if self.github_repository is None:
+            return await self.read_board(role), None
+        return await self._store.read_github_board(role, self.github_repository)
+
+    async def pull_request(self, repository: str, number: int) -> PullRequest | None:
+        return await self._store.pull_request(repository, number)
+
+    async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
+        return await self._store.fetch_cursor(repository, resource)

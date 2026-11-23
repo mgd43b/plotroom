@@ -20,11 +20,13 @@ from plotroom.core.catalog import Catalog, build_catalog
 from plotroom.core.commands import Command, CommandError
 from plotroom.core.events import AppendResult, EventKind, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
+from plotroom.core.github import PULL_REQUESTS, FetchCursor, GitHubSummary, PullRequest
 from plotroom.core.lanes import Lane
 from plotroom.core.ledger import Ledger
 from plotroom.core.next_items import Item, visible
 from plotroom.core.roles import WriterRule
 from plotroom.core.unit_of_work import UnitOfWork
+from plotroom.ports.store import Board
 from plotroom.ports.work_items import WorkItem
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -58,6 +60,8 @@ class _MemoryTransaction:
         self.lanes: dict[str, Lane] = {}
         self.work_items: tuple[WorkItem, ...] = ()
         self.claude_turns: dict[tuple[str, str], str] = {}
+        self.pulls: dict[tuple[str, int], PullRequest] = {}
+        self.fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
         self.seq = seq
         self.expired = False
         self._on_allocate = on_allocate
@@ -117,6 +121,31 @@ class _MemoryTransaction:
             ),
             None,
         )
+
+    async def branch_lane(self, branch: str) -> Lane | None:
+        self._live()
+        lanes = [
+            lane
+            for lane in self.lanes.values()
+            if lane.branch == branch and lane.state != "archived"
+        ]
+        return lanes[0] if len(lanes) == 1 else None
+
+    async def pull_request(self, repository: str, number: int) -> PullRequest | None:
+        self._live()
+        return self.pulls.get((repository, number))
+
+    async def save_pull_request(self, pull: PullRequest) -> None:
+        self._live()
+        self.pulls[pull.repository, pull.number] = pull
+
+    async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
+        self._live()
+        return self.fetch_cursors.get((repository, resource))
+
+    async def save_fetch_cursor(self, repository: str, resource: str, cursor: FetchCursor) -> None:
+        self._live()
+        self.fetch_cursors[repository, resource] = cursor
 
     async def save_lane(self, lane: Lane) -> None:
         self._live()
@@ -196,6 +225,8 @@ class MemoryStore:
         self._lanes: dict[str, Lane] = {}
         self._work_items: tuple[WorkItem, ...] = ()
         self._claude_turns: dict[tuple[str, str], str] = {}
+        self._pulls: dict[tuple[str, int], PullRequest] = {}
+        self._fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
         self._open = False
         self.commits = 0
         self.on_allocate: Callable[[], None] | None = None
@@ -222,6 +253,8 @@ class MemoryStore:
         tx.lanes = self._lanes.copy()
         tx.work_items = self._work_items
         tx.claude_turns = self._claude_turns.copy()
+        tx.pulls = self._pulls.copy()
+        tx.fetch_cursors = self._fetch_cursors.copy()
         try:
             yield tx
         except BaseException:
@@ -235,6 +268,8 @@ class MemoryStore:
             self._lanes = tx.lanes
             self._work_items = tx.work_items
             self._claude_turns = tx.claude_turns
+            self._pulls = tx.pulls
+            self._fetch_cursors = tx.fetch_cursors
             self.commits += 1
         finally:
             tx.expired = True
@@ -263,6 +298,19 @@ class MemoryStore:
 
     async def ready_work_items(self) -> tuple[WorkItem, ...]:
         return self._work_items
+
+    async def read_github_board(self, role: str, repository: str) -> tuple[Board, GitHubSummary]:
+        opened = sum(
+            pull.state == "open" for pull in self._pulls.values() if pull.repository == repository
+        )
+        cursor = await self.fetch_cursor(repository, PULL_REQUESTS)
+        return await self.read_board(role), GitHubSummary(opened, cursor.as_of if cursor else None)
+
+    async def pull_request(self, repository: str, number: int) -> PullRequest | None:
+        return self._pulls.get((repository, number))
+
+    async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
+        return self._fetch_cursors.get((repository, resource))
 
     async def read_next(self, role: str, offset: int, limit: int) -> tuple[int, list[Item]]:
         _, items, _, _ = await self.read_board(role)

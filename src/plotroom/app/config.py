@@ -12,8 +12,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from plotroom.adapters.claude_desktop import SESSION_ID
+from plotroom.adapters.github import github_secret_name
 from plotroom.core.roles import role_family
 from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, MIN_BOARD_BUDGET
 
@@ -25,6 +27,8 @@ DEFAULT_LOG_BACKUPS = 5
 
 _WILDCARD_TO_LOOPBACK = {"0.0.0.0": "127.0.0.1", "::": "::1"}  # noqa: S104
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+_REPOSITORY = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+")
+GITHUB_API = "https://api.github.com"
 _TOP_LEVEL_KEYS = {
     "data_dir",
     "host",
@@ -61,6 +65,14 @@ class SessionReaderConfig:
 
 
 @dataclass(frozen=True)
+class GitHubConfig:
+    repository: str
+    token_file: Path | None
+    api_url: str
+    poll_seconds: int
+
+
+@dataclass(frozen=True)
 class Config:
     """The validated settings a plotroom process runs with."""
 
@@ -83,6 +95,7 @@ class Config:
     watchers: Mapping[str, tuple[str, ...]] = field(default_factory=lambda: {})
     switchboards: Mapping[str, SwitchboardConfig] = field(default_factory=lambda: {})
     session_readers: Mapping[str, SessionReaderConfig] = field(default_factory=lambda: {})
+    github: Mapping[str, GitHubConfig] = field(default_factory=lambda: {})
 
     @property
     def url(self) -> str:
@@ -171,6 +184,7 @@ def load_config(
         watchers=_watchers(projects, raw.get("projects"), drain_sessions),
         switchboards=_switchboards(projects, raw.get("projects")),
         session_readers=_session_readers(projects, raw.get("projects"), base),
+        github=_github_projects(projects, raw.get("projects"), base),
         wait_cap=_integer("wait_cap", raw.get("wait_cap", 240), minimum=1),
         snapshot_budget=_integer(
             "snapshot_budget",
@@ -362,6 +376,55 @@ def _session_readers(
                 sessions[session] = worker
         configured[project_id] = SessionReaderConfig(
             home.resolve(), support.resolve(), sessions, interval
+        )
+    return configured
+
+
+def _github_projects(projects: tuple[str, ...], table: Any, base: Path) -> dict[str, GitHubConfig]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, GitHubConfig] = {}
+    names: set[str] = set()
+    for project_id in projects:
+        project = entries.get(project_id, {})
+        if "github" not in project:
+            continue
+        label = f"projects.{project_id}.github"
+        raw_settings = project["github"]
+        if not isinstance(raw_settings, dict):
+            raise ConfigError(f"{label} must be a table")
+        settings = cast("dict[str, Any]", raw_settings)
+        repository = _string(f"{label}.repository", settings.get("repository")).lower()
+        if not _REPOSITORY.fullmatch(repository) or repository.split("/")[1] in (".", ".."):
+            raise ConfigError(f"{label}.repository must be a GitHub owner/repository")
+        name = github_secret_name(project_id)
+        if name in names:
+            raise ConfigError(f"{label} credential environment variable must be unique")
+        names.add(name)
+        token_file = None
+        if "token_file" in settings:
+            token_file = (
+                base / Path(_string(f"{label}.token_file", settings["token_file"])).expanduser()
+            )
+        api_url = _string(f"{label}.api_url", settings.get("api_url", GITHUB_API)).rstrip("/")
+        if api_url != GITHUB_API:
+            try:
+                url = urlsplit(api_url)
+                local = (
+                    url.scheme == "http"
+                    and url.hostname in ("127.0.0.1", "::1")
+                    and url.port is not None
+                    and url.username is None
+                    and not (url.path or url.query or url.fragment)
+                )
+            except ValueError:
+                local = False
+            if not local:
+                raise ConfigError(f"{label}.api_url must be the GitHub API or a loopback fixture")
+        configured[project_id] = GitHubConfig(
+            repository,
+            token_file,
+            api_url,
+            _integer(f"{label}.poll_seconds", settings.get("poll_seconds", 60), minimum=1),
         )
     return configured
 
