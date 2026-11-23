@@ -24,7 +24,7 @@ def upgrade() -> None:
         "triggers", sa.Column("was_true", sa.Boolean(), nullable=False, server_default="0")
     )
     op.add_column(
-        "triggers", sa.Column("event_floor", sa.Integer(), nullable=False, server_default="0")
+        "triggers", sa.Column("event_floors", sa.Text(), nullable=False, server_default="{}")
     )
     op.create_index("ix_events_kind_seq", "events", ["kind", "seq"])
     op.create_index("ix_events_lane_seq", "events", ["lane_id", "seq"])

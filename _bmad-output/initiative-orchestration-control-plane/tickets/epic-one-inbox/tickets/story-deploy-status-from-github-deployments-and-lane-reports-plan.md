@@ -3,7 +3,7 @@ title: 'Deployment status intake'
 type: feature
 ticket: 11
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '3ecf20da2ba64a6e5e2e18f4e41b50db05b3fab0'
 route: full
 route_source: auto
@@ -58,6 +58,10 @@ Given fixture statuses and an authorized worker report, when both inputs are rep
 
 - Native review found unbounded historical polling and missing lane attribution. GET polling now revisits the newest deployments and a bounded slice of history with durable list and status cursors. The writer resolves explicit branch refs only when one active lane matches. The fixture checks progress past 30 pages, a new head status on each poll, cooldown, restart, and unbound tag, SHA, and ambiguous refs.
 
+- The review after the main merge found that status pages needed independent event transactions, recently pending deployments needed their own bounded revisit queue, and malformed statuses needed per-record handling. Local fixture regressions cover each case.
+
 ## Verification
 
 `uv run python -m pytest -q tests/test_deploy_status.py` passed all three cases. The tests cover GET-only pagination, failure isolation, cooldown, replay after writer restart, and same-lane ownership, validation, and deduplication over HTTP and the stdio proxy.
+
+The integrated local suites passed 737 tests on each of Python 3.14 and 3.15. Ruff, Pyright for both versions, and the core dependency check passed.

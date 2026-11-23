@@ -207,8 +207,44 @@ def latest_checks(resource: GitHubResource) -> tuple[GitHubRecord, ...]:
     return tuple(latest.values())
 
 
-def main_verdict(resource: GitHubResource) -> GitHubRecord | None:
-    return next((row for row in resource.records if row.fields["status"] == "completed"), None)
+def checks_for_head(resource: GitHubResource, head_sha: str) -> tuple[GitHubRecord, ...] | None:
+    """Select latest attempts by check name and app for this head."""
+    latest: dict[tuple[str, int | None, int | None], GitHubRecord] = {}
+    for check in resource.records:
+        fields = check.fields
+        if (
+            check.kind != "check_run"
+            or type(fields.get("id")) is not int
+            or fields["id"] < 1
+            or not isinstance(fields.get("name"), str)
+            or not fields["name"]
+            or fields.get("head_sha") != head_sha
+        ):
+            return None
+        app_id = check.details.get("app_id")
+        # Unidentified runs cannot establish that they supersede one another.
+        if type(app_id) is int and app_id > 0:
+            key = (fields["name"], app_id, None)
+        else:
+            key = (fields["name"], None, fields["id"])
+        prior = latest.get(key)
+        if prior is None or fields["id"] > prior.fields["id"]:
+            latest[key] = check
+    return tuple(latest.values())
+
+
+def main_verdict(
+    resource: GitHubResource, *, require_attribution: bool = False
+) -> GitHubRecord | None:
+    return next(
+        (
+            row
+            for row in resource.records
+            if row.fields["status"] == "completed"
+            and (not require_attribution or row.details.get("main_branch_run") is True)
+        ),
+        None,
+    )
 
 
 def unresolved_threads(resource: GitHubResource) -> tuple[GitHubRecord, ...]:

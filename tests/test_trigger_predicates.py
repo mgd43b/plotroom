@@ -22,6 +22,7 @@ from plotroom.core.github_projection import (
     GitHubResource,
 )
 from plotroom.core.ledger import Ledger
+from plotroom.core.trigger_actions import DeliveryRoute
 from test_triggers import ORCHESTRATOR, REPO, SHA, WORKER, notification, observed, project
 
 LANE: dict[str, Any] = {"lane": "lane", "worker": "fixture", "branch": "topic", "work_items": []}
@@ -38,6 +39,7 @@ async def opened(path: Path, clock: FixedClock) -> AsyncGenerator[Ledger]:
         github_repository=REPO,
         image_jobs=("amd64", "arm64"),
         lane_idle_minutes=2,
+        delivery_routes={"other": DeliveryRoute("switchboard", "fixture-peer")},
     )
     ledger = Ledger(store, catalog, clock, github_repository=REPO)
     ledger.start()
@@ -76,9 +78,19 @@ def check(identifier: int, name: str, state: str) -> dict[str, Any]:
     }
 
 
-def check_runs(*checks: dict[str, Any], complete: bool = True) -> GitHubResource:
+def check_runs(
+    *checks: dict[str, Any], complete: bool = True, sha: str = OTHER_SHA
+) -> GitHubResource:
     return GitHubResource(
-        tuple(GitHubRecord(str(row["id"]), "check_run", row) for row in checks),
+        tuple(
+            GitHubRecord(
+                str(row["id"]),
+                "check_run",
+                {**row, "head_sha": sha},
+                details={"app_id": row.get("app_id", 1)},
+            )
+            for row in checks
+        ),
         complete=complete,
     )
 
@@ -89,10 +101,19 @@ async def test_pr_green_reads_latest_checks_on_bound_current_head(tmp_path: Path
         await project(ledger, observed(7, "open", 0))
         await project(ledger, replace(observed(7, "open", 1), head_sha=OTHER_SHA))
         old = check(1, "ci", "success")
-        await resource(ledger, CHECKS, check_runs(old), SHA)
+        await resource(ledger, CHECKS, check_runs(old, sha=SHA), SHA)
         await resource(ledger, CHECKS, check_runs(), OTHER_SHA)
         await resource(ledger, CHECKS, check_runs(old, complete=False), OTHER_SHA)
         await resource(ledger, CHECKS, check_runs(old, check(2, "ci", "running")), OTHER_SHA)
+        await resource(
+            ledger,
+            CHECKS,
+            check_runs(
+                {**check(2, "ci", "failure"), "app_id": None},
+                {**check(3, "ci", "success"), "app_id": 2},
+            ),
+            OTHER_SHA,
+        )
         assert await occurrences(ledger, fired) == []
         await resource(ledger, CHECKS, check_runs(old, check(2, "ci", "success")), OTHER_SHA)
         assert len(await occurrences(ledger, fired)) == 1
@@ -105,12 +126,28 @@ async def test_threads_and_issue_use_complete_current_resource(tmp_path: Path) -
         threads = await trigger(ledger, "pr_threads_resolved", {"number": 7})
         closed = await trigger(ledger, "issue_closed", {"number": 17}, mode="every")
         await project(ledger, observed(7, "open", 0))
+        prior = await ledger.pull_request(REPO, 7)
+        assert prior is not None
+        await project(ledger, replace(observed(7, "open", 1), head_sha=OTHER_SHA))
+        current = await ledger.pull_request(REPO, 7)
+        assert current is not None
+        old = {"head_sha": prior.head_sha, "pull_version": prior.version}
+        attrs = {"head_sha": current.head_sha, "pull_version": current.version}
         unresolved = GitHubRecord("thread", "review_thread", {"resolved": False})
         resolved = replace(unresolved, fields={"resolved": True})
-        await resource(ledger, THREADS, GitHubResource((unresolved,)), "7")
-        await resource(ledger, THREADS, GitHubResource((resolved,), complete=False), "7")
+        await resource(ledger, THREADS, GitHubResource((resolved,), attributes=old), "7")
+        await resource(
+            ledger,
+            THREADS,
+            GitHubResource((resolved,), attributes={**attrs, "pull_version": prior.version}),
+            "7",
+        )
+        await resource(ledger, THREADS, GitHubResource((unresolved,), attributes=attrs), "7")
+        await resource(
+            ledger, THREADS, GitHubResource((resolved,), complete=False, attributes=attrs), "7"
+        )
         assert await occurrences(ledger, threads) == []
-        await resource(ledger, THREADS, GitHubResource((resolved,)), "7")
+        await resource(ledger, THREADS, GitHubResource((resolved,), attributes=attrs), "7")
         assert len(await occurrences(ledger, threads)) == 1
 
         issue = GitHubRecord("issue/17", "issue_closed", {"state": "closed"})
@@ -125,11 +162,14 @@ async def test_threads_and_issue_use_complete_current_resource(tmp_path: Path) -
         assert len(await occurrences(ledger, closed)) == 2
 
 
-def main(head: str, *jobs: dict[str, Any], verdict_sha: str = SHA) -> GitHubResource:
+def main(
+    head: str, *jobs: dict[str, Any], verdict_sha: str = SHA, attributed: bool = True
+) -> GitHubResource:
     verdict = GitHubRecord(
         "run",
         "workflow_run",
         {**check(1, "ci", "success"), "head_sha": verdict_sha, "jobs": list(jobs)},
+        details={"main_branch_run": attributed},
     )
     return GitHubResource((verdict,), attributes={"head_sha": head})
 
@@ -160,7 +200,19 @@ async def test_main_and_run_report_predicates_have_exact_targets(tmp_path: Path)
             )
         assert not await occurrences(ledger, run)
         report["state"] = "succeeded"
+        completion = await ledger.execute(
+            ORCHESTRATOR,
+            "trigger",
+            "send-to-another-lane",
+            {
+                "predicate": {"run_finished": {"run_id": "123"}},
+                "action": {"send": {"worker": "other", "text": "Run finished"}},
+            },
+        )
         done = await ledger.execute(WORKER, "run_report", "finished", report)
+        assert len(await occurrences(ledger, completion.result["id"])) == 1
+        with pytest.raises(LedgerError, match="finished run cannot return"):
+            await ledger.execute(WORKER, "run_report", "late", {**report, "state": "queued"})
         retry = await ledger.execute(WORKER, "run_report", "finished", report)
         assert retry.replayed
         assert done.result == retry.result
@@ -178,6 +230,7 @@ async def test_main_and_run_report_predicates_have_exact_targets(tmp_path: Path)
         arm = check(3, "arm64", "success")
         await resource(ledger, MAIN, main(OTHER_SHA, amd, arm))
         await resource(ledger, MAIN, main(SHA, amd, arm, verdict_sha=OTHER_SHA))
+        await resource(ledger, MAIN, main(SHA, amd, arm, attributed=False))
         await resource(ledger, MAIN, main(SHA, amd))
         await resource(ledger, MAIN, main(SHA, amd, arm, check(4, "arm64", "failure")))
         assert not await occurrences(ledger, images)
@@ -344,3 +397,48 @@ async def test_main_images_trigger_requires_configured_image_evidence(tmp_path: 
     finally:
         await ledger.stop()
         await store.close()
+
+
+async def test_every_keeps_a_pending_event_in_an_unsatisfied_branch(tmp_path: Path) -> None:
+    clock = FixedClock()
+    async with opened(tmp_path, clock) as ledger:
+        created = await ledger.execute(
+            ORCHESTRATOR,
+            "trigger",
+            "nested-branch",
+            notification(
+                {
+                    "any_of": [
+                        {"issue_closed": {"number": 7}},
+                        {
+                            "all_of": [
+                                {"issue_closed": {"number": 8}},
+                                {"message_from": {"worker": "fixture"}},
+                            ]
+                        },
+                    ],
+                },
+                mode="every",
+            ),
+        )
+        identity = created.result["id"]
+        closed = GitHubRecord("issue/7", "issue_closed", {"state": "closed"})
+        await resource(ledger, ISSUES, GitHubResource((closed,)))
+        await ledger.append(
+            "system",
+            NewEvent(
+                "switchboard",
+                "switchboard.message",
+                "nested",
+                {"sender": "peer", "worker": "fixture"},
+            ),
+        )
+        assert len(await occurrences(ledger, identity)) == 1
+
+    async with opened(tmp_path, clock) as ledger:
+        reopened = replace(closed, kind="issue_opened", fields={"state": "open"})
+        await resource(ledger, ISSUES, GitHubResource((reopened,)))
+        assert len(await occurrences(ledger, identity)) == 1
+        second = GitHubRecord("issue/8", "issue_closed", {"state": "closed"})
+        await resource(ledger, ISSUES, GitHubResource((reopened, second)))
+        assert len(await occurrences(ledger, identity)) == 2

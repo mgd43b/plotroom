@@ -3,7 +3,7 @@ title: 'Epic 3 acceptance suite'
 type: feature
 ticket: 10
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '3ecf20da2ba64a6e5e2e18f4e41b50db05b3fab0'
 route: full
 route_source: auto
@@ -62,3 +62,5 @@ without contacting a Claude session.
 ## Verification
 
 Run `uv run python -m pytest -q tests/test_epic3_e2e.py tests/test_transport_contract.py`.
+
+The integrated local suites passed 737 tests on each of Python 3.14 and 3.15. Ruff, Pyright for both versions, and the core dependency check passed.

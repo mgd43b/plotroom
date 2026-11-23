@@ -3,7 +3,7 @@ title: 'Trigger refactor sweep'
 type: refactor
 ticket: 9
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '3ecf20da2ba64a6e5e2e18f4e41b50db05b3fab0'
 route: full
 route_source: auto
@@ -49,6 +49,10 @@ Given the six prior Epic 3 plan logs, when each deferred finding is checked agai
 
 - Triaged all six initial native review findings in the deployment, run, and recurring-trigger plans. Each is addressed in the combined lane.
 
+- The follow-up native review on the integrated main base identified the existing GitHub issue-list pagination cap. The ticketer acknowledged it for Inbox triage. New trigger and deployment findings are covered by focused regression tests.
+
 ## Verification
 
 Run `uv run python -m pytest -q tests/test_triggers.py tests/test_trigger_recovery.py`.
+
+The integrated local suites passed 737 tests on each of Python 3.14 and 3.15. Ruff, Pyright for both versions, and the core dependency check passed.

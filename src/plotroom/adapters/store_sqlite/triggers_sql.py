@@ -18,13 +18,13 @@ _COUNTS = text("SELECT state, count(*) AS total FROM triggers GROUP BY state")
 _SAVE = text("""
     INSERT INTO triggers
       (id, lane, repository, predicate, action_kind, action_payload, state, bindings,
-       created_seq, fired_seq, action_key, mode, was_true, event_floor)
+       created_seq, fired_seq, action_key, mode, was_true, event_floors)
     VALUES
       (:id, :lane, :repository, :predicate, :action_kind, :action_payload, :state, :bindings,
-       :created_seq, :fired_seq, :action_key, :mode, :was_true, :event_floor)
+       :created_seq, :fired_seq, :action_key, :mode, :was_true, :event_floors)
     ON CONFLICT(id) DO UPDATE SET state = excluded.state, bindings = excluded.bindings,
       fired_seq = excluded.fired_seq, action_key = excluded.action_key,
-      was_true = excluded.was_true, event_floor = excluded.event_floor
+      was_true = excluded.was_true, event_floors = excluded.event_floors
 """)
 _BRANCHES = text("""
     SELECT p.number, p.branch FROM github_pull_requests AS p
@@ -50,7 +50,7 @@ def _from_row(row: Row[Any]) -> Trigger:
         row.action_key,
         row.mode,
         bool(row.was_true),
-        row.event_floor,
+        json.loads(row.event_floors),
     )
 
 
@@ -93,7 +93,7 @@ async def save_trigger(connection: AsyncConnection, trigger: Trigger) -> None:
             "action_key": trigger.action_key,
             "mode": trigger.mode,
             "was_true": trigger.was_true,
-            "event_floor": trigger.event_floor,
+            "event_floors": json.dumps(trigger.event_floors),
         },
     )
 

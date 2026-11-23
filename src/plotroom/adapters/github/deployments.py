@@ -1,17 +1,19 @@
 """Bounded deployment-status polling with durable progress through history."""
 
+import json
 import logging
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable
-from plotroom.adapters.github.read import GitHubReadClient, Row, number, string
+from plotroom.adapters.github.read import GitHubReadClient, Row, number, rows, string
 from plotroom.core.events import NewEvent
 from plotroom.core.github import FetchCursor
 from plotroom.core.lanes import infer_lane
-from plotroom.core.reports import DEPLOY_STATUS, deploy_fields
+from plotroom.core.reports import DEPLOY_STATUS, deploy_fields, validate_report_sha
 
 if TYPE_CHECKING:
     from plotroom.core.ledger import Ledger
@@ -19,7 +21,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("plotroom.github")
 DEPLOYMENTS = "deployments"
+_PENDING_DEPLOYMENTS = "deployment_pending"
 _HEAD_DEPLOYMENTS = 2
+_PENDING_BATCH = 2
+_PENDING_LIMIT = 64
 _SWEEP_BATCH = 8
 _READ_ERRORS = (
     GitHubUnavailable,
@@ -61,17 +66,41 @@ async def poll_deployments(
             current, more = [], False
 
     end = offset + _SWEEP_BATCH
+    pending_cursor = await ledger.fetch_cursor(repository, _PENDING_DEPLOYMENTS)
+    queued = rows(json.loads(pending_cursor.watermark)) if pending_cursor else []
+    pending = {number(row["id"]): row for row in queued}
     scanned: set[int] = set()
-    for row in [*newest[:_HEAD_DEPLOYMENTS], *current[offset:end]]:
-        try:
-            deployment_id = number(row["id"])
-            if deployment_id not in scanned:
-                scanned.add(deployment_id)
-                await _poll_statuses(ledger, api, client, token, row, deployment_id, as_of)
-        except GitHubRateLimited:
-            raise
-        except _READ_ERRORS:
-            log.warning("GitHub deployment status refresh failed", extra=extra)
+    candidates = [*newest[:_HEAD_DEPLOYMENTS], *queued[:_PENDING_BATCH], *current[offset:end]]
+    try:
+        for row in candidates:
+            try:
+                deployment_id = number(row["id"])
+            except _READ_ERRORS:
+                log.warning("GitHub deployment row was invalid", extra=extra)
+                continue
+            if deployment_id in scanned:
+                continue
+            scanned.add(deployment_id)
+            try:
+                follow = await _poll_statuses(ledger, api, client, token, row, deployment_id, as_of)
+            except GitHubRateLimited:
+                raise
+            except _READ_ERRORS:
+                follow = pending.get(deployment_id)
+                log.warning("GitHub deployment status refresh failed", extra=extra)
+            pending.pop(deployment_id, None)
+            if follow is not None:
+                pending[deployment_id] = follow
+    finally:
+        remaining = list(pending.values())[-_PENDING_LIMIT:]
+        if remaining != queued:
+            progress = FetchCursor(
+                json.dumps(remaining), as_of, pending_cursor.generation + 1 if pending_cursor else 1
+            )
+            await ledger.run(
+                "system",
+                lambda uow: uow.save_fetch_cursor(repository, _PENDING_DEPLOYMENTS, progress),
+            )
 
     next_page = page + 1 if more else 1
     watermark = f"{page}:{end}" if end < len(current) else f"{next_page}:0"
@@ -90,7 +119,7 @@ async def _poll_statuses(
     deployment: Row,
     identifier: int,
     as_of: str,
-) -> None:
+) -> Row | None:
     resource = f"deployment_statuses/{identifier}"
     path = f"/deployments/{identifier}/statuses"
     recent, has_history = await api.page(client, token, path, 1)
@@ -108,34 +137,55 @@ async def _poll_statuses(
                 extra={"project": ledger.project_id},
             )
     watermark = str(page + 1 if more else 2)
-    if not recent and not history and cursor is None:
-        return
-
-    sha = string(deployment["sha"])
+    sha = validate_report_sha(string(deployment["sha"]))
     ref = string(deployment.get("ref") or "")
     branch = ref.removeprefix("refs/heads/")
     if branch == sha or branch.startswith("refs/"):
         branch = ""
-    events = tuple(
-        _status_event(api.repository, deployment, identifier, sha, row)
-        for row in [*recent, *history]
-    )
-    progress = (
-        FetchCursor(watermark, as_of, cursor.generation + 1 if cursor else 1)
-        if watermark != (cursor.watermark if cursor else "2")
-        else None
-    )
-    await ledger.run(
-        "system", lambda uow: _record(uow, api.repository, resource, branch, events, progress)
-    )
+
+    def valid_events(statuses: list[Row]) -> list[NewEvent]:
+        events: list[NewEvent] = []
+        for row in statuses:
+            try:
+                events.append(_status_event(api.repository, deployment, identifier, sha, row))
+            except KeyError, ValueError, TypeError, OverflowError:
+                log.warning(
+                    "GitHub deployment status row was invalid", extra={"project": ledger.project_id}
+                )
+        return events
+
+    latest = valid_events(recent)
+    events = [*latest, *valid_events(history)]
+    if events:
+        unseen = await ledger.run("system", lambda uow: _unseen(uow, events))
+        for event in unseen:
+            await ledger.run("system", partial(_record, branch=branch, event=event))
+    if watermark != (cursor.watermark if cursor else "2"):
+        progress = FetchCursor(watermark, as_of, cursor.generation + 1 if cursor else 1)
+        await ledger.run(
+            "system", lambda uow: uow.save_fetch_cursor(api.repository, resource, progress)
+        )
+    if latest and latest[0].fields["finished"]:
+        return None
+    environment = deployment.get("environment")
+    return {
+        "id": identifier,
+        "sha": sha,
+        "ref": ref if len(ref) <= 1024 else "",
+        "environment": environment
+        if isinstance(environment, str) and len(environment) <= 255
+        else "",
+    }
 
 
 def _status_event(
     repository: str, deployment: Row, identifier: int, sha: str, status: Row
 ) -> NewEvent:
     status_id = number(status["id"])
-    environment = string(status.get("environment") or deployment["environment"])
-    fields = deploy_fields(environment, sha, string(status["state"]))
+    environment = status.get("environment")
+    if environment is None or environment == "":
+        environment = deployment["environment"]
+    fields = deploy_fields(string(environment), sha, string(status["state"]))
     return NewEvent(
         "deploy",
         DEPLOY_STATUS,
@@ -144,16 +194,14 @@ def _status_event(
     )
 
 
-async def _record(
-    uow: UnitOfWork,
-    repository: str,
-    resource: str,
-    branch: str,
-    events: tuple[NewEvent, ...],
-    progress: FetchCursor | None,
-) -> None:
+async def _unseen(uow: UnitOfWork, events: list[NewEvent]) -> list[NewEvent]:
+    return [
+        event
+        for event in events
+        if await uow.find_event(event.source, event.kind, event.upstream_id) is None
+    ]
+
+
+async def _record(uow: UnitOfWork, branch: str, event: NewEvent) -> None:
     lane = await infer_lane(uow, branch=branch) if branch else None
-    for event in events:
-        await uow.append(replace(event, lane_id=lane))
-    if progress is not None:
-        await uow.save_fetch_cursor(repository, resource, progress)
+    await uow.append(replace(event, lane_id=lane))

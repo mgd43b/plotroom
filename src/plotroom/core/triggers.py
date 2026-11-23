@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -15,7 +15,7 @@ from plotroom.core.github_projection import (
     ISSUES,
     MAIN,
     THREADS,
-    latest_checks,
+    checks_for_head,
     main_verdict,
     unresolved_threads,
 )
@@ -53,7 +53,7 @@ class Trigger:
     action_key: str | None = None
     mode: TriggerMode = "once"
     was_true: bool = False
-    event_floor: int = 0
+    event_floors: dict[str, int] = field(default_factory=dict[str, int])
 
     def render(self) -> dict[str, Any]:
         return {
@@ -77,15 +77,25 @@ class Evaluation:
     trigger: Trigger
     bindings: dict[str, int]
 
-    matched_seq: int = 0
+    matched: dict[str, int] = field(default_factory=dict[str, int])
 
-    async def pending_event(self, kind: str, fields: Mapping[str, str | bool]) -> bool:
-        cursor = max(self.trigger.fired_seq or self.trigger.created_seq, self.trigger.event_floor)
+    async def pending_event(self, path: str, kind: str, fields: Mapping[str, str | bool]) -> bool:
+        cursor = max(
+            self.trigger.fired_seq or self.trigger.created_seq,
+            self.trigger.event_floors.get(path, 0),
+        )
         event = await self.uow.latest_event(kind, fields=fields, after=cursor)
         if event is None:
             return False
-        self.matched_seq = max(self.matched_seq, event.seq)
+        self.matched[path] = max(self.matched.get(path, 0), event.seq)
         return True
+
+
+@dataclass(frozen=True)
+class PredicateMatch:
+    holds: bool
+    level_holds: bool
+    events: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -137,36 +147,48 @@ class LeafRegistry:
 
     async def _holds(
         self, evaluation: Evaluation, predicate: dict[str, Any], path: str = "$"
-    ) -> tuple[bool, bool]:
-        """Return current truth and truth after consuming the pending event leaves."""
+    ) -> PredicateMatch:
+        """Evaluate each branch and track the event leaves that satisfied it."""
         name, value = next(iter(predicate.items()))
         if name not in {"all_of", "any_of"}:
             leaf = self.leaf(name)
             holds = await leaf.evaluate(evaluation, path, value)
-            return holds, holds and leaf.mode == "level"
+            if leaf.mode == "level":
+                return PredicateMatch(holds, holds)
+            return PredicateMatch(holds, False, frozenset({path}) if holds else frozenset())
         # Evaluate every branch so glob bindings survive independently of the group's result.
         matches = [
             await self._holds(evaluation, child, f"{path}/{index}")
             for index, child in enumerate(cast("list[dict[str, Any]]", value))
         ]
         combine = all if name == "all_of" else any
-        return combine(holds for holds, _ in matches), combine(level for _, level in matches)
+        holds = combine(match.holds for match in matches)
+        events = (
+            frozenset(path for match in matches for path in match.events)
+            if holds
+            else frozenset[str]()
+        )
+        return PredicateMatch(holds, combine(match.level_holds for match in matches), events)
 
     async def evaluate_open(self, uow: UnitOfWork) -> None:
         for trigger in await uow.open_triggers():
             bindings = trigger.bindings.copy()
             evaluation = Evaluation(uow, trigger, bindings)
-            holds, level_holds = await self._holds(evaluation, trigger.predicate)
-            updated = replace(trigger, bindings=bindings, was_true=holds)
-            if holds and not trigger.was_true:
+            match = await self._holds(evaluation, trigger.predicate)
+            updated = replace(trigger, bindings=bindings, was_true=match.holds)
+            if match.holds and not trigger.was_true:
                 updated = await self._fire(uow, updated)
                 if trigger.mode == "every":
                     # Event leaves are consumed through the sequence of this occurrence.
-                    updated = replace(updated, was_true=level_holds)
-            elif holds and evaluation.matched_seq:
-                # An event arriving while the predicate already holds is not a new edge.
-                # Let the next observation rearm the trigger when the level conditions clear.
-                updated = replace(updated, was_true=level_holds, event_floor=evaluation.matched_seq)
+                    updated = replace(updated, was_true=match.level_holds, event_floors={})
+            elif match.holds and match.events:
+                # During a true plateau, acknowledge only events in satisfied branches.
+                floors = {path: evaluation.matched[path] for path in match.events}
+                updated = replace(
+                    updated,
+                    was_true=match.level_holds,
+                    event_floors={**trigger.event_floors, **floors},
+                )
             if updated != trigger:
                 await uow.save_trigger(updated)
 
@@ -237,12 +259,12 @@ async def _pr_green(evaluation: Evaluation, path: str, args: dict[str, Any]) -> 
     if pull is None:
         return False
     checks = await evaluation.uow.github_resource(pull.repository, CHECKS, pull.head_sha)
-    return (
-        checks is not None
-        and checks.complete
-        and bool(checks.records)
-        and all(_passed(check.fields) for check in latest_checks(checks))
-    )
+    if checks is None or not checks.complete:
+        return False
+    attempts = checks_for_head(checks, pull.head_sha)
+    if not attempts:
+        return False
+    return all(_passed(check.fields) for check in attempts)
 
 
 async def _pr_threads_resolved(evaluation: Evaluation, path: str, args: dict[str, Any]) -> bool:
@@ -250,7 +272,14 @@ async def _pr_threads_resolved(evaluation: Evaluation, path: str, args: dict[str
     if pull is None:
         return False
     threads = await evaluation.uow.github_resource(pull.repository, THREADS, str(pull.number))
-    return threads is not None and threads.complete and not unresolved_threads(threads)
+    return (
+        threads is not None
+        and threads.complete
+        and threads.attributes.get("head_sha") == pull.head_sha
+        and type(threads.attributes.get("pull_version")) is int
+        and threads.attributes["pull_version"] == pull.version
+        and not unresolved_threads(threads)
+    )
 
 
 async def _issue_closed(evaluation: Evaluation, _path: str, args: dict[str, Any]) -> bool:
@@ -283,7 +312,7 @@ async def _main_green_with_images(
     if main is None or not main.complete:
         return False
     tip = main.attributes.get("head_sha")
-    verdict = main_verdict(main)
+    verdict = main_verdict(main, require_attribution=True)
     if (
         not tip
         or args.get("sha", tip) != tip
@@ -301,9 +330,7 @@ def _validate_run(args: dict[str, Any]) -> None:
 
 
 async def _run_finished(evaluation: Evaluation, _path: str, args: dict[str, Any]) -> bool:
-    event = await evaluation.uow.latest_event(
-        RUN_STATUS, lane=evaluation.trigger.lane, fields={"run_id": args["run_id"]}
-    )
+    event = await evaluation.uow.latest_event(RUN_STATUS, fields={"run_id": args["run_id"]})
     return event is not None and bool(event.fields["finished"])
 
 
@@ -315,10 +342,10 @@ def _validate_worker(args: dict[str, Any]) -> None:
         raise LedgerError("invalid", "worker must be an exact worker slug") from None
 
 
-async def _message_from(evaluation: Evaluation, _path: str, args: dict[str, Any]) -> bool:
+async def _message_from(evaluation: Evaluation, path: str, args: dict[str, Any]) -> bool:
     fields = {"worker": args["worker"]}
-    relay = await evaluation.pending_event("switchboard.message", fields)
-    session = await evaluation.pending_event("claude.session_message", fields)
+    relay = await evaluation.pending_event(path, "switchboard.message", fields)
+    session = await evaluation.pending_event(path, "claude.session_message", fields)
     return relay or session
 
 
@@ -330,8 +357,8 @@ def _validate_deploy(args: dict[str, Any]) -> None:
         raise LedgerError("invalid", str(exc)) from None
 
 
-async def _deploy_finished(evaluation: Evaluation, _path: str, args: dict[str, Any]) -> bool:
-    return await evaluation.pending_event(DEPLOY_STATUS, {**args, "finished": True})
+async def _deploy_finished(evaluation: Evaluation, path: str, args: dict[str, Any]) -> bool:
+    return await evaluation.pending_event(path, DEPLOY_STATUS, {**args, "finished": True})
 
 
 def _validate_lane(args: dict[str, Any]) -> None:

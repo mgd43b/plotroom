@@ -173,12 +173,13 @@ async def test_paginated_get_only_deployments_isolate_failures_and_deduplicate(
             ]
         finally:
             await ledger.stop()
-    assert fixture.deployment_requests[-6:] == [
+    assert fixture.deployment_requests[-7:] == [
         ("/deployments", "1"),
         ("/deployments", "3"),
         ("/deployments/1/statuses", "1"),
         ("/deployments/1/statuses", "3"),
         ("/deployments/2/statuses", "1"),
+        ("/deployments/3/statuses", "1"),
         ("/deployments/5/statuses", "1"),
     ]
     assert [(event.fields["deployment_id"], event.fields["status_id"]) for event in events] == [
@@ -259,6 +260,125 @@ async def test_deployment_history_sweep_keeps_latest_status_fresh(
                 event.kind == DEPLOY_STATUS and event.fields["deployment_id"] == last
                 for event in await ledger.events_after(0)
             )
+        finally:
+            await ledger.stop()
+
+
+async def test_every_trigger_fires_for_each_valid_status_on_a_mixed_page(
+    deploy_store: SqliteStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix(f"/repos/{REPO}")
+        if path == "/deployments":
+            return httpx.Response(200, json=[{"id": 1, "sha": SHA, "environment": "Preview"}])
+        assert path == "/deployments/1/statuses"
+        return httpx.Response(
+            200,
+            json=[
+                {"id": 5, "state": "invalid-fixture-state"},
+                {"id": 4, "state": "success"},
+                {"id": 3, "state": "pending", "environment": ["invalid-fixture-environment"]},
+                {"id": 2, "state": "failure"},
+            ],
+        )
+
+    clock = FixedClock()
+    api = GitHubReadClient(API, REPO)
+    ledger = Ledger(deploy_store, build_catalog(github_repository=REPO), clock)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        ledger.start()
+        try:
+            trigger = await ledger.execute(
+                "orchestrator",
+                "trigger",
+                "every",
+                {
+                    "mode": "every",
+                    "predicate": {"deploy_finished": {"environment": "Preview", "sha": SHA}},
+                    "action": {"notify_orchestrator": {"text": "Deployment finished"}},
+                },
+            )
+            await poll_deployments(ledger, api, client, "fixture", format_time(clock.now()))
+            warnings = [
+                record.message for record in caplog.records if record.name == "plotroom.github"
+            ]
+            assert warnings == ["GitHub deployment status row was invalid"] * 2
+            await poll_deployments(ledger, api, client, "fixture", format_time(clock.now()))
+            events = await ledger.events_after(0)
+        finally:
+            await ledger.stop()
+
+    assert [event.fields["status_id"] for event in events if event.kind == DEPLOY_STATUS] == [4, 2]
+    assert [
+        event.fields["trigger_id"] for event in events if event.kind == "core.trigger_fired"
+    ] == [trigger.result["id"]] * 2
+
+
+async def test_pending_deployments_rotate_after_leaving_the_newest_set_and_restart(
+    deploy_store: SqliteStore,
+) -> None:
+    cycle = 0
+    requests: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix(f"/repos/{REPO}")
+        if path == "/deployments":
+            page = int(request.url.params["page"])
+            ids = (1, 2, 3) if cycle == 0 else (100, 101) if page == 1 else (100 + page,)
+            rows = [{"id": identifier, "sha": SHA, "environment": "Preview"} for identifier in ids]
+            return DeploymentFixture.page_response(path, rows, page, 20)
+        requests.append(path)
+        identifier = int(path.split("/")[2])
+        if identifier == 2 and cycle == 0:
+            return httpx.Response(200, json=[])
+        waiting = (identifier == 1 and cycle < 2) or (identifier == 3 and cycle == 0)
+        return httpx.Response(
+            200,
+            json=[{"id": 1 if waiting else 2, "state": "pending" if waiting else "success"}],
+        )
+
+    clock = FixedClock()
+    api = GitHubReadClient(API, REPO)
+    catalog = build_catalog(github_repository=REPO)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        ledger = Ledger(deploy_store, catalog, clock)
+        ledger.start()
+        try:
+            await poll_deployments(ledger, api, client, "fixture", format_time(clock.now()))
+        finally:
+            await ledger.stop()
+
+        ledger = Ledger(deploy_store, catalog, clock)
+        ledger.start()
+        try:
+            cycle = 1
+            requests.clear()
+            await poll_deployments(ledger, api, client, "fixture", format_time(clock.now()))
+            assert requests == [
+                "/deployments/100/statuses",
+                "/deployments/101/statuses",
+                "/deployments/1/statuses",
+                "/deployments/2/statuses",
+                "/deployments/102/statuses",
+            ]
+            cycle = 2
+            requests.clear()
+            await poll_deployments(ledger, api, client, "fixture", format_time(clock.now()))
+            assert requests == [
+                "/deployments/100/statuses",
+                "/deployments/101/statuses",
+                "/deployments/3/statuses",
+                "/deployments/1/statuses",
+                "/deployments/103/statuses",
+            ]
+            finished = [
+                event.fields["deployment_id"]
+                for event in await ledger.events_after(0)
+                if event.kind == DEPLOY_STATUS
+                and event.fields["finished"]
+                and event.fields["deployment_id"] in {1, 2, 3}
+            ]
+            assert finished == [2, 3, 1]
         finally:
             await ledger.stop()
 
