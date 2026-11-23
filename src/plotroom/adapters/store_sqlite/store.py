@@ -15,7 +15,7 @@ from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import ConnectionPoolEntry
 
-from plotroom.adapters.store_sqlite import github_sql, outbox_sql, triggers_sql
+from plotroom.adapters.store_sqlite import budgets_sql, github_sql, outbox_sql, triggers_sql
 from plotroom.adapters.store_sqlite.actions_sql import pending_actions
 from plotroom.adapters.store_sqlite.claims_sql import count_claims, read_claims
 from plotroom.adapters.store_sqlite.items_sql import (
@@ -44,6 +44,7 @@ from plotroom.ports.store import Board
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
+    from plotroom.core.budgets import Budget
     from plotroom.core.outbox import OutboxReadiness
     from plotroom.core.triggers import Trigger
 
@@ -234,6 +235,10 @@ class SqliteStore:
     async def list_triggers(self, lane: str | None) -> list[Trigger]:
         async with self._engine.connect() as connection:
             return await triggers_sql.list_triggers(connection, lane)
+
+    async def read_budgets(self, run: str | None) -> list[Budget]:
+        async with self._engine.connect() as connection:
+            return await budgets_sql.read_budgets(connection, run)
 
     async def read_merge_gate(self, repository: str | None, number: int) -> GateSnapshot:
         async with self._engine.connect() as connection, connection.begin():

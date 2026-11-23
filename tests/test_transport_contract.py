@@ -45,6 +45,10 @@ TOOL_NAMES = {
     "lane_archive",
     "deploy_report",
     "run_report",
+    "budget_open",
+    "budget_status",
+    "route",
+    "route_request",
     "claim",
     "release",
     "claims",
@@ -68,6 +72,9 @@ WRITER_TOOLS = {
     "lane_archive",
     "deploy_report",
     "run_report",
+    "budget_open",
+    "route",
+    "route_request",
     "trigger",
     "cancel",
     "outbox_lease",
@@ -81,6 +88,17 @@ REPORT_ARGUMENTS = {
         "state": "success",
     },
     "run_report": {"lane": "lane", "run_id": "fixture-run", "state": "succeeded"},
+}
+BUDGET_ARGUMENTS = {
+    "run": "fixture-paid-run",
+    "lane": "lane",
+    "cap_usd": 1.25,
+    "provider": "fixture",
+    "key_scope": "staging",
+}
+ROUTE_ARGUMENTS = {
+    "route": {"action_kind": "publish", "lane": "lane"},
+    "route_request": {"action_kind": "publish"},
 }
 type Message = dict[str, Any]
 type Request = Callable[[Message], Awaitable[Message]]
@@ -271,6 +289,16 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
                     "request_id",
                     *REPORT_ARGUMENTS[tool["name"]],
                 }
+            if tool["name"] == "budget_open":
+                schema = tool["inputSchema"]
+                assert set(schema["required"]) == {"request_id", *BUDGET_ARGUMENTS}
+                assert schema["properties"]["cap_usd"]["type"] == "number"
+            if tool["name"] == "budget_status":
+                assert set(tool["inputSchema"]["properties"]) == {"run"}
+            if route_args := ROUTE_ARGUMENTS.get(tool["name"]):
+                schema = tool["inputSchema"]
+                assert set(schema["required"]) == {"request_id", *route_args}
+                assert all(schema["properties"][field]["type"] == "string" for field in route_args)
         called: set[str] = set()
         request_ids = count(21)
 
@@ -306,6 +334,38 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         assert await call("merge_gate", pr=1) == gate
         assert "freezes" not in await call("snapshot")
         await call("lane_start", lane="lane", worker="fixture", branch="demo", work_items=[])
+        assignment = ROUTE_ARGUMENTS["route"]
+        assert await call("route", **assignment) == assignment
+        assert await call("route_request", **ROUTE_ARGUMENTS["route_request"]) == assignment
+        assert await call("budget_status") == {"budgets": []}
+        for overrides in (
+            {"cap_usd": 0},
+            {"cap_usd": True},
+            {"cap_usd": "1"},
+            {"key_scope": "fixture key material"},
+        ):
+            number = next(request_ids)
+            reply = await send(
+                message(
+                    era,
+                    number,
+                    "tools/call",
+                    name="budget_open",
+                    arguments={
+                        **BUDGET_ARGUMENTS,
+                        **overrides,
+                        "request_id": f"invalid-budget-{number}",
+                    },
+                )
+            )
+            result = reply["result"]
+            if not result.get("isError", False):
+                payload = json.loads(result["content"][0]["text"])
+                assert payload["error"]["code"] == "invalid"
+        assert await call("budget_status") == {"budgets": []}
+        opened = await call("budget_open", **BUDGET_ARGUMENTS)
+        assert {key: opened[key] for key in BUDGET_ARGUMENTS} == BUDGET_ARGUMENTS
+        assert await call("budget_status", run="fixture-paid-run") == {"budgets": [opened]}
         for name, args in REPORT_ARGUMENTS.items():
             reply = await send(
                 message(
@@ -336,6 +396,14 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         item = (await call("next"))["items"][0]
         assert (await call("wait", cursor=0, timeout=0))["item"] == item
         assert (await call("ack", item=item["id"]))["state"] == "snoozed"
+        missing = await call("route_request", action_kind="inspect")
+        assert missing["lane"] is None
+        assert await call("route_request", action_kind="inspect") == missing
+        [route_item] = [
+            row for row in (await call("next"))["items"] if row["id"] == missing["item"]
+        ]
+        assert route_item["dedup_key"] == "route_missing:inspect"
+        await call("route", action_kind="inspect", lane="lane")
         assert (await call("lane_ready", lane="lane", pr=1, head_sha="a" * 40))["state"] == "ready"
         assert (await call("claim", lane="lane", globs=["src/**"], reason="fixture"))["changed"]
         assert (await call("claims", lane="lane"))["claims"][0]["reason"] == "fixture"
@@ -352,12 +420,18 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             )
         )["created"]
         assert (await call("lane_archive", lane="lane"))["state"] == "archived"
+        ratio = {"budget_ratio": {"run": "fixture-paid-run", "gte": 0.9}}
         trigger = await call(
             "trigger",
-            predicate={"pr_merged": {"number": 1}},
+            predicate=ratio,
             action={"notify_orchestrator": {"text": "fixture"}},
         )
-        assert (await call("triggers"))["triggers"][0]["id"] == trigger["id"]
+        [registered] = (await call("triggers"))["triggers"]
+        assert (registered["id"], registered["predicate"], registered["state"]) == (
+            trigger["id"],
+            ratio,
+            "open",
+        )
         assert (await call("cancel", trigger_id=trigger["id"]))["state"] == "canceled"
         assert (await call("snapshot"))["triggers"]["canceled"] == 1
         fired = await call(
@@ -392,6 +466,8 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         }
         arguments: dict[str, dict[str, Any]] = {
             **REPORT_ARGUMENTS,
+            **ROUTE_ARGUMENTS,
+            "budget_open": BUDGET_ARGUMENTS.copy(),
             "ack": {"item": "fixture"},
             "merge_gate": {"pr": 1},
             "freeze": {"reason": "fixture"},
@@ -418,7 +494,7 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             "outbox_done": {"act_id": "fixture"},
         }
         for number, name in enumerate(sorted(names), start=1):
-            args = arguments.get(name, {})
+            args = arguments.get(name, {}).copy()
             if name in WRITER_TOOLS:
                 args["request_id"] = f"drain-{name}"
             reply = await send(message(era, number, "tools/call", name=name, arguments=args))
@@ -451,6 +527,13 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
             (
                 ("freeze", {"request_id": "freeze", "reason": "fixture"}),
                 ("unfreeze", {"request_id": "unfreeze"}),
+                ("budget_open", {**BUDGET_ARGUMENTS, "request_id": "worker-budget"}),
+                ("budget_status", {"run": "fixture-paid-run"}),
+                ("route", {**ROUTE_ARGUMENTS["route"], "request_id": "worker-route"}),
+                (
+                    "route_request",
+                    {**ROUTE_ARGUMENTS["route_request"], "request_id": "worker-route-request"},
+                ),
             ),
             start=3,
         ):

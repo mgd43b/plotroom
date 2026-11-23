@@ -18,6 +18,7 @@ from typing import Any
 
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.actions import BRANCH_UPDATE, CONTROLLER_MERGE, Action, QueuedAction
+from plotroom.core.budgets import Budget
 from plotroom.core.catalog import Catalog
 from plotroom.core.claims import OVERLAP_KINDS, Claim
 from plotroom.core.commands import Command, CommandError, CommandRegistry
@@ -98,6 +99,8 @@ class _MemoryTransaction:
         self.delivered: set[str] = set()
         self.triggers: dict[str, Trigger] = {}
         self.lanes: dict[str, Lane] = {}
+        self.budgets: dict[str, Budget] = {}
+        self.routes: dict[str, str] = {}
         self.claims: dict[tuple[str, str], Claim] = {}
         self.work_items: tuple[WorkItem, ...] = ()
         self.claude_turns: dict[tuple[str, str], set[str]] = {}
@@ -165,6 +168,30 @@ class _MemoryTransaction:
     async def find_lane(self, lane_id: str) -> Lane | None:
         self._live()
         return self.lanes.get(lane_id)
+
+    async def find_budget(self, run: str) -> Budget | None:
+        self._live()
+        return self.budgets.get(run)
+
+    async def insert_budget(self, budget: Budget) -> None:
+        self._live()
+        self.budgets[budget.run] = budget
+
+    async def update_budget_spend(self, budget: Budget) -> None:
+        self._live()
+        self.budgets[budget.run] = budget
+
+    async def has_routes(self) -> bool:
+        self._live()
+        return bool(self.routes)
+
+    async def find_route(self, action_kind: str) -> str | None:
+        self._live()
+        return self.routes.get(action_kind)
+
+    async def save_route(self, action_kind: str, lane: str) -> None:
+        self._live()
+        self.routes[action_kind] = lane
 
     async def worker_lane(self, worker: str) -> Lane | None:
         self._live()
@@ -444,6 +471,8 @@ class MemoryStore:
         self._delivered: set[str] = set()
         self._triggers: dict[str, Trigger] = {}
         self._lanes: dict[str, Lane] = {}
+        self._budgets: dict[str, Budget] = {}
+        self._routes: dict[str, str] = {}
         self._claims: dict[tuple[str, str], Claim] = {}
         self._work_items: tuple[WorkItem, ...] = ()
         self._claude_turns: dict[tuple[str, str], set[str]] = {}
@@ -481,6 +510,8 @@ class MemoryStore:
         tx.delivered = self._delivered.copy()
         tx.triggers = copy.deepcopy(self._triggers)
         tx.lanes = self._lanes.copy()
+        tx.budgets = self._budgets.copy()
+        tx.routes = self._routes.copy()
         tx.claims = self._claims.copy()
         tx.work_items = self._work_items
         tx.claude_turns = {key: ids.copy() for key, ids in self._claude_turns.items()}
@@ -503,6 +534,8 @@ class MemoryStore:
             self._outbox, self._leases, self._delivered = tx.outbox, tx.leases, tx.delivered
             self._triggers = tx.triggers
             self._lanes = tx.lanes
+            self._budgets = tx.budgets
+            self._routes = tx.routes
             self._claims = tx.claims
             self._work_items = tx.work_items
             self._claude_turns = tx.claude_turns
@@ -519,6 +552,9 @@ class MemoryStore:
 
     async def head_seq(self) -> int:
         return self._seq
+
+    async def read_budgets(self, run: str | None) -> list[Budget]:
+        return [budget for key, budget in sorted(self._budgets.items()) if run in (None, key)]
 
     async def outbox_readiness(self, now: str) -> OutboxReadiness:
         ready: list[int] = []

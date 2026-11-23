@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from plotroom.core.actions import Action
+from plotroom.core.budgets import BUDGET_ITEM, BUDGET_THRESHOLD, Budget
 from plotroom.core.claims import Claim, reconcile_claim_pairs
 from plotroom.core.events import (
     AppendResult,
@@ -39,6 +40,7 @@ from plotroom.core.merge_overlap import PULL_COMPARISON
 from plotroom.core.next_items import Item, ItemKind
 from plotroom.core.pull_overlaps import reconcile_pull_overlaps
 from plotroom.core.roles import role_family
+from plotroom.core.trigger_actions import SEND
 from plotroom.ports.clock import Clock
 from plotroom.ports.store import Transaction
 from plotroom.ports.work_items import WorkItem
@@ -130,6 +132,24 @@ class UnitOfWork:
 
     async def find_lane(self, lane_id: str) -> Lane | None:
         return await self._tx.find_lane(lane_id)
+
+    async def find_budget(self, run: str) -> Budget | None:
+        return await self._tx.find_budget(run)
+
+    async def insert_budget(self, budget: Budget) -> None:
+        await self._tx.insert_budget(budget)
+
+    async def update_budget_spend(self, budget: Budget) -> None:
+        await self._tx.update_budget_spend(budget)
+
+    async def has_routes(self) -> bool:
+        return await self._tx.has_routes()
+
+    async def find_route(self, action_kind: str) -> str | None:
+        return await self._tx.find_route(action_kind)
+
+    async def save_route(self, action_kind: str, lane: str) -> None:
+        await self._tx.save_route(action_kind, lane)
 
     async def worker_lane(self, worker: str) -> Lane | None:
         return await self._tx.worker_lane(worker)
@@ -242,10 +262,21 @@ class UnitOfWork:
         """Queue an effect in its causing transaction. Reusing a key preserves the first effect."""
         if not kind or ":" in kind:
             raise LedgerError("invalid", "action kind must be nonempty and contain no colon")
-        if stable_key is not None and (
-            self._append_role != "system" or not stable_key.startswith(f"{kind}:")
-        ):
-            raise LedgerError("forbidden", "only core may supply a stable action key")
+        if stable_key is not None:
+            budget_stop = (
+                kind == SEND
+                and cause.source == "core"
+                and cause.kind == BUDGET_THRESHOLD
+                and cause.fields.get("percent") == 100
+                and stable_key == f"{BUDGET_ITEM.name}:{cause.upstream_id}"
+                and cause.upstream_id == f"{cause.fields.get('budget_id')}:100"
+                and payload.get("lane") == cause.fields.get("lane")
+                and payload.get("text") == "stop"
+            )
+            if self._append_role != "system" or not (
+                stable_key.startswith(f"{kind}:") or budget_stop
+            ):
+                raise LedgerError("forbidden", "only core may supply a stable action key")
         key = stable_key or f"{cause.id}:{kind}:{discriminator}"
         await self._tx.insert_action(Action(key, kind, cause.id, payload))
         return key

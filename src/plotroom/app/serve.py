@@ -57,8 +57,10 @@ from plotroom.app.tokens import TokenRegistry
 from plotroom.core.actions import SWITCHBOARD_SEND
 from plotroom.core.catalog import build_catalog
 from plotroom.core.ledger import Ledger
+from plotroom.core.routing import seed_routes
 from plotroom.ports import Clock
 from plotroom.ports.github_write import FixtureGitHubMerge
+from plotroom.ports.usage_meter import UsageMeter
 from plotroom.ports.work_items import WorkItemSource
 
 log = logging.getLogger("plotroom.serve")
@@ -208,8 +210,10 @@ class Daemon:
         clock: Clock | None = None,
         expected_directory: str | None = None,
         fixture_github_writes: Mapping[str, FixtureGitHubMerge] | None = None,
+        usage_meters: Mapping[str, UsageMeter] | None = None,
     ) -> None:
         self._config = config
+        self._usage_meters = dict(usage_meters or {})
         self._fixture_github_writes = dict(fixture_github_writes or {})
         for project_id in self._fixture_github_writes:
             github = config.github.get(project_id)
@@ -403,6 +407,8 @@ class Daemon:
                 fixture_branch_updates=fixture_write is not None,
             )
             project.ledger.start()
+            if route_seeds := self._config.routes.get(project_id):
+                await project.ledger.run("system", partial(seed_routes, routes=route_seeds))
             await project.ledger.initialize_overlaps()
             await project.ledger.clean_disabled_merge_items()
             relay = self._config.switchboards.get(project_id)
@@ -475,6 +481,7 @@ class Daemon:
                 inputs=tuple(inputs),
                 fixture_github_write=fixture_write,
                 fixture_github_merge=fixture_write,
+                usage_meter=self._usage_meters.get(project_id),
             )
             project.runtime.start()
 

@@ -71,6 +71,14 @@ def serve(state: Path) -> None:
                 publish(state / "acked", args["receipt"])
                 payload = {"ok": True, "id": 7}
             elif name == "send":
+                with (state / "send-requests.jsonl").open("a") as requests:
+                    requests.write(json.dumps(args) + "\n")
+                delivered = state / "send-deliveries.json"
+                deliveries: dict[str, dict[str, Any]] = (
+                    json.loads(delivered.read_text()) if delivered.exists() else {}
+                )
+                assert deliveries.setdefault(args["idempotency_key"], args) == args
+                publish(delivered, json.dumps(deliveries))
                 first = state / "send-first"
                 if not first.exists():
                     publish(first, json.dumps(args))

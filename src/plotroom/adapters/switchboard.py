@@ -94,6 +94,12 @@ class Switchboard:
         async with asyncio.timeout(REGISTRATION_WAIT_SECONDS):
             while (session := self._session) is None:
                 await self._ready.wait()
+        lane, worker = action.payload.get("lane"), action.payload.get("worker")
+        if (
+            lane is not None
+            and await self._ledger.run("system", lambda uow: infer_lane(uow, worker=worker)) != lane
+        ):
+            return
         response = await _call(
             session,
             "send",

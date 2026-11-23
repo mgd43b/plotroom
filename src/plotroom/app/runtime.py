@@ -20,6 +20,7 @@ from plotroom.core.branch_updates import (
     eligible_branch_update,
     stage_branch_update,
 )
+from plotroom.core.budgets import BUDGET_ITEM, record_budget_observations
 from plotroom.core.events import NewEvent, format_time
 from plotroom.core.ledger import Ledger
 from plotroom.core.merge_controller import MERGE_READY
@@ -43,6 +44,7 @@ from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.work_items import refresh_idle_workers
 from plotroom.ports.clock import Clock
 from plotroom.ports.github_write import FixtureGitHubMerge, FixtureGitHubWrite
+from plotroom.ports.usage_meter import UsageMeter
 from plotroom.ports.work_items import WorkItem, WorkItemSource
 
 type ActionHandler = Callable[[Action], Awaitable[None]]
@@ -55,6 +57,15 @@ class _BranchUpdateDeferred(Exception):
 
 class _FixtureMergeDeferred(Exception):
     """Keep an unready action queued without spinning on a no-op transaction."""
+
+
+class _SendRouteDeferred(Exception):
+    """Keep a cap stop pending until its live lane has a delivery channel."""
+
+
+async def _worker_owns_lane(uow: UnitOfWork, worker: str, lane_id: str) -> bool:
+    lane = await uow.worker_lane(worker)
+    return lane is not None and lane.id == lane_id
 
 
 class ProjectRuntime:
@@ -72,6 +83,7 @@ class ProjectRuntime:
         inputs: tuple[Callable[[], Awaitable[None]], ...] = (),
         fixture_github_write: FixtureGitHubWrite | None = None,
         fixture_github_merge: FixtureGitHubMerge | None = None,
+        usage_meter: UsageMeter | None = None,
     ) -> None:
         self.ledger = ledger
         self.clock = clock
@@ -82,6 +94,7 @@ class ProjectRuntime:
         self.delivery_routes = dict(delivery_routes or {})
         self.workers = workers
         self.work_items = work_items
+        self.usage_meter = usage_meter
         self.inputs = inputs
         self.fixture_github_write = fixture_github_write
         self._fixture_github_merge = (
@@ -106,11 +119,20 @@ class ProjectRuntime:
                     extra={"project": self.ledger.project_id, "reason": str(exc)},
                 )
 
+        readings = ()
+        if self.usage_meter is not None:
+            try:
+                async with asyncio.timeout(self.interval.total_seconds()):
+                    readings = await self.usage_meter.observations()
+            except OSError, ValueError, TimeoutError:
+                log.warning("could not read usage meter", extra={"project": self.ledger.project_id})
+
         async def tick(uow: UnitOfWork) -> None:
             if not (await uow.append(NewEvent("core", "core.tick", scheduled_at))).created:
                 return
             if items is not None:
                 await uow.replace_work_items(items)
+            await record_budget_observations(uow, readings)
             await refresh_idle_workers(uow, self.workers)
             await self.ledger.watchers.reconcile(uow)
             uow.all_merge_pulls = True
@@ -146,7 +168,7 @@ class ProjectRuntime:
         try:
             if await self._dispatch(action):
                 return True
-        except _BranchUpdateDeferred, _FixtureMergeDeferred:
+        except _BranchUpdateDeferred, _FixtureMergeDeferred, _SendRouteDeferred:
             return False
         except Exception:
             # Action payloads and exception text may be sensitive. The item points to the key.
@@ -321,18 +343,37 @@ class ProjectRuntime:
             return True
         if action.kind == SEND:
             worker = action.payload["worker"]
-            route = self.delivery_routes[worker]
+            pinned_lane = (
+                action.payload["lane"] if action.key.startswith(f"{BUDGET_ITEM.name}:") else None
+            )
+            route = self.delivery_routes.get(worker)
+            if pinned_lane is not None and (route is None or route.channel == "switchboard"):
+
+                async def check_lane(uow: UnitOfWork) -> bool:
+                    current = await _worker_owns_lane(uow, worker, pinned_lane)
+                    if current and route is None:
+                        # Roll back the read so the action runner does not wake itself to retry.
+                        raise _SendRouteDeferred
+                    return current
+
+                if not await self.ledger.run("system", check_lane):
+                    return False
+            if route is None:
+                raise KeyError(worker)
             if route.channel == "switchboard":
+                payload = {"to": route.destination, "body": action.payload["text"]}
+                if pinned_lane is not None:
+                    payload.update(worker=worker, lane=pinned_lane)
                 await self.handlers[SWITCHBOARD_SEND](
-                    replace(
-                        action,
-                        kind=SWITCHBOARD_SEND,
-                        payload={"to": route.destination, "body": action.payload["text"]},
-                    )
+                    replace(action, kind=SWITCHBOARD_SEND, payload=payload)
                 )
                 return False
 
             async def stage(uow: UnitOfWork) -> None:
+                if pinned_lane is not None and not await _worker_owns_lane(
+                    uow, worker, pinned_lane
+                ):
+                    return
                 await uow.insert_outbox(
                     OutboxMessage(
                         action.key,

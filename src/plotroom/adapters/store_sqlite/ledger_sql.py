@@ -12,11 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from plotroom.adapters.store_sqlite import (
     actions_sql,
+    budgets_sql,
     claims_sql,
     github_sql,
     items_sql,
     lanes_sql,
     outbox_sql,
+    routes_sql,
     triggers_sql,
     work_items_sql,
 )
@@ -30,6 +32,7 @@ from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
+    from plotroom.core.budgets import Budget
     from plotroom.core.outbox import OutboxLease, OutboxMessage
     from plotroom.core.triggers import Trigger
 
@@ -263,6 +266,24 @@ class SqliteTransaction:
 
     async def find_lane(self, lane_id: str) -> Lane | None:
         return await lanes_sql.find_lane(self._live(), lane_id)
+
+    async def find_budget(self, run: str) -> Budget | None:
+        return await budgets_sql.find_budget(self._live(), run)
+
+    async def insert_budget(self, budget: Budget) -> None:
+        await budgets_sql.insert_budget(self._live(), budget)
+
+    async def update_budget_spend(self, budget: Budget) -> None:
+        await budgets_sql.update_budget_spend(self._live(), budget)
+
+    async def has_routes(self) -> bool:
+        return await routes_sql.has_routes(self._live())
+
+    async def find_route(self, action_kind: str) -> str | None:
+        return await routes_sql.find_route(self._live(), action_kind)
+
+    async def save_route(self, action_kind: str, lane: str) -> None:
+        await routes_sql.save_route(self._live(), action_kind, lane)
 
     async def worker_lane(self, worker: str) -> Lane | None:
         return await lanes_sql.worker_lane(self._live(), worker)

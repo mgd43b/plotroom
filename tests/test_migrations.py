@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from alembic import command
 from alembic.script import ScriptDirectory
+from sqlalchemy import Connection
 
 from conftest import authenticated_client, tool_json
 from fakes import FixedClock
@@ -60,6 +62,18 @@ async def test_migrating_twice_changes_nothing(tmp_path: Path) -> None:
         assert await store.revision() == head_revision()
     finally:
         await store.close()
+
+
+async def migrate_fixture_to(store: SqliteStore, revision: str) -> None:
+    cfg = alembic_config()
+
+    def upgrade(connection: Connection) -> None:
+        cfg.attributes["connection"] = connection
+        command.upgrade(cfg, revision)
+
+    async with store._engine.begin() as connection:  # pyright: ignore[reportPrivateUsage]
+        await connection.run_sync(upgrade)
+    assert await store.revision() == revision
 
 
 def seed_legacy_pull(path: Path, repository: str, pull: ObservedPull) -> None:
@@ -212,21 +226,11 @@ async def test_populated_claims_upgrade_reconciles_existing_tree_move(
 
 
 async def test_recurring_upgrade_keeps_populated_once_trigger_state(tmp_path: Path) -> None:
-    legacy = tmp_path / "pre-recurring"
-    shutil.copytree(
-        MIGRATIONS_DIR,
-        legacy,
-        ignore=shutil.ignore_patterns(
-            "__pycache__", "0015_recurring_triggers.py", "0016_merge_controller.py"
-        ),
-    )
-    prior = alembic_config(legacy)
-    assert head_revision(prior) == "0013"
     store = SqliteStore("demo", tmp_path)
     predicate = json.dumps({"pr_merged": {"number": 7}})
     action = json.dumps({"text": "fixture"})
     try:
-        await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
+        await migrate_fixture_to(store, "0013")
         with sqlite3.connect(store.path) as db:
             db.executemany(
                 """
@@ -429,19 +433,12 @@ async def test_trigger_migration_preserves_projected_prs_and_pending_actions(
 
 
 async def test_merge_controller_upgrade_preserves_existing_lane_and_pull(tmp_path: Path) -> None:
-    legacy = tmp_path / "before-merge-controller"
-    shutil.copytree(
-        MIGRATIONS_DIR,
-        legacy,
-        ignore=shutil.ignore_patterns("__pycache__", "0016_merge_controller.py"),
-    )
     repository = "fixture/project"
     timestamp = "2026-11-23T12:00:00.000000Z"
     head = "a" * 40
     store = SqliteStore("demo", tmp_path)
     try:
-        await upgrade_to_head(store._engine, alembic_config(legacy))  # pyright: ignore[reportPrivateUsage]
-        assert await store.revision() == head_revision(alembic_config(legacy))
+        await migrate_fixture_to(store, "0015")
         seed_legacy_pull(
             store.path, repository, ObservedPull(7, "work", head, repository, "open", timestamp, "")
         )
@@ -452,7 +449,7 @@ async def test_merge_controller_upgrade_preserves_existing_lane_and_pull(tmp_pat
                 (head,),
             )
         await store.migrate()
-        assert await store.revision() == "0016"
+        assert await store.revision() == head_revision()
         snapshot = await store.read_merge_gate(repository, 7)
         assert snapshot.pull is not None
         assert snapshot.pull.draft is None
@@ -463,4 +460,55 @@ async def test_merge_controller_upgrade_preserves_existing_lane_and_pull(tmp_pat
         assert snapshot.lane.work_items == ("ticket",)
         assert snapshot.earlier_pull is None
     finally:
+        await store.close()
+
+
+async def test_guardrail_upgrade_preserves_existing_ledger_and_enables_budgets_and_routes(
+    tmp_path: Path,
+) -> None:
+    guardrails = ScriptDirectory.from_config(alembic_config()).get_revision("0018")
+    assert guardrails is not None
+    assert isinstance(guardrails.down_revision, str)
+    store = SqliteStore("demo", tmp_path)
+    ledger = Ledger(store, build_catalog(frozenset({"fixture"})), FixedClock())
+    try:
+        await migrate_fixture_to(store, guardrails.down_revision)
+        ledger.start()
+        await ledger.execute(
+            "orchestrator",
+            "lane_start",
+            "legacy-lane",
+            {"lane": "lane", "worker": "fixture", "branch": "work", "work_items": []},
+        )
+        original = await ledger.events_after(0)
+        assert len(original) == 1
+        await store.migrate()
+        assert await store.revision() == head_revision()
+        assert await ledger.events_after(0) == original
+        assert await ledger.budget_status("orchestrator") == []
+        expected: list[dict[str, Any]] = []
+        for scope in ("production", "staging"):
+            opened = await ledger.execute(
+                "orchestrator",
+                "budget_open",
+                f"open-{scope}",
+                {
+                    "run": f"fixture-{scope}",
+                    "lane": "lane",
+                    "cap_usd": 10,
+                    "provider": "fixture",
+                    "key_scope": scope,
+                },
+            )
+            expected.append(opened.result)
+        assert await ledger.budget_status("orchestrator") == expected
+        assigned = await ledger.execute(
+            "orchestrator", "route", "assign", {"action_kind": "build", "lane": "lane"}
+        )
+        routed = await ledger.execute(
+            "orchestrator", "route_request", "request", {"action_kind": "build"}
+        )
+        assert routed.result == assigned.result == {"action_kind": "build", "lane": "lane"}
+    finally:
+        await ledger.stop()
         await store.close()

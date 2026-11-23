@@ -9,6 +9,7 @@ from datetime import datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from plotroom.core.budgets import reaches_budget_ratio
 from plotroom.core.events import FieldSpec, LedgerError, NewEvent, validate_fields
 from plotroom.core.github_projection import (
     CHECKS,
@@ -215,6 +216,7 @@ _SHA = FieldSpec("sha", "str")
 _ENV = FieldSpec("environment", "str")
 _WORKER = FieldSpec("worker", "str")
 _LANE = FieldSpec("lane", "str")
+_BUDGET_RATIO_ARGS = (FieldSpec("run", "str"), FieldSpec("gte", "number"))
 
 
 def _validate_number(args: dict[str, Any]) -> None:
@@ -334,6 +336,17 @@ async def _run_finished(evaluation: Evaluation, _path: str, args: dict[str, Any]
     return event is not None and bool(event.fields["finished"])
 
 
+def _validate_budget_ratio(args: dict[str, Any]) -> None:
+    validate_identity(args["run"], "run")
+    if args["gte"] < 0:
+        raise LedgerError("invalid", "gte must be nonnegative")
+
+
+async def _budget_ratio(evaluation: Evaluation, _path: str, args: dict[str, Any]) -> bool:
+    budget = await evaluation.uow.find_budget(args["run"])
+    return budget is not None and reaches_budget_ratio(budget, args["gte"])
+
+
 def _validate_worker(args: dict[str, Any]) -> None:
     role = f"worker:{args['worker']}"
     try:
@@ -403,6 +416,9 @@ def build_leaf_registry(
         )
     )
     registry.register(LeafSpec("run_finished", (RUN_ID,), "level", _validate_run, _run_finished))
+    registry.register(
+        LeafSpec("budget_ratio", _BUDGET_RATIO_ARGS, "level", _validate_budget_ratio, _budget_ratio)
+    )
     registry.register(
         LeafSpec("message_from", (_WORKER,), "event", _validate_worker, _message_from)
     )
