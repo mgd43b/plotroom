@@ -22,6 +22,7 @@ from plotroom.core.events import (
     format_time,
     validate_fields,
 )
+from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item, ItemKind
 from plotroom.core.roles import role_family
@@ -67,6 +68,12 @@ class UnitOfWork:
     async def find_event(self, source: str, kind: str, upstream_id: str) -> Event | None:
         return await self._tx.find_event(source, kind, upstream_id)
 
+    async def find_claude_turn(self, session: str, aliases: tuple[str, ...]) -> Event | None:
+        return await self._tx.find_claude_turn(session, aliases)
+
+    async def bind_claude_turn(self, session: str, aliases: tuple[str, ...], event: str) -> None:
+        await self._tx.bind_claude_turn(session, aliases, event)
+
     async def allocate_seq(self) -> int:
         """The project's next ``seq``; rolled back with the transaction."""
         return await self._tx.allocate_seq()
@@ -85,6 +92,29 @@ class UnitOfWork:
 
     async def worker_lane(self, worker: str) -> Lane | None:
         return await self._tx.worker_lane(worker)
+
+    async def branch_lane(self, branch: str) -> Lane | None:
+        return await self._tx.branch_lane(branch)
+
+    async def pull_request(self, repository: str, number: int) -> PullRequest | None:
+        return await self._tx.pull_request(repository, number)
+
+    async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None:
+        return await self._tx.open_branch_pull(repository, branch)
+
+    async def save_pull_request(self, pull: PullRequest) -> None:
+        await self._tx.save_pull_request(pull)
+
+    async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
+        return await self._tx.fetch_cursor(repository, resource)
+
+    async def save_fetch_cursor(self, repository: str, resource: str, cursor: FetchCursor) -> None:
+        await self._tx.save_fetch_cursor(repository, resource, cursor)
+
+    async def save_fetch_retry(
+        self, repository: str, resource: str, retry: FetchRetry | None
+    ) -> None:
+        await self._tx.save_fetch_retry(repository, resource, retry)
 
     async def save_lane(self, lane: Lane) -> None:
         await self._tx.save_lane(lane)

@@ -25,6 +25,7 @@ Verify: A turn report sent through ingest twice is stored once, with or without 
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
+- Built: https://github.com/mgd43b/plotroom/pull/145
 
 ## Notes
 

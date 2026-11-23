@@ -39,6 +39,13 @@ def test_defaults_are_loopback(tmp_path: Path) -> None:
     assert config.url == "http://127.0.0.1:8765/mcp"
 
 
+@pytest.mark.parametrize("board", ["project", "team-", "team_"])
+def test_switchboard_requires_canonical_explicit_board(tmp_path: Path, board: str) -> None:
+    config = write(tmp_path, f'[projects.alpha.switchboard]\nboard = "{board}"\n')
+    with pytest.raises(ConfigError, match="canonical relay name"):
+        load_config(config, {})
+
+
 def test_environment_overrides_the_file(tmp_path: Path) -> None:
     path = write(tmp_path, 'port = 9000\ndata_dir = "from-file"\n[projects.alpha]\n')
     env = {

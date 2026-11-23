@@ -8,9 +8,16 @@ from typing import Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from plotroom.adapters.store_sqlite import actions_sql, items_sql, lanes_sql, work_items_sql
+from plotroom.adapters.store_sqlite import (
+    actions_sql,
+    github_sql,
+    items_sql,
+    lanes_sql,
+    work_items_sql,
+)
 from plotroom.core.actions import Action
 from plotroom.core.events import Event
+from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
@@ -22,6 +29,20 @@ FIND_EVENT = text(
 INSERT_EVENT = text(
     "INSERT INTO events (seq, id, source, kind, upstream_id, lane_id, fields, body, observed_at) "
     "VALUES (:seq, :id, :source, :kind, :uid, :lane_id, :fields, :body, :observed_at)"
+)
+FIND_CLAUDE_TURN = text("""
+    SELECT events.* FROM claude_turn_aliases AS matched JOIN events ON events.id = matched.event_id
+    WHERE matched.session = :session AND matched.alias = :alias
+      AND (:index_alias IS NULL OR NOT EXISTS (
+        SELECT 1 FROM claude_turn_aliases AS indexed
+        WHERE indexed.event_id = matched.event_id AND indexed.session = matched.session
+          AND indexed.alias GLOB 'index:*' AND indexed.alias != :index_alias
+      ))
+    ORDER BY events.seq DESC LIMIT 1
+""")
+BIND_CLAUDE_TURN = text(
+    "INSERT INTO claude_turn_aliases (session, alias, event_id) VALUES (:session, :alias, :event) "
+    "ON CONFLICT DO NOTHING"
 )
 FIND_NOOP_RECEIPT = text(
     "SELECT receipt FROM noop_command_receipts WHERE command = :command AND request_key = :key"
@@ -91,6 +112,22 @@ class SqliteTransaction:
             },
         )
 
+    async def find_claude_turn(self, session: str, aliases: tuple[str, ...]) -> Event | None:
+        index = next((alias for alias in aliases if alias.startswith("index:")), None)
+        for alias in aliases:
+            result = await self._live().execute(
+                FIND_CLAUDE_TURN, {"session": session, "alias": alias, "index_alias": index}
+            )
+            if (row := result.first()) is not None:
+                return event_from_row(row)
+        return None
+
+    async def bind_claude_turn(self, session: str, aliases: tuple[str, ...], event: str) -> None:
+        await self._live().execute(
+            BIND_CLAUDE_TURN,
+            [{"session": session, "alias": alias, "event": event} for alias in aliases],
+        )
+
     async def allocate_seq(self) -> int:
         result = await self._live().execute(ALLOCATE_SEQ)
         return int(result.scalar_one())
@@ -130,6 +167,29 @@ class SqliteTransaction:
 
     async def worker_lane(self, worker: str) -> Lane | None:
         return await lanes_sql.worker_lane(self._live(), worker)
+
+    async def branch_lane(self, branch: str) -> Lane | None:
+        return await lanes_sql.branch_lane(self._live(), branch)
+
+    async def pull_request(self, repository: str, number: int) -> PullRequest | None:
+        return await github_sql.pull_request(self._live(), repository, number)
+
+    async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None:
+        return await github_sql.open_branch_pull(self._live(), repository, branch)
+
+    async def save_pull_request(self, pull: PullRequest) -> None:
+        await github_sql.save_pull_request(self._live(), pull)
+
+    async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
+        return await github_sql.fetch_cursor(self._live(), repository, resource)
+
+    async def save_fetch_cursor(self, repository: str, resource: str, cursor: FetchCursor) -> None:
+        await github_sql.save_fetch_cursor(self._live(), repository, resource, cursor)
+
+    async def save_fetch_retry(
+        self, repository: str, resource: str, retry: FetchRetry | None
+    ) -> None:
+        await github_sql.save_fetch_retry(self._live(), repository, resource, retry)
 
     async def save_lane(self, lane: Lane) -> None:
         await lanes_sql.save_lane(self._live(), lane)

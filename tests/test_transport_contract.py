@@ -29,6 +29,7 @@ TOOL_NAMES = {
     "lane_update",
     "lane_ready",
     "lane_archive",
+    "ingest",
 }
 type Message = dict[str, Any]
 type Request = Callable[[Message], Awaitable[Message]]
@@ -193,6 +194,16 @@ async def test_every_registered_tool(endpoint: Endpoint, transport: str, era: st
         assert (await call("wait", cursor=0, timeout=0))["item"] == item
         assert (await call("ack", item=item["id"]))["state"] == "snoozed"
         assert (await call("lane_ready", lane="lane", pr=1, head_sha="a" * 40))["state"] == "ready"
+        assert (
+            await call(
+                "ingest",
+                kind="claude.session_message",
+                session_id="session",
+                upstream_id="message",
+                body="fixture",
+                lane="lane",
+            )
+        )["created"]
         assert (await call("lane_archive", lane="lane"))["state"] == "archived"
         assert called == names
 

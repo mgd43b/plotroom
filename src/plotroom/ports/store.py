@@ -7,9 +7,12 @@ from typing import Any, Protocol
 
 from plotroom.core.actions import Action
 from plotroom.core.events import Event
+from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
+
+type Board = tuple[int, list[Item], dict[str, int], list[Lane]]
 
 
 class Transaction(Protocol):
@@ -22,6 +25,12 @@ class Transaction(Protocol):
     async def insert_event(self, event: Event) -> None:
         """Store a new event whose ``seq`` came from ``allocate_seq`` in this transaction."""
         ...
+
+    async def find_claude_turn(self, session: str, aliases: tuple[str, ...]) -> Event | None: ...
+
+    async def bind_claude_turn(
+        self, session: str, aliases: tuple[str, ...], event: str
+    ) -> None: ...
 
     async def allocate_seq(self) -> int:
         """The project's next integer ``seq`` (AD-9). Rolled back with the transaction."""
@@ -47,6 +56,8 @@ class Transaction(Protocol):
 
     async def worker_lane(self, worker: str) -> Lane | None: ...
 
+    async def branch_lane(self, branch: str) -> Lane | None: ...
+
     async def save_lane(self, lane: Lane) -> None: ...
 
     async def ready_work_items(self) -> tuple[WorkItem, ...]: ...
@@ -54,6 +65,22 @@ class Transaction(Protocol):
     async def replace_work_items(self, items: tuple[WorkItem, ...]) -> None: ...
 
     async def claimed_work_items(self) -> set[str]: ...
+
+    async def pull_request(self, repository: str, number: int) -> PullRequest | None: ...
+
+    async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None: ...
+
+    async def save_pull_request(self, pull: PullRequest) -> None: ...
+
+    async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None: ...
+
+    async def save_fetch_cursor(
+        self, repository: str, resource: str, cursor: FetchCursor
+    ) -> None: ...
+
+    async def save_fetch_retry(
+        self, repository: str, resource: str, retry: FetchRetry | None
+    ) -> None: ...
 
 
 class Store(Protocol):
@@ -82,7 +109,17 @@ class Store(Protocol):
         """Committed events above ``seq``, ascending, at most ``limit``; none when it is below 1."""
         ...
 
-    async def read_board(self, role: str) -> tuple[int, list[Item], dict[str, int], list[Lane]]: ...
+    async def read_board(self, role: str) -> Board: ...
+
+    async def read_github_board(
+        self, role: str, repository: str
+    ) -> tuple[Board, GitHubSummary]: ...
+
+    async def pull_request(self, repository: str, number: int) -> PullRequest | None: ...
+
+    async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None: ...
+
+    async def fetch_retry(self, repository: str, resource: str) -> FetchRetry | None: ...
 
     async def read_next(self, role: str, offset: int, limit: int) -> tuple[int, list[Item]]: ...
 

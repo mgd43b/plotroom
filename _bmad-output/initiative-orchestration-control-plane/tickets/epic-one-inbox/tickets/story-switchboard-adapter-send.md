@@ -25,3 +25,4 @@ Verify: A test action's send reaches the scripted participant with its action_ke
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
+- Built: https://github.com/mgd43b/plotroom/pull/145

@@ -12,7 +12,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlsplit
 
+from plotroom.adapters.claude_desktop import SESSION_ID
+from plotroom.adapters.github import github_secret_name
 from plotroom.core.roles import role_family
 from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, MIN_BOARD_BUDGET
 
@@ -24,6 +27,8 @@ DEFAULT_LOG_BACKUPS = 5
 
 _WILDCARD_TO_LOOPBACK = {"0.0.0.0": "127.0.0.1", "::": "::1"}  # noqa: S104
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+_REPOSITORY = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+")
+GITHUB_API = "https://api.github.com"
 _TOP_LEVEL_KEYS = {
     "data_dir",
     "host",
@@ -42,6 +47,29 @@ _TOP_LEVEL_KEYS = {
 
 class ConfigError(Exception):
     """The configuration is unusable; the message says which setting and why."""
+
+
+@dataclass(frozen=True)
+class SwitchboardConfig:
+    board: str
+    command: tuple[str, ...]
+    senders: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class SessionReaderConfig:
+    claude_home: Path
+    app_support: Path
+    sessions: Mapping[str, str]
+    poll_seconds: int
+
+
+@dataclass(frozen=True)
+class GitHubConfig:
+    repository: str
+    token_file: Path | None
+    api_url: str
+    poll_seconds: int
 
 
 @dataclass(frozen=True)
@@ -65,6 +93,9 @@ class Config:
     action_attempts: int = 3
     wait_cap: int = 240
     watchers: Mapping[str, tuple[str, ...]] = field(default_factory=lambda: {})
+    switchboards: Mapping[str, SwitchboardConfig] = field(default_factory=lambda: {})
+    session_readers: Mapping[str, SessionReaderConfig] = field(default_factory=lambda: {})
+    github: Mapping[str, GitHubConfig] = field(default_factory=lambda: {})
 
     @property
     def url(self) -> str:
@@ -151,6 +182,9 @@ def load_config(
         workers=workers,
         ticket_trees=_ticket_trees(projects, raw.get("projects"), base),
         watchers=_watchers(projects, raw.get("projects"), drain_sessions),
+        switchboards=_switchboards(projects, raw.get("projects")),
+        session_readers=_session_readers(projects, raw.get("projects"), base),
+        github=_github_projects(projects, raw.get("projects"), base),
         wait_cap=_integer("wait_cap", raw.get("wait_cap", 240), minimum=1),
         snapshot_budget=_integer(
             "snapshot_budget",
@@ -276,6 +310,127 @@ def _workers(projects: tuple[str, ...], table: Any) -> dict[str, frozenset[str]]
                     f"projects.{project_id}.workers.{name}: invalid worker name"
                 ) from exc
         configured[project_id] = frozenset(names)
+    return configured
+
+
+def _switchboards(projects: tuple[str, ...], table: Any) -> dict[str, SwitchboardConfig]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, SwitchboardConfig] = {}
+    boards: set[str] = set()
+    for project_id in projects:
+        project = entries.get(project_id, {})
+        if "switchboard" not in project:
+            continue
+        label = f"projects.{project_id}.switchboard"
+        raw_settings = project["switchboard"]
+        if not isinstance(raw_settings, dict):
+            raise ConfigError(f"{label} must be a table")
+        settings = cast("dict[str, Any]", raw_settings)
+        board = _string(f"{label}.board", settings.get("board"))
+        if (
+            not _SLUG.fullmatch(board)
+            or board.endswith(("-", "_"))
+            or board == "project"
+            or board in boards
+        ):
+            raise ConfigError(f"{label}.board must be a unique canonical relay name")
+        boards.add(board)
+        command = _string_list(f"{label}.command", settings.get("command"), ("switchboard-relay",))
+        senders: dict[str, str] = {}
+        for worker, worker_settings in project.get("workers", {}).items():
+            if "switchboard_address" in worker_settings:
+                address = _string(
+                    f"{label} address for {worker}", worker_settings["switchboard_address"]
+                )
+                if address in senders:
+                    raise ConfigError(f"{label} worker addresses must be unique")
+                senders[address] = worker
+        configured[project_id] = SwitchboardConfig(board, command, senders)
+    return configured
+
+
+def _session_readers(
+    projects: tuple[str, ...], table: Any, base: Path
+) -> dict[str, SessionReaderConfig]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, SessionReaderConfig] = {}
+    for project_id in projects:
+        project = entries.get(project_id, {})
+        if "session_reader" not in project:
+            continue
+        label = f"projects.{project_id}.session_reader"
+        raw_settings = project["session_reader"]
+        if not isinstance(raw_settings, dict):
+            raise ConfigError(f"{label} must be a table")
+        settings = cast("dict[str, Any]", raw_settings)
+        home = (
+            base / Path(_string(f"{label}.claude_home", settings.get("claude_home"))).expanduser()
+        )
+        support = (
+            base / Path(_string(f"{label}.app_support", settings.get("app_support"))).expanduser()
+        )
+        interval = _integer(f"{label}.poll_seconds", settings.get("poll_seconds", 1), minimum=1)
+        sessions: dict[str, str] = {}
+        for worker, worker_settings in project.get("workers", {}).items():
+            if "claude_session" in worker_settings:
+                session = _string(
+                    f"{label} session for {worker}", worker_settings["claude_session"]
+                )
+                if not SESSION_ID.fullmatch(session) or session in sessions:
+                    raise ConfigError(f"{label} session IDs must be valid and unique")
+                sessions[session] = worker
+        configured[project_id] = SessionReaderConfig(
+            home.resolve(), support.resolve(), sessions, interval
+        )
+    return configured
+
+
+def _github_projects(projects: tuple[str, ...], table: Any, base: Path) -> dict[str, GitHubConfig]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, GitHubConfig] = {}
+    names: set[str] = set()
+    for project_id in projects:
+        project = entries.get(project_id, {})
+        if "github" not in project:
+            continue
+        label = f"projects.{project_id}.github"
+        raw_settings = project["github"]
+        if not isinstance(raw_settings, dict):
+            raise ConfigError(f"{label} must be a table")
+        settings = cast("dict[str, Any]", raw_settings)
+        repository = _string(f"{label}.repository", settings.get("repository")).lower()
+        if not _REPOSITORY.fullmatch(repository) or repository.split("/")[1] in (".", ".."):
+            raise ConfigError(f"{label}.repository must be a GitHub owner/repository")
+        name = github_secret_name(project_id)
+        if name in names:
+            raise ConfigError(f"{label} credential environment variable must be unique")
+        names.add(name)
+        token_file = None
+        if "token_file" in settings:
+            token_file = (
+                base / Path(_string(f"{label}.token_file", settings["token_file"])).expanduser()
+            )
+        api_url = _string(f"{label}.api_url", settings.get("api_url", GITHUB_API)).rstrip("/")
+        if api_url != GITHUB_API:
+            try:
+                url = urlsplit(api_url)
+                local = (
+                    url.scheme == "http"
+                    and url.hostname in ("127.0.0.1", "::1")
+                    and url.port is not None
+                    and url.username is None
+                    and not (url.path or url.query or url.fragment)
+                )
+            except ValueError:
+                local = False
+            if not local:
+                raise ConfigError(f"{label}.api_url must be the GitHub API or a loopback fixture")
+        configured[project_id] = GitHubConfig(
+            repository,
+            token_file,
+            api_url,
+            _integer(f"{label}.poll_seconds", settings.get("poll_seconds", 60), minimum=1),
+        )
     return configured
 
 

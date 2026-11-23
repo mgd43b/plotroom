@@ -8,6 +8,15 @@ from functools import partial
 from plotroom.core.actions import ACTION_FIELDS, FAILED_ACTION
 from plotroom.core.commands import Command, CommandRegistry
 from plotroom.core.events import EventKind, EventRegistry, FieldSpec
+from plotroom.core.github import PR_FIELDS, PR_KINDS
+from plotroom.core.intake import (
+    CLAUDE_APPENDERS,
+    INBOUND_MESSAGE,
+    SESSION_FIELD,
+    SESSION_MESSAGE,
+    TURN_FIELDS,
+    TURN_REPORT,
+)
 from plotroom.core.lanes import (
     LANE_WAITING,
     archive_lane,
@@ -38,7 +47,9 @@ class Catalog:
         return self.events.writer_rules
 
 
-def build_catalog(workers: frozenset[str] = frozenset()) -> Catalog:
+def build_catalog(
+    workers: frozenset[str] = frozenset(), *, github_repository: str | None = None
+) -> Catalog:
     """Every kind and command the server knows."""
     events = EventRegistry()
     catalog = Catalog(events, CommandRegistry(events))
@@ -58,6 +69,16 @@ def build_catalog(workers: frozenset[str] = frozenset()) -> Catalog:
     )
     catalog.register_item(ItemKind(FAILED_ACTION, 10, False, ("Inspect the failed action",)))
     events.register(EventKind("core.tick", (), frozenset({"system"})))
+    for kind in PR_KINDS:
+        events.register(EventKind(kind, PR_FIELDS, frozenset({"system"})))
+    events.register(
+        EventKind("switchboard.message", (FieldSpec("sender", "str"),), frozenset({"system"}))
+    )
+    events.register(EventKind(TURN_REPORT, TURN_FIELDS, CLAUDE_APPENDERS))
+    events.register(EventKind(SESSION_MESSAGE, (SESSION_FIELD,), CLAUDE_APPENDERS))
+    catalog.register_item(
+        ItemKind(INBOUND_MESSAGE, 20, False, ("Read and acknowledge the message",))
+    )
     for status in ("attempt", "done", "failed"):
         events.register(EventKind(f"core.action_{status}", ACTION_FIELDS, frozenset({"system"})))
     catalog.register_item(ItemKind(LANE_WAITING, 20, True, ("Reply to the worker",)))
@@ -86,7 +107,9 @@ def build_catalog(workers: frozenset[str] = frozenset()) -> Catalog:
     )
     catalog.commands.register(
         Command(
-            "lane_ready", (lane, FieldSpec("pr", "int"), FieldSpec("head_sha", "str")), ready_lane
+            "lane_ready",
+            (lane, FieldSpec("pr", "int"), FieldSpec("head_sha", "str")),
+            partial(ready_lane, repository=github_repository),
         ),
         rules=owner,
     )

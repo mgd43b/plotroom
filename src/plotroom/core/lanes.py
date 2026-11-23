@@ -28,6 +28,24 @@ class Lane:
         return {**asdict(self), "work_items": list(self.work_items)}
 
 
+def with_projected_pr(lane: Lane, number: int | None, head_sha: str | None) -> Lane:
+    state = lane.state
+    if state == "ready" and (number is None or (number, head_sha) != (lane.pr, lane.head_sha)):
+        state = "active"
+    return replace(lane, state=state, pr=number, head_sha=head_sha)
+
+
+async def infer_lane(
+    uow: UnitOfWork, *, worker: str | None = None, branch: str | None = None
+) -> str | None:
+    """Resolve an upstream binding against the current lane in the input transaction."""
+    if worker is not None:
+        lane = await uow.worker_lane(worker)
+    else:
+        lane = await uow.branch_lane(branch) if branch is not None else None
+    return lane.id if lane is not None else None
+
+
 async def owns_lane(view: OwnershipView, args: dict[str, Any]) -> bool:
     lane = await view.find_lane(args["lane"])
     return lane is not None and view.role == f"worker:{lane.worker}"
@@ -81,13 +99,28 @@ async def update_lane(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
     return await _save(uow, replace(lane, waiting_on=args["waiting_on"] or None))
 
 
-async def ready_lane(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
+async def ready_lane(
+    uow: UnitOfWork, args: dict[str, Any], *, repository: str | None
+) -> dict[str, Any]:
     lane = await _current(uow, args["lane"])
     if not 0 < args["pr"] <= 2**63 - 1 or not args["head_sha"].strip():
         raise LedgerError("invalid", "pr must be positive and head_sha must be non-empty")
+    if repository is not None:
+        pr = await uow.open_branch_pull(repository, lane.branch)
+        if pr is None or pr.number != args["pr"] or pr.head_sha != args["head_sha"]:
+            raise LedgerError("conflict", "the PR and head must match the open GitHub projection")
     return await _save(
         uow, replace(lane, state="ready", waiting_on=None, pr=args["pr"], head_sha=args["head_sha"])
     )
+
+
+async def refresh_ready_lane(uow: UnitOfWork, repository: str, branch: str) -> None:
+    lane = await uow.branch_lane(branch)
+    if lane is None or lane.state != "ready":
+        return
+    pr = await uow.open_branch_pull(repository, branch)
+    if pr is None or (pr.number, pr.head_sha) != (lane.pr, lane.head_sha):
+        await _save(uow, replace(lane, state="active", pr=None, head_sha=None))
 
 
 async def archive_lane(
