@@ -11,6 +11,7 @@ risk: low
 tracker_id: "130"
 remote: "https://github.com/mgd43b/plotroom/issues/130"
 tracker_status: backlog
+status: built
 ---
 
 # lock_owner's probe can briefly take a stale lock
@@ -26,3 +27,7 @@ Verify: With a stale lock file naming a live pid, lock_owner reports the owner w
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md
+
+## Notes
+
+- Built: https://github.com/mgd43b/plotroom/pull/137
