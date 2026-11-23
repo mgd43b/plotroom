@@ -16,11 +16,17 @@ async def test_worker_ingest_wakes_local_watch_and_ack_closes(
     tmp_path: Path, token_home: Path, turn_index: int | None
 ) -> None:
     config = write_config(tmp_path)
-    config.write_text(config.read_text() + "\n[projects.demo.workers.fixture]\n")
+    config.write_text(
+        config.read_text()
+        + '\n[projects.demo.session_reader]\nclaude_home = "unused-claude"\n'
+        + 'app_support = "unused-desktop"\n[projects.demo.workers.fixture]\n'
+        + 'claude_session = "fixture-session"\n[projects.demo.workers.other]\n'
+    )
     settings = load_config(config, {})
     tokens = TokenRegistry(settings.data_dir)
     operator = tokens.issue("demo", "orchestrator", local=True)
     worker = tokens.issue("demo", "worker:fixture", local=True)
+    other = tokens.issue("demo", "worker:other", local=True)
     daemon = Daemon(settings)
     serving = asyncio.create_task(daemon.run())
     try:
@@ -33,6 +39,12 @@ async def test_worker_ingest_wakes_local_watch_and_ack_closes(
             "lane_start",
             "start",
             {"lane": "owned", "worker": "fixture", "branch": "demo", "work_items": []},
+        )
+        await ledger.execute(
+            "orchestrator",
+            "lane_start",
+            "other",
+            {"lane": "unowned", "worker": "other", "branch": "other", "work_items": []},
         )
         watcher = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -50,13 +62,17 @@ async def test_worker_ingest_wakes_local_watch_and_ack_closes(
             stderr=asyncio.subprocess.PIPE,
         )
         try:
+            args = {
+                "kind": "claude.turn_report",
+                "session_id": "fixture-session",
+                "body": "worker report",
+                "lane": "unowned",
+            }
+            async with authenticated_client(url, other.bearer) as wrong_worker:
+                denied = tool_json(await wrong_worker.call_tool("ingest", args))
+                assert denied["error"]["code"] == "forbidden"
+                assert "bound to another worker" in denied["error"]["message"]
             async with authenticated_client(url, worker.bearer) as client:
-                args = {
-                    "kind": "claude.turn_report",
-                    "session_id": "fixture-session",
-                    "body": "worker report",
-                    "lane": "unowned",
-                }
                 denied = tool_json(
                     await client.call_tool("ingest", {**args, "kind": "github.pr_opened"})
                 )

@@ -46,6 +46,7 @@ def pull(
     seconds: int = 0,
     head: str = HEAD,
     number: int = 12,
+    head_repository: str = REPO,
 ) -> dict[str, Any]:
     stamp = f"2026-11-22T12:00:{seconds:02d}Z"
     return {
@@ -53,7 +54,7 @@ def pull(
         "state": state,
         "merged_at": stamp if merged else None,
         "updated_at": stamp,
-        "head": {"ref": "fixture-branch", "sha": head},
+        "head": {"ref": "fixture-branch", "sha": head, "repo": {"full_name": head_repository}},
         "body": "fixture pull request",
     }
 
@@ -64,6 +65,7 @@ class FixtureGitHub:
     rows: list[dict[str, Any]] = field(default_factory=lambda: [pull()])
     callers: list[str] = field(default_factory=lambda: list[str]())
     status: int = 200
+    error_message: str | None = None
     headers: dict[str, str] = field(default_factory=lambda: dict[str, str]())
     page_two: list[dict[str, Any]] | None = None
     page_two_entered: threading.Event = field(default_factory=threading.Event)
@@ -90,7 +92,10 @@ def github_fixture() -> Iterator[FixtureGitHub]:
                 data.page_two_entered.set()
                 if (release := data.release_page_two) is not None and not release.wait(20):
                     return
-            payload = json.dumps(data.page_two if second else data.rows).encode()
+            content = data.page_two if second else data.rows
+            payload = json.dumps(
+                {"message": data.error_message} if data.error_message is not None else content
+            ).encode()
             self.send_response(data.status)
             if data.page_two is not None and not second:
                 self.send_header("Link", f'<{data.url}/repositories/123/pulls?page=2>; rel="next"')
@@ -228,9 +233,9 @@ async def test_on_demand_daemon_reads_the_mounted_pat(
         await asyncio.to_thread(stop_owner, data_dir)
 
 
-@pytest.mark.parametrize("status", [403, 429])
+@pytest.mark.parametrize("limit", ["reset", "retry_after", "secondary"])
 async def test_heads_close_reopen_and_rate_limit_resume(
-    tmp_path: Path, github_fixture: FixtureGitHub, status: int
+    tmp_path: Path, github_fixture: FixtureGitHub, limit: str
 ) -> None:
     store = SqliteStore("demo", tmp_path)
     await store.migrate()
@@ -268,27 +273,39 @@ async def test_heads_close_reopen_and_rate_limit_resume(
             baseline = await ledger.fetch_cursor(REPO, PULL_REQUESTS)
             assert baseline is not None
             github_fixture.rows = [pull(head=new_head, seconds=1)]
-            github_fixture.status = status
-            github_fixture.headers = (
-                {"Retry-After": "3"}
-                if status == 429
-                else {
+            github_fixture.status = 429 if limit == "retry_after" else 403
+            if limit == "retry_after":
+                github_fixture.headers = {"Retry-After": "3"}
+            elif limit == "reset":
+                github_fixture.headers = {
                     "X-RateLimit-Remaining": "0",
                     "X-RateLimit-Reset": str(int(clock.now().timestamp()) + 3),
                 }
-            )
+            else:
+                github_fixture.error_message = "You have exceeded a secondary rate limit."
             assert not await poller.poll(client)
             assert ledger.github_error == "GitHub rate limit reached"
+            assert await ledger.fetch_retry(REPO, PULL_REQUESTS) is not None
+            poller = GitHubPoller(
+                ledger,
+                clock,
+                REPO,
+                LocalGitHubCredential(SECRET, {SECRET: TOKEN}, None),
+                PullRequestFetcher(github_fixture.url, REPO),
+                1,
+            )
             previous_calls = len(github_fixture.callers)
             github_fixture.status = 200
             github_fixture.headers = {}
-            clock.advance(2)
+            github_fixture.error_message = None
+            clock.advance(59 if limit == "secondary" else 2)
             assert not await poller.poll(client)
             assert len(github_fixture.callers) == previous_calls
             assert await ledger.fetch_cursor(REPO, PULL_REQUESTS) == baseline
             clock.advance(1)
             assert await poller.poll(client)
             assert ledger.github_error is None
+            assert await ledger.fetch_retry(REPO, PULL_REQUESTS) is None
             assert (await ledger.snapshot_board("orchestrator"))[0][3][0].head_sha == new_head
             with pytest.raises(LedgerError, match="head must match"):
                 await ledger.execute("worker:fixture", "lane_ready", "stale", args)
@@ -368,4 +385,94 @@ async def test_daemon_killed_mid_poll_replays_from_committed_cursor(
         if github_fixture.release_page_two is not None:
             github_fixture.release_page_two.set()
         await asyncio.to_thread(first.stop)
+        await store.close()
+
+
+async def test_forks_and_ambiguous_branches_do_not_become_lane_prs(
+    tmp_path: Path, github_fixture: FixtureGitHub
+) -> None:
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    clock = FixedClock()
+    catalog = build_catalog(frozenset({"fixture"}), github_repository=REPO)
+    ledger = Ledger(store, catalog, clock, github_repository=REPO)
+    ledger.start()
+    poller = GitHubPoller(
+        ledger,
+        clock,
+        REPO,
+        LocalGitHubCredential(SECRET, {SECRET: TOKEN}, None),
+        PullRequestFetcher(github_fixture.url, REPO),
+        1,
+    )
+    try:
+        await ledger.execute(
+            "orchestrator",
+            "lane_start",
+            "start",
+            {"lane": "lane", "worker": "fixture", "branch": "fixture-branch", "work_items": []},
+        )
+        async with httpx.AsyncClient(trust_env=False) as client:
+            github_fixture.rows = [pull(), pull(number=13, head_repository="fork/read-only")]
+            assert await poller.poll(client)
+            board, summary = await ledger.snapshot_board("orchestrator")
+            assert board[3][0].pr == 12
+            assert summary is not None
+            assert summary.open_prs == 2
+            events = [e for e in await ledger.events_after(0) if e.kind == PR_OPENED]
+            assert [event.lane_id for event in events] == ["lane", None]
+            with pytest.raises(LedgerError, match="head must match"):
+                await ledger.execute(
+                    "worker:fixture",
+                    "lane_ready",
+                    "fork",
+                    {"lane": "lane", "pr": 13, "head_sha": HEAD},
+                )
+            github_fixture.rows.append(pull(number=14))
+            assert await poller.poll(client)
+            assert (await ledger.snapshot_board("orchestrator"))[0][3][0].pr is None
+            with pytest.raises(LedgerError, match="head must match"):
+                await ledger.execute(
+                    "worker:fixture",
+                    "lane_ready",
+                    "ambiguous",
+                    {"lane": "lane", "pr": 12, "head_sha": HEAD},
+                )
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+async def test_incremental_fetch_keeps_boundary_and_skips_older_pages(
+    tmp_path: Path, github_fixture: FixtureGitHub
+) -> None:
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    clock = FixedClock()
+    ledger = Ledger(store, build_catalog(), clock)
+    ledger.start()
+    poller = GitHubPoller(
+        ledger,
+        clock,
+        REPO,
+        LocalGitHubCredential(SECRET, {SECRET: TOKEN}, None),
+        PullRequestFetcher(github_fixture.url, REPO),
+        1,
+    )
+    old = {**pull(number=20), "updated_at": "2026-11-22T11:00:00Z"}
+    boundary = {**pull(number=21), "updated_at": "2026-11-22T11:55:00Z"}
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            github_fixture.rows = [pull(), old]
+            github_fixture.page_two = []
+            assert await poller.poll(client)
+            assert github_fixture.page_two_entered.is_set()
+            github_fixture.page_two_entered.clear()
+            github_fixture.rows = [pull(), boundary, old]
+            clock.advance(1)
+            assert await poller.poll(client)
+            assert not github_fixture.page_two_entered.is_set()
+            assert await ledger.pull_request(REPO, 21) is not None
+    finally:
+        await ledger.stop()
         await store.close()

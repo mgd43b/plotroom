@@ -99,14 +99,8 @@ async def ready_lane(
     if not 0 < args["pr"] <= 2**63 - 1 or not args["head_sha"].strip():
         raise LedgerError("invalid", "pr must be positive and head_sha must be non-empty")
     if repository is not None:
-        pr = await uow.pull_request(repository, args["pr"])
-        if (
-            pr is None
-            or pr.state != "open"
-            or not pr.complete
-            or pr.branch != lane.branch
-            or pr.head_sha != args["head_sha"]
-        ):
+        pr = await uow.open_branch_pull(repository, lane.branch)
+        if pr is None or pr.number != args["pr"] or pr.head_sha != args["head_sha"]:
             raise LedgerError("conflict", "the PR and head must match the open GitHub projection")
         result = await _save(
             uow, replace(lane, state="ready", waiting_on=None, pr=None, head_sha=None)

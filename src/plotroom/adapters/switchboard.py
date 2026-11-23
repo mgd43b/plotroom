@@ -89,6 +89,7 @@ class Switchboard:
         address, body = action.payload.get("to"), action.payload.get("body")
         if not isinstance(address, str) or not address.strip() or not isinstance(body, str):
             raise ValueError("Switchboard sends require a recipient and a message body")
+        address = address.strip()
         while (session := self._session) is None:
             await self._ready.wait()
         response = await _call(

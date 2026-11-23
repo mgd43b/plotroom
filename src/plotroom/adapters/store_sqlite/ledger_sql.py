@@ -17,7 +17,7 @@ from plotroom.adapters.store_sqlite import (
 )
 from plotroom.core.actions import Action
 from plotroom.core.events import Event
-from plotroom.core.github import FetchCursor, PullRequest
+from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
@@ -174,6 +174,9 @@ class SqliteTransaction:
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return await github_sql.pull_request(self._live(), repository, number)
 
+    async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None:
+        return await github_sql.open_branch_pull(self._live(), repository, branch)
+
     async def save_pull_request(self, pull: PullRequest) -> None:
         await github_sql.save_pull_request(self._live(), pull)
 
@@ -182,6 +185,11 @@ class SqliteTransaction:
 
     async def save_fetch_cursor(self, repository: str, resource: str, cursor: FetchCursor) -> None:
         await github_sql.save_fetch_cursor(self._live(), repository, resource, cursor)
+
+    async def save_fetch_retry(
+        self, repository: str, resource: str, retry: FetchRetry | None
+    ) -> None:
+        await github_sql.save_fetch_retry(self._live(), repository, resource, retry)
 
     async def save_lane(self, lane: Lane) -> None:
         await lanes_sql.save_lane(self._live(), lane)

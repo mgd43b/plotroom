@@ -3,7 +3,7 @@ title: Project read-only GitHub pull requests
 type: feature
 ticket: 2
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: 10881fe4d5ae596bc10fc1e2dc43aeeb9a76a126
 route: full
 route_source: auto
@@ -39,9 +39,15 @@ The local daemon runs project input tasks. The GitHub adapter owns HTTP and cred
 
 ## Implementation Notes
 
+The loopback HTTP fixture verified environment credentials, missing and rejected credentials, and an on-demand daemon with a mounted token file. The live GitHub acceptance is pending the repository owner. The intended CI secret is `PLOTROOM_GITHUB_FIXTURE_GITHUB_TOKEN` for project `github-fixture`.
+
 ## Plan Change Log
 
 ## Review Triage Log
+
+The independent native Codex review inspected the combined batch.
+
+- P2, verified and corrected. Retain the PR head repository so fork PRs count without attaching to local lanes.
 
 ## Verification
 

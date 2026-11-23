@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any
 
 
+def publish(path: Path, value: str) -> None:
+    pending = path.with_suffix(".tmp")
+    pending.write_text(value)
+    pending.replace(path)
+
+
 def serve(state: Path) -> None:
     assert os.environ["SWITCHBOARD_BOARD"] == "fixture-board"
     assert os.environ["SWITCHBOARD_AUTO"] == "0"
@@ -62,15 +68,15 @@ def serve(state: Path) -> None:
                     time.sleep(60)
                     raise AssertionError("expected interruption before ack")
                 assert args["receipt"] == "redelivered"
-                (state / "acked").write_text(args["receipt"])
+                publish(state / "acked", args["receipt"])
                 payload = {"ok": True, "id": 7}
             elif name == "send":
                 first = state / "send-first"
                 if not first.exists():
-                    first.write_text(json.dumps(args))
+                    publish(first, json.dumps(args))
                     time.sleep(60)
                     raise AssertionError("expected interruption after send")
-                (state / "send-retry").write_text(json.dumps(args))
+                publish(state / "send-retry", json.dumps(args))
                 payload = {"id": 11, "to": args["to"]}
             else:
                 raise AssertionError(name)

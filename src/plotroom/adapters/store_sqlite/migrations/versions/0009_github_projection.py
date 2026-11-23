@@ -16,11 +16,17 @@ def upgrade() -> None:
         sa.Column("number", sa.Integer(), primary_key=True, autoincrement=False),
         sa.Column("branch", sa.Text(), nullable=False),
         sa.Column("head_sha", sa.Text(), nullable=False),
+        sa.Column("head_repository", sa.Text()),
         sa.Column("state", sa.Text(), nullable=False),
         sa.Column("updated_at", sa.Text(), nullable=False),
         sa.CheckConstraint("number > 0 AND state IN ('open', 'closed', 'merged')"),
     )
     op.create_index("ix_github_pull_state", "github_pull_requests", ["repository", "state"])
+    op.create_index(
+        "ix_github_pull_branch",
+        "github_pull_requests",
+        ["repository", "head_repository", "branch", "state"],
+    )
     op.create_table(
         "github_fetch_cursors",
         sa.Column("repository", sa.Text(), primary_key=True),

@@ -327,8 +327,13 @@ def _switchboards(projects: tuple[str, ...], table: Any) -> dict[str, Switchboar
             raise ConfigError(f"{label} must be a table")
         settings = cast("dict[str, Any]", raw_settings)
         board = _string(f"{label}.board", settings.get("board"))
-        if not _SLUG.fullmatch(board) or board in boards:
-            raise ConfigError(f"{label}.board must be a unique lowercase slug")
+        if (
+            not _SLUG.fullmatch(board)
+            or board.endswith(("-", "_"))
+            or board == "project"
+            or board in boards
+        ):
+            raise ConfigError(f"{label}.board must be a unique canonical relay name")
         boards.add(board)
         command = _string_list(f"{label}.command", settings.get("command"), ("switchboard-relay",))
         senders: dict[str, str] = {}

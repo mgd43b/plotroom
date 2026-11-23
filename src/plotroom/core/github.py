@@ -23,6 +23,7 @@ PR_FIELDS = (
     FieldSpec("number", "int"),
     FieldSpec("branch", "str"),
     FieldSpec("head_sha", "str"),
+    FieldSpec("head_repository", "str", required=False),
     FieldSpec("state", "str"),
     FieldSpec("updated_at", "str"),
 )
@@ -33,6 +34,7 @@ class ObservedPull:
     number: int
     branch: str
     head_sha: str
+    head_repository: str | None
     state: Literal["open", "closed", "merged"]
     updated_at: str
     body: str
@@ -44,6 +46,7 @@ class PullRequest:
     number: int
     branch: str
     head_sha: str
+    head_repository: str | None
     state: str
     updated_at: str
     as_of: str
@@ -56,6 +59,12 @@ class FetchCursor:
     watermark: str
     as_of: str
     generation: int
+
+
+@dataclass(frozen=True)
+class FetchRetry:
+    until: str
+    next_backoff: int
 
 
 @dataclass(frozen=True)
@@ -83,6 +92,7 @@ async def apply_pull_poll(
         PULL_REQUESTS,
         FetchCursor(watermark, as_of, 1 if baseline is None else baseline.generation + 1),
     )
+    await uow.save_fetch_retry(repository, PULL_REQUESTS, None)
     return True
 
 
@@ -95,7 +105,11 @@ def _changes(current: PullRequest | None, observed: ObservedPull) -> tuple[str, 
     if current is None:
         return (by_state[observed.state],)
     changes: list[str] = []
-    if (current.branch, current.head_sha) != (observed.branch, observed.head_sha):
+    if (current.branch, current.head_sha, current.head_repository) != (
+        observed.branch,
+        observed.head_sha,
+        observed.head_repository,
+    ):
         changes.append(PR_HEAD_CHANGED)
     if current.state != observed.state:
         changes.append(by_state[observed.state])
@@ -118,6 +132,7 @@ async def _project_pull(
         observed.number,
         observed.branch,
         observed.head_sha,
+        observed.head_repository,
         observed.state,
         observed.updated_at,
         as_of,
@@ -128,7 +143,11 @@ async def _project_pull(
         if current != projected:
             await uow.save_pull_request(projected)
         return
-    lane_id = await infer_lane(uow, branch=projected.branch)
+    lane_id = (
+        await infer_lane(uow, branch=projected.branch)
+        if projected.head_repository == repository
+        else None
+    )
     fields = {
         "repository": repository,
         "number": projected.number,
@@ -137,6 +156,8 @@ async def _project_pull(
         "state": projected.state,
         "updated_at": projected.updated_at,
     }
+    if projected.head_repository is not None:
+        fields["head_repository"] = projected.head_repository
     for version, kind in enumerate(changes, start=previous_version + 1):
         uid = f"{repository}#{projected.number}@{version}:{projected.updated_at}"
         await uow.append(NewEvent("github", kind, uid, fields, observed.body, lane_id))

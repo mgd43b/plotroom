@@ -3,7 +3,7 @@ title: Read local Claude Desktop session signals
 type: feature
 ticket: 18
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: de1ffb507681aa2d9429c6d1dfc21a3add9cdeee
 route: full
 route_source: auto
@@ -39,9 +39,15 @@ The Epic 2 spike links the registry session ID, Desktop session metadata, and tr
 
 ## Implementation Notes
 
+Synthetic fixtures exercise both arrival orders, both index forms, and a repeated transcript read. The owner’s real Desktop observation remains open.
+
 ## Plan Change Log
 
 ## Review Triage Log
+
+The independent native Codex review inspected the combined batch.
+
+- P2, verified and corrected. Compare the registry status and update timestamp before and after scanning the latest turn.
 
 ## Verification
 

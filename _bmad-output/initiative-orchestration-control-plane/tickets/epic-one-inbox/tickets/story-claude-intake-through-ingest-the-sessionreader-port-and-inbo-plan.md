@@ -3,7 +3,7 @@ title: Ingest Claude events and surface inbound messages
 type: feature
 ticket: 9
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: afe463bc58840dfff86021320b1f7b8fd737fe2d
 route: full
 route_source: auto
@@ -41,9 +41,15 @@ Given a worker session with an active lane, when it sends a turn for another lan
 
 ## Implementation Notes
 
+Authenticated transport checks exercised both provider-kind refusal and worker session ownership, then verified a local watch wake and item closure. Distinct indexed turns can share a report digest.
+
 ## Plan Change Log
 
 ## Review Triage Log
+
+The independent native Codex review inspected the combined batch.
+
+- P1, verified and corrected. Refuse a bound session ID from another worker before looking up its aliases.
 
 ## Verification
 

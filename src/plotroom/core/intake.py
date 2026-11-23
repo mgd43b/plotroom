@@ -43,7 +43,11 @@ async def append_inbound(uow: UnitOfWork, event: NewEvent) -> AppendResult:
 
 
 async def record_claude(
-    uow: UnitOfWork, report: SessionEvent, *, lane: str | None = None
+    uow: UnitOfWork,
+    report: SessionEvent,
+    *,
+    lane: str | None = None,
+    session_worker: str | None = None,
 ) -> AppendResult:
     role, _, caller = uow.role.partition(":")
     if role not in CLAUDE_APPENDERS or report.kind not in (TURN_REPORT, SESSION_MESSAGE):
@@ -51,9 +55,13 @@ async def record_claude(
     if not report.session_id.strip():
         raise LedgerError("invalid", "session_id must be nonempty")
     if role == "worker":
+        if session_worker is not None and session_worker != caller:
+            raise LedgerError("forbidden", "the Claude session is bound to another worker")
         lane = await infer_lane(uow, worker=caller)
         if lane is None:
             raise LedgerError("forbidden", "a worker must have a current lane")
+    elif lane is None and session_worker is not None:
+        lane = await infer_lane(uow, worker=session_worker)
     elif lane is not None and await uow.find_lane(lane) is None:
         raise LedgerError("not_found", "lane not found")
 

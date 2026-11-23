@@ -13,11 +13,13 @@ from typing import Any, cast
 import httpx
 
 from plotroom.core.events import format_time
-from plotroom.core.github import PULL_REQUESTS, ObservedPull, apply_pull_poll
+from plotroom.core.github import PULL_REQUESTS, FetchRetry, ObservedPull, apply_pull_poll
 from plotroom.core.ledger import Ledger
 from plotroom.ports.clock import Clock
 
 log = logging.getLogger("plotroom.github")
+RECONCILE_EVERY = 60
+POLL_OVERLAP = timedelta(minutes=5)
 
 
 class GitHubUnavailable(Exception):
@@ -125,8 +127,19 @@ def _pull(value: Any) -> ObservedPull:
     if merged_at is not None and (state != "closed" or not isinstance(merged_at, str)):
         raise ValueError("invalid merged pull request")
     normalized = format_time(datetime.fromisoformat(updated_at))
+    head_repo: Any = fields.get("repo")
+    full_name: Any = (
+        cast("dict[str, Any]", head_repo).get("full_name") if isinstance(head_repo, dict) else None
+    )
+    head_repository = full_name.lower() if isinstance(full_name, str) and full_name else None
     return ObservedPull(
-        number, branch, sha, "merged" if merged_at is not None else state, normalized, body or ""
+        number,
+        branch,
+        sha,
+        head_repository,
+        "merged" if merged_at is not None else state,
+        normalized,
+        body or "",
     )
 
 
@@ -136,7 +149,9 @@ class PullRequestFetcher:
     def __init__(self, api_url: str, repository: str) -> None:
         self._endpoint = httpx.URL(f"{api_url}/repos/{repository}/pulls")
 
-    async def fetch(self, client: httpx.AsyncClient, token: str) -> tuple[ObservedPull, ...]:
+    async def fetch(
+        self, client: httpx.AsyncClient, token: str, floor: str | None
+    ) -> tuple[ObservedPull, ...]:
         query = {"state": "all", "sort": "updated", "direction": "desc", "per_page": "100"}
         page = 1
         pulls: dict[int, ObservedPull] = {}
@@ -162,8 +177,12 @@ class PullRequestFetcher:
                 rows: Any = response.json()
                 if not isinstance(rows, list):
                     raise ValueError("expected a list of pull requests")
+                reached_floor = False
                 for row in cast("list[Any]", rows):
                     observed = _pull(row)
+                    if floor is not None and observed.updated_at < floor:
+                        reached_floor = True
+                        continue
                     previous = pulls.get(observed.number)
                     if previous is None or previous.updated_at < observed.updated_at:
                         pulls[observed.number] = observed
@@ -172,7 +191,7 @@ class PullRequestFetcher:
                     "GitHub returned an invalid pull request response"
                 ) from None
             link = response.links.get("next")
-            if link is None:
+            if link is None or reached_floor:
                 return tuple(pulls.values())
             # GitHub can use its numeric repository route in Link. Only the page number
             # is needed, so every authenticated request stays on the configured endpoint.
@@ -202,19 +221,30 @@ class GitHubPoller:
         self._fetcher = fetcher
         self._seconds = seconds
         self._retry_at: datetime | None = None
-        self._backoff = 60
 
     async def poll(self, client: httpx.AsyncClient) -> bool:
+        retry = await self._ledger.fetch_retry(self._repo, PULL_REQUESTS)
+        self._retry_at = datetime.fromisoformat(retry.until) if retry is not None else None
         if self._retry_at is not None and self._clock.now() < self._retry_at:
+            self._ledger.github_error = "GitHub rate limit reached"
             return False
         baseline = await self._ledger.fetch_cursor(self._repo, PULL_REQUESTS)
+        # Inclusive overlap tolerates equal timestamps and rows moving between pages.
+        # A periodic full reconciliation also refreshes old records.
+        floor = None
+        if baseline and baseline.watermark and baseline.generation % RECONCILE_EVERY:
+            floor = format_time(datetime.fromisoformat(baseline.watermark) - POLL_OVERLAP)
         try:
             token = await self._credential.token()
-            pulls = await self._fetcher.fetch(client, token)
+            pulls = await self._fetcher.fetch(client, token, floor)
         except (GitHubUnavailable, httpx.RequestError) as exc:
             if isinstance(exc, GitHubRateLimited):
-                self._retry_at = exc.retry_at(self._clock.now(), self._backoff)
-                self._backoff = min(self._backoff * 2, 900)
+                backoff = retry.next_backoff if retry is not None else 60
+                self._retry_at = exc.retry_at(self._clock.now(), backoff)
+                deadline = FetchRetry(format_time(self._retry_at), min(backoff * 2, 900))
+                await self._ledger.run(
+                    "system", lambda uow: uow.save_fetch_retry(self._repo, PULL_REQUESTS, deadline)
+                )
             reason = str(exc) if isinstance(exc, GitHubUnavailable) else "GitHub request failed"
             if self._ledger.github_error != reason:
                 log.warning(reason, extra={"project": self._ledger.project_id})
@@ -227,7 +257,6 @@ class GitHubPoller:
         if committed:
             self._ledger.github_error = None
             self._retry_at = None
-            self._backoff = 60
         return committed
 
     async def run(self) -> None:

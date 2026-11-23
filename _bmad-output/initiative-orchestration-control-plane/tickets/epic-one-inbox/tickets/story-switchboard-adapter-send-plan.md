@@ -3,7 +3,7 @@ title: Send committed Switchboard actions
 type: feature
 ticket: 17
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: af28da0ede39ff4730d2b53bf74abac9e6717bbe
 route: oneshot
 route_source: auto
@@ -27,11 +27,15 @@ context: []
 
 ## Implementation Notes
 
-Reuse ProjectRuntime's attempt transaction. The scripted peer accepts a send before interrupting the response. On restart it records a second request with the same key and lets the action finish.
+The scripted relay accepted a send before its response was interrupted. The restarted action used the same provider idempotency key and message key.
 
 ## Plan Change Log
 
 ## Review Triage Log
+
+The independent native Codex review inspected the combined batch.
+
+- P3, verified and corrected. Publish complete send markers before the test can tear down the child process.
 
 ## Verification
 

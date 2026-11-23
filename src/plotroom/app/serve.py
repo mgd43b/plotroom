@@ -354,6 +354,7 @@ class Daemon:
             workers = self._config.workers.get(project_id, frozenset())
             source = self._config.ticket_trees.get(project_id)
             github = self._config.github.get(project_id)
+            desktop = self._config.session_readers.get(project_id)
             repository = github.repository if github is not None else None
             project.ledger = Ledger(
                 project.store,
@@ -362,6 +363,7 @@ class Daemon:
                 watcher_roles=self._config.watchers.get(project_id, ()),
                 wait_cap=self._config.wait_cap,
                 github_repository=repository,
+                session_workers=desktop.sessions if desktop is not None else None,
             )
             project.ledger.start()
             relay = self._config.switchboards.get(project_id)
@@ -371,7 +373,7 @@ class Daemon:
                 else None
             )
             inputs = [switchboard.run] if switchboard is not None else []
-            if desktop := self._config.session_readers.get(project_id):
+            if desktop is not None:
                 intake = SessionIntake(
                     project.ledger,
                     ClaudeDesktopReader(desktop.claude_home, desktop.app_support),

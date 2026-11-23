@@ -9,7 +9,7 @@ import sqlite3
 from collections import Counter
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -20,7 +20,7 @@ from plotroom.core.catalog import Catalog
 from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
-from plotroom.core.github import PULL_REQUESTS, FetchCursor, GitHubSummary, PullRequest
+from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, GitHubSummary, PullRequest
 from plotroom.core.lanes import Lane
 from plotroom.core.ledger import Ledger
 from plotroom.core.next_items import Item, visible
@@ -31,6 +31,20 @@ from plotroom.ports.work_items import WorkItem
 
 FIXTURES = Path(__file__).parent / "fixtures"
 START = datetime(2026, 11, 22, 12, 0, 0, tzinfo=UTC)
+
+
+def _branch_pull(
+    pulls: dict[tuple[str, int], PullRequest], repository: str, branch: str
+) -> PullRequest | None:
+    matches = [
+        pull
+        for pull in pulls.values()
+        if pull.repository == pull.head_repository == repository
+        and pull.branch == branch
+        and pull.state == "open"
+        and pull.complete
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 class FixedClock:
@@ -62,6 +76,7 @@ class _MemoryTransaction:
         self.claude_turns: dict[tuple[str, str], set[str]] = {}
         self.pulls: dict[tuple[str, int], PullRequest] = {}
         self.fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
+        self.fetch_retries: dict[tuple[str, str], FetchRetry] = {}
         self.seq = seq
         self.expired = False
         self._on_allocate = on_allocate
@@ -145,6 +160,10 @@ class _MemoryTransaction:
         self._live()
         return self.pulls.get((repository, number))
 
+    async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None:
+        self._live()
+        return _branch_pull(self.pulls, repository, branch)
+
     async def save_pull_request(self, pull: PullRequest) -> None:
         self._live()
         self.pulls[pull.repository, pull.number] = pull
@@ -156,6 +175,15 @@ class _MemoryTransaction:
     async def save_fetch_cursor(self, repository: str, resource: str, cursor: FetchCursor) -> None:
         self._live()
         self.fetch_cursors[repository, resource] = cursor
+
+    async def save_fetch_retry(
+        self, repository: str, resource: str, retry: FetchRetry | None
+    ) -> None:
+        self._live()
+        if retry is None:
+            self.fetch_retries.pop((repository, resource), None)
+        else:
+            self.fetch_retries[repository, resource] = retry
 
     async def save_lane(self, lane: Lane) -> None:
         self._live()
@@ -237,6 +265,7 @@ class MemoryStore:
         self._claude_turns: dict[tuple[str, str], set[str]] = {}
         self._pulls: dict[tuple[str, int], PullRequest] = {}
         self._fetch_cursors: dict[tuple[str, str], FetchCursor] = {}
+        self._fetch_retries: dict[tuple[str, str], FetchRetry] = {}
         self._open = False
         self.commits = 0
         self.on_allocate: Callable[[], None] | None = None
@@ -265,6 +294,7 @@ class MemoryStore:
         tx.claude_turns = {key: ids.copy() for key, ids in self._claude_turns.items()}
         tx.pulls = self._pulls.copy()
         tx.fetch_cursors = self._fetch_cursors.copy()
+        tx.fetch_retries = self._fetch_retries.copy()
         try:
             yield tx
         except BaseException:
@@ -280,6 +310,7 @@ class MemoryStore:
             self._claude_turns = tx.claude_turns
             self._pulls = tx.pulls
             self._fetch_cursors = tx.fetch_cursors
+            self._fetch_retries = tx.fetch_retries
             self.commits += 1
         finally:
             tx.expired = True
@@ -314,13 +345,25 @@ class MemoryStore:
             pull.state == "open" for pull in self._pulls.values() if pull.repository == repository
         )
         cursor = await self.fetch_cursor(repository, PULL_REQUESTS)
-        return await self.read_board(role), GitHubSummary(opened, cursor.as_of if cursor else None)
+        seq, items, counts, lanes = await self.read_board(role)
+        projected = [
+            replace(lane, pr=pr.number, head_sha=pr.head_sha)
+            if (pr := _branch_pull(self._pulls, repository, lane.branch)) is not None
+            else replace(lane, pr=None, head_sha=None)
+            for lane in lanes
+        ]
+        return (seq, items, counts, projected), GitHubSummary(
+            opened, cursor.as_of if cursor else None
+        )
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return self._pulls.get((repository, number))
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         return self._fetch_cursors.get((repository, resource))
+
+    async def fetch_retry(self, repository: str, resource: str) -> FetchRetry | None:
+        return self._fetch_retries.get((repository, resource))
 
     async def read_next(self, role: str, offset: int, limit: int) -> tuple[int, list[Item]]:
         _, items, _, _ = await self.read_board(role)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -62,7 +62,7 @@ class _Turn:
             self.final_text = "\n".join(parts)
 
 
-def _transcript(path: Path, session: str, idle: bool) -> Iterator[SessionEvent]:
+def _transcript(path: Path, session: str, still_idle: Callable[[], bool]) -> Iterator[SessionEvent]:
     turn: _Turn | None = None
     with path.open(encoding="utf-8") as stream:
         for line in stream:
@@ -86,7 +86,7 @@ def _transcript(path: Path, session: str, idle: bool) -> Iterator[SessionEvent]:
                         )
             elif turn is not None and row.get("type") == "assistant":
                 turn.observe(_object(row.get("message")))
-    if idle and turn is not None and (report := turn.report(session)) is not None:
+    if turn is not None and (report := turn.report(session)) is not None and still_idle():
         yield report
 
 
@@ -105,25 +105,42 @@ class ClaudeDesktopReader:
             states = _metadata(self._support, "claude-code-sessions/*/*/local_*.json")
             if not any(state.get("cliSessionId") == session for state in states):
                 return ()
-            live = [
-                entry
-                for entry in _metadata(self._home, "sessions/*.json")
-                if entry.get("sessionId") == session
-            ]
-            if not live:
+            before = self._status(session)
+            if before is None:
                 return ()
-            # A replaced process may leave a registry file briefly. Use the latest status.
-            status = max(live, key=_status_time).get("status")
             paths = [
                 path
                 for path in self._home.glob(f"projects/*/{session}.jsonl")
                 if path.resolve(strict=True) == path and path.is_file()
             ]
-            if len(paths) == 1 and status in ("busy", "idle", "waiting"):
-                return tuple(_transcript(paths[0], session, status == "idle"))
+            if len(paths) == 1:
+                return tuple(
+                    _transcript(
+                        paths[0],
+                        session,
+                        lambda: (
+                            before[0] == "idle"
+                            and before[1] > 0
+                            and self._status(session) == before
+                        ),
+                    )
+                )
         except OSError, ValueError:
             pass  # formats and files are local implementation details and can change during reads
         return ()
+
+    def _status(self, session: str) -> tuple[str, int] | None:
+        live = (
+            entry
+            for entry in _metadata(self._home, "sessions/*.json")
+            if entry.get("sessionId") == session
+        )
+        # A replaced process may leave a registry file briefly. Use the latest status.
+        latest = max(live, key=_status_time, default=None)
+        if latest is None:
+            return None
+        status = latest.get("status")
+        return (status, _status_time(latest)) if status in ("busy", "idle", "waiting") else None
 
 
 def _status_time(entry: dict[str, Any]) -> int:

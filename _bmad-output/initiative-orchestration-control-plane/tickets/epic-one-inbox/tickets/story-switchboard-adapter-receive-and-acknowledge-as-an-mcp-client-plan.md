@@ -3,7 +3,7 @@ title: Switchboard adapter receive and acknowledge
 type: feature
 ticket: 7
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: fe1077b741a32c3eb017dc54918902d192c631c9
 route: full
 route_source: auto
@@ -53,11 +53,16 @@ Given one claimed message and an interruption before acknowledgment, when the re
 
 ## Implementation Notes
 
-The isolated stdio child exercised startup recovery and a fresh receipt following restart. The combined batch review is pending.
+The scripted relay proved startup recovery and one durable event across restart. A separate smoke used the installed relay with a temporary database.
 
 ## Plan Change Log
 
 ## Review Triage Log
+
+The independent native Codex review inspected the combined batch.
+
+- P2, verified and corrected. Require a canonical explicit board name so relay normalization cannot join another project’s board.
+- P3, verified and corrected. Publish content-bearing fixture markers by atomic rename.
 
 ## Verification
 

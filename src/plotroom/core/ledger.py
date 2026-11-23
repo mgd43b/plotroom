@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import math
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,7 +20,7 @@ from plotroom.core.events import (
     is_json,
     validate_fields,
 )
-from plotroom.core.github import FetchCursor, GitHubSummary, PullRequest
+from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
 from plotroom.core.next_items import Item
 from plotroom.core.roles import OwnershipView, role_family
 from plotroom.core.unit_of_work import UnitOfWork
@@ -58,6 +58,7 @@ class Ledger:
         watcher_roles: tuple[str, ...] = (),
         wait_cap: int = 240,
         github_repository: str | None = None,
+        session_workers: Mapping[str, str] | None = None,
     ) -> None:
         self._store = store
         self._catalog = catalog
@@ -67,6 +68,7 @@ class Ledger:
         self._wait_cap = wait_cap
         self.github_repository = github_repository
         self.github_error = "waiting for the first GitHub poll" if github_repository else None
+        self.session_workers = dict(session_workers or {})
         self._stopping = asyncio.Event()
 
     @property
@@ -263,3 +265,6 @@ class Ledger:
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         return await self._store.fetch_cursor(repository, resource)
+
+    async def fetch_retry(self, repository: str, resource: str) -> FetchRetry | None:
+        return await self._store.fetch_retry(repository, resource)

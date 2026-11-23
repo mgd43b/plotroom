@@ -10,6 +10,13 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.create_table(
+        "github_fetch_retries",
+        sa.Column("repository", sa.Text(), primary_key=True),
+        sa.Column("resource", sa.Text(), primary_key=True),
+        sa.Column("until", sa.Text(), nullable=False),
+        sa.Column("next_backoff", sa.Integer(), nullable=False),
+    )
     op.add_column(
         "github_pull_requests", sa.Column("as_of", sa.Text(), nullable=False, server_default="")
     )

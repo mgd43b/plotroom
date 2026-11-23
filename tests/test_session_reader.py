@@ -125,6 +125,19 @@ async def test_missing_metadata_and_open_turns_are_safe(tmp_path: Path) -> None:
     assert [event.kind for event in await reader.read(SESSION)] == [SESSION_MESSAGE, TURN_REPORT]
 
 
+async def test_reader_rechecks_idle_status_after_reading_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reader = session_files(tmp_path)
+    statuses = iter((("idle", 8), ("idle", 10)))
+
+    def status(_session: str) -> tuple[str, int]:
+        return next(statuses)
+
+    monkeypatch.setattr(reader, "_status", status)
+    assert [event.kind for event in await reader.read(SESSION)] == [SESSION_MESSAGE]
+
+
 def test_desktop_config_uses_explicit_roots_and_session_binding(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(

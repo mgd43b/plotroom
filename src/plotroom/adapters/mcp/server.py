@@ -216,9 +216,11 @@ def build_app(
         if caller.ledger is None:
             return err("unavailable", unavailable or "the project ledger is unavailable")
         report = SessionEvent(kind, session_id, body, upstream_id, turn_index)
+        session_worker = caller.ledger.session_workers.get(session_id)
         try:
             result = await caller.ledger.run(
-                caller.identity.role, lambda uow: record_claude(uow, report, lane=lane)
+                caller.identity.role,
+                lambda uow: record_claude(uow, report, lane=lane, session_worker=session_worker),
             )
         except LedgerError as exc:
             return err(exc.code, exc.message)

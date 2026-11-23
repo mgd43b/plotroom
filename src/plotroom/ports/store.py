@@ -7,7 +7,7 @@ from typing import Any, Protocol
 
 from plotroom.core.actions import Action
 from plotroom.core.events import Event
-from plotroom.core.github import FetchCursor, GitHubSummary, PullRequest
+from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
@@ -68,12 +68,18 @@ class Transaction(Protocol):
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None: ...
 
+    async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None: ...
+
     async def save_pull_request(self, pull: PullRequest) -> None: ...
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None: ...
 
     async def save_fetch_cursor(
         self, repository: str, resource: str, cursor: FetchCursor
+    ) -> None: ...
+
+    async def save_fetch_retry(
+        self, repository: str, resource: str, retry: FetchRetry | None
     ) -> None: ...
 
 
@@ -112,6 +118,8 @@ class Store(Protocol):
     async def pull_request(self, repository: str, number: int) -> PullRequest | None: ...
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None: ...
+
+    async def fetch_retry(self, repository: str, resource: str) -> FetchRetry | None: ...
 
     async def read_next(self, role: str, offset: int, limit: int) -> tuple[int, list[Item]]: ...
 

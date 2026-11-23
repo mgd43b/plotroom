@@ -29,7 +29,7 @@ from plotroom.adapters.store_sqlite.migrate import upgrade_to_head
 from plotroom.adapters.store_sqlite.work_items_sql import ready_work_items
 from plotroom.core.actions import Action
 from plotroom.core.events import Event
-from plotroom.core.github import FetchCursor, GitHubSummary, PullRequest
+from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
 from plotroom.core.next_items import Item
 from plotroom.ports.store import Board
 from plotroom.ports.work_items import WorkItem
@@ -194,6 +194,10 @@ class SqliteStore:
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         async with self._engine.connect() as connection:
             return await github_sql.fetch_cursor(connection, repository, resource)
+
+    async def fetch_retry(self, repository: str, resource: str) -> FetchRetry | None:
+        async with self._engine.connect() as connection:
+            return await github_sql.fetch_retry(connection, repository, resource)
 
     async def read_next(self, role: str, offset: int, limit: int) -> tuple[int, list[Item]]:
         async with self._engine.connect() as connection:
