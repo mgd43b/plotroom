@@ -9,7 +9,7 @@ hitl: false
 risk: low
 tracker_id: "105"
 remote: "https://github.com/mgd43b/plotroom/issues/105"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Routing hands-on requests
