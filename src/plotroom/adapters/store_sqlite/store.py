@@ -20,9 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from sqlalchemy.pool import ConnectionPoolEntry
 
 from plotroom.adapters.store_sqlite import (
+    asks_sql,
     checklists_sql,
     embedding_sql,
     github_sql,
+    human_queue_sql,
     outbox_sql,
     triggers_sql,
 )
@@ -45,6 +47,7 @@ from plotroom.adapters.store_sqlite.migrate import upgrade_to_head
 from plotroom.adapters.store_sqlite.search_sql import search_messages
 from plotroom.adapters.store_sqlite.work_items_sql import ready_work_items
 from plotroom.core.actions import Action, QueuedAction
+from plotroom.core.ask_checks import Ask
 from plotroom.core.claims import Claim
 from plotroom.core.events import Event, LedgerError
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
@@ -64,6 +67,7 @@ from plotroom.ports.store import Board, Transaction
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
+    from plotroom.core.human_queue import Decision
     from plotroom.core.outbox import OutboxReadiness
     from plotroom.core.triggers import Trigger
 
@@ -343,6 +347,18 @@ class SqliteStore:
     async def read_merge_gate(self, repository: str | None, number: int) -> GateSnapshot:
         async with self._engine.connect() as connection, connection.begin():
             return await load_gate_snapshot(SqliteTransaction(connection), repository, number)
+
+    async def list_decisions(self, governs: str | None) -> list[Decision]:
+        async with self._engine.connect() as connection:
+            return await human_queue_sql.list_decisions(connection, governs)
+
+    async def pending_ask_issues(self, repository: str) -> set[int]:
+        async with self._engine.connect() as connection:
+            return await asks_sql.pending_ask_issues(connection, repository)
+
+    async def list_asks(self, stale_only: bool) -> list[Ask]:
+        async with self._engine.connect() as connection:
+            return await asks_sql.list_asks(connection, stale_only)
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         async with self._engine.connect() as connection:

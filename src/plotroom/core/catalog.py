@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from functools import partial
 
 from plotroom.core.actions import ACTION_FIELDS, FAILED_ACTION
+from plotroom.core.ask_checks import ASK_ITEMS
+from plotroom.core.asks import record_ask
 from plotroom.core.branch_updates import (
     BRANCH_UPDATE_CONFLICT,
     BRANCH_UPDATE_FIELDS,
@@ -28,6 +30,7 @@ from plotroom.core.deploy_window import freeze, unfreeze
 from plotroom.core.events import EventKind, EventRegistry, FieldSpec
 from plotroom.core.github import PR_FIELDS, PR_KINDS
 from plotroom.core.github_projection import GITHUB_FIELDS, REPOSITORY
+from plotroom.core.human_queue import DECISION_FIELDS, decide
 from plotroom.core.intake import (
     CLAUDE_APPENDERS,
     INBOUND_MESSAGE,
@@ -100,6 +103,7 @@ def build_catalog(
     workers: frozenset[str] = frozenset(),
     *,
     github_repository: str | None = None,
+    human_login: str | None = None,
     delivery_routes: Mapping[str, DeliveryRoute] | None = None,
     image_jobs: tuple[str, ...] = (),
     lane_idle_minutes: int = 15,
@@ -179,6 +183,29 @@ def build_catalog(
         Command("freeze", (FieldSpec("reason", "str"),), freeze), rules=orchestrator
     )
     catalog.commands.register(Command("unfreeze", (), unfreeze), rules=orchestrator)
+    for item_kind in ASK_ITEMS:
+        catalog.register_item(item_kind)
+    catalog.commands.register(
+        Command(
+            "ask",
+            (
+                FieldSpec("issue", "int"),
+                FieldSpec("text", "str"),
+                FieldSpec("options", "array"),
+                FieldSpec("comment_id", "int"),
+            ),
+            partial(record_ask, repository=github_repository),
+        ),
+        rules=orchestrator,
+    )
+    catalog.commands.register(
+        Command(
+            "decide",
+            DECISION_FIELDS,
+            partial(decide, repository=github_repository, human_login=human_login),
+        ),
+        rules=orchestrator,
+    )
     owner = (*orchestrator, WriterRule("worker", owns_lane))
     events.register(EventKind(DEPLOY_STATUS, DEPLOY_FIELDS, frozenset({"system"})))
     catalog.commands.register(

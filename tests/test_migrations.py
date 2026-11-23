@@ -21,8 +21,14 @@ from plotroom.app.serve import Daemon
 from plotroom.core.catalog import build_catalog
 from plotroom.core.claims import TICKET_TREE_MOVE
 from plotroom.core.events import NewEvent
-from plotroom.core.github import PR_MERGED, PR_OPENED, ObservedPull
-from plotroom.core.github_projection import FILES, GitHubRecord, GitHubResource
+from plotroom.core.github import PR_MERGED, PR_OPENED, ObservedPull, apply_comments
+from plotroom.core.github_projection import (
+    FILES,
+    ISSUES,
+    GitHubRecord,
+    GitHubResource,
+    apply_resource,
+)
 from plotroom.core.lanes import Lane
 from plotroom.core.ledger import Ledger
 from plotroom.core.unit_of_work import UnitOfWork
@@ -353,6 +359,96 @@ async def test_a_file_with_an_unknown_revision_is_not_migrated(tmp_path: Path) -
             await store.migrate()
     finally:
         await store.close()
+
+
+async def test_populated_human_queue_upgrade_preserves_projected_comment(tmp_path: Path) -> None:
+    previous = "0019"
+    legacy = _migrations_at(tmp_path / "legacy", previous)
+    repo = "fixture/queue"
+    human = "fixture-human"
+    stamp = "2026-11-22T12:00:00.000000Z"
+    words = "  Café\r\nShip.  "
+    fields = {"id": 900, "number": 1, "author": human, "created_at": stamp, "updated_at": stamp}
+    comment = GitHubRecord("900", "issue_comment", fields, words)
+    lane = Lane(
+        "fixture-lane",
+        "fixture-worker",
+        (),
+        "fixture-branch",
+        imported_channel="fixture-channel",
+        imported_trigger_id="fixture-trigger",
+    )
+    store = SqliteStore("demo", tmp_path)
+    await upgrade_to_head(store._engine, alembic_config(legacy))  # pyright: ignore[reportPrivateUsage]
+    assert await store.revision() == previous
+    ledger = Ledger(store, build_catalog(), FixedClock())
+    ledger.start()
+    try:
+        issue = GitHubRecord(
+            "issue/1",
+            "issue_opened",
+            {"number": 1, "state": "open"},
+            details={"resource": "issue"},
+            fact="open",
+        )
+
+        async def existing_queue_inputs(uow: UnitOfWork) -> None:
+            await uow.save_lane(lane)
+            await apply_resource(uow, repo, ISSUES, "", GitHubResource((issue,)), stamp)
+            await apply_comments(uow, repo, None, (comment,), stamp, stamp)
+
+        await ledger.run("system", existing_queue_inputs)
+        before = await ledger.events_after(0)
+        assert [event.kind for event in before] == ["github.issue_opened", "github.issue_comment"]
+    finally:
+        await ledger.stop()
+        await store.close()
+
+    upgraded = SqliteStore("demo", tmp_path)
+    ledger = Ledger(
+        upgraded,
+        build_catalog(github_repository=repo, human_login=human),
+        FixedClock(),
+        github_repository=repo,
+        human_login=human,
+    )
+    try:
+        await upgraded.migrate()
+        assert await upgraded.revision() == head_revision()
+        assert await upgraded.events_after(0) == before
+        _, _, _, lanes = await upgraded.read_board("orchestrator")
+        assert lanes == [lane]
+        ledger.start()
+        ask = await ledger.execute(
+            "orchestrator",
+            "ask",
+            "post-upgrade-ask",
+            {"issue": 1, "comment_id": 900, "text": words, "options": ["A"]},
+        )
+        await ledger.execute(
+            "orchestrator",
+            "decide",
+            "post-upgrade-decision",
+            {
+                "who": human,
+                "exact_words": words,
+                "where_ref": {
+                    "kind": "github_comment",
+                    "repository": repo,
+                    "issue": 1,
+                    "comment_id": 900,
+                },
+                "governs": [f"{repo}#1"],
+                "settles": [ask.result["ask_id"]],
+            },
+        )
+        [decision] = await ledger.list_decisions("orchestrator", f"{repo}#1")
+        [recorded_ask] = await ledger.list_asks("orchestrator", False)
+        assert decision["exact_words"].encode() == words.encode()
+        assert recorded_ask["settled_by"] == decision["decision_id"]
+    finally:
+        await ledger.stop()
+        await upgraded.close()
 
 
 def test_two_revisions_with_the_same_parent_are_detected(tmp_path: Path) -> None:

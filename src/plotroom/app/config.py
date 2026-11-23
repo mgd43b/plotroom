@@ -130,6 +130,8 @@ class Config:
     github_issue_sources: Mapping[str, GitHubIssuesConfig] = field(default_factory=lambda: {})
     delivery_routes: Mapping[str, Mapping[str, DeliveryRoute]] = field(default_factory=lambda: {})
     briefs: Mapping[str, BriefSettings] = field(default_factory=lambda: {})
+    human_logins: Mapping[str, str] = field(default_factory=lambda: {})
+    ask_stale_days: Mapping[str, int] = field(default_factory=lambda: {})
     embedders: Mapping[str, EmbedderConfig] = field(default_factory=lambda: {})
 
     @property
@@ -229,6 +231,8 @@ def load_config(
         briefs=_brief_settings(projects, raw.get("projects")),
         embedders=_embedders(projects, raw.get("projects")),
         delivery_routes=_delivery_routes(projects, switchboards, worker_sessions, drain_sessions),
+        human_logins=_human_logins(projects, raw.get("projects")),
+        ask_stale_days=_ask_stale_days(projects, raw.get("projects")),
         wait_cap=_integer("wait_cap", raw.get("wait_cap", 240), minimum=1),
         snapshot_budget=_integer(
             "snapshot_budget",
@@ -339,6 +343,28 @@ def _drain_sessions(projects: tuple[str, ...], table: Any) -> dict[str, str]:
                 f"projects.{project_id}.drain_session", project["drain_session"]
             )
     return sessions
+
+
+def _human_logins(projects: tuple[str, ...], table: Any) -> dict[str, str]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, str] = {}
+    for project_id in projects:
+        settings = entries.get(project_id, {})
+        if "human_login" in settings:
+            name = f"projects.{project_id}.human_login"
+            configured[project_id] = _string(name, settings["human_login"])
+    return configured
+
+
+def _ask_stale_days(projects: tuple[str, ...], table: Any) -> dict[str, int]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, int] = {}
+    for project in projects:
+        settings = entries.get(project, {})
+        if "ask_stale_days" in settings:
+            name = f"projects.{project}.ask_stale_days"
+            configured[project] = _integer(name, settings["ask_stale_days"], minimum=0)
+    return configured
 
 
 def _workers(projects: tuple[str, ...], table: Any) -> dict[str, frozenset[str]]:
