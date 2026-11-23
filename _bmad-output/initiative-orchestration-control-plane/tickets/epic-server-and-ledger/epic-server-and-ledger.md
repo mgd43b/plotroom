@@ -73,3 +73,4 @@ An orchestrator can be restarted or compacted mid-run and rebuild the board from
 - Decision: 2026-11-22, `plotroom token issue` writes the instance token file directly under a file lock (it is instance config, not a project file), so the first orchestrator token needs no running server.
 - Hands on: entry 4 to epic 2 (event log), entry 7 and entry 5 to epic 3 (action runner, drain role), entry 13 to epics 2 and 5 (WorkItemSource port), entry 10 to epic 11 (image and health endpoints), entry 1 to epic 9 (what the clerk's ledger holds).
 - Decision: 2026-11-22, Alembic revisions live in the package at `src/plotroom/adapters/store_sqlite/migrations/`, with `alembic.ini` at the repository root, so the wheel carries them (found in the tracer's PR #28); every entry that adds a revision puts it there.
+- Decision: 2026-11-22, serve's lock refusal exits with code 4, not 3, because uvicorn exits 3 on a failed start (lane #14, PR #51); entry 15's contract test checks it.

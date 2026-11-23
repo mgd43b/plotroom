@@ -3,7 +3,7 @@ id: 12
 type: story
 title: "Refactor sweep"
 parent: epic-server-and-ledger
-after: [2, 3, 4, 5, 6, 7, 8, 13, 9, 10, 14, 15, 11]
+after: [2, 3, 4, 5, 6, 7, 8, 13, 9, 10, 14, 15, 11, 17, 18]
 hitl: false
 risk: low
 tracker_id: "26"
@@ -15,7 +15,7 @@ tracker_status: backlog
 
 ## Description
 
-Cleanup only, scoped at its start from the plans and review findings the epic deferred.
+Cleanup only, scoped at its start from the plans and review findings the epic deferred, including the stdio proxy blocking on readline when a client breaks stdout but keeps stdin open and silent (deferred in PR #51).
 
 ## Requirements
 

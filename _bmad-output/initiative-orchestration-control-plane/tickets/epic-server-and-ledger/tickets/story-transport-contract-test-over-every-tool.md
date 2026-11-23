@@ -5,7 +5,7 @@ title: "Transport contract test over every tool"
 parent: epic-server-and-ledger
 covers: [R4, R11]
 after: [3, 5, 8, 9, 13]
-hitl: true
+hitl: false
 risk: medium
 tracker_id: "24"
 remote: "https://github.com/mgd43b/plotroom/issues/24"
@@ -16,7 +16,7 @@ tracker_status: backlog
 
 ## Description
 
-The contract test calls every tool from entries 2 to 13 through the stdio proxy and HTTP in both protocol eras, and covers a 401 with no WWW-Authenticate; it runs in CI. A person confirms how a real Claude Code session and a real Codex session handle that 401.
+The contract test calls every tool from entries 2 to 13 through the stdio proxy and HTTP in both protocol eras, and covers a 401 with no WWW-Authenticate and serve's lock refusal exiting with code 4 (uvicorn itself exits 3 on a failed start); it runs in CI. The real-client 401 check is entry 5's.
 
 ## Requirements
 
