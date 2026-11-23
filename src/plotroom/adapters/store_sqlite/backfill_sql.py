@@ -125,7 +125,10 @@ async def _retained_pull_text(
         connection, pull.repository, PULL_TEXT, str(pull.number)
     )
     if snapshot is not None:
-        record = pull_text_record(pull, snapshot, updated_since=latest.updated_at if latest else "")
+        # Failed refreshes mark the resource incomplete and retain its verified attributes.
+        record = pull_text_record(
+            pull, snapshot, updated_since=latest.updated_at if latest else "", allow_incomplete=True
+        )
         if record is not None:
             return record
     return (

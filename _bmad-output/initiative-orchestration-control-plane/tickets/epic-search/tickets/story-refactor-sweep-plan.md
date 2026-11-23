@@ -10,7 +10,7 @@ route_source: pinned
 risk: low
 review: thorough
 review_source: pinned
-lenses_ran: []
+lenses_ran: [blind-hunter, edge-case-hunter, verification-gap, intent-alignment]
 review_loop_iteration: 0
 context: ['{project-root}/AGENTS.md']
 ---
@@ -49,6 +49,9 @@ Given a match up to the configured excerpt cap with long surrounding text, when 
 ## Plan Change Log
 
 ## Review Triage Log
+
+- The MCP budget fallback could clip a match that fit without context. Preserve the matched span when trimming the first ranked excerpt.
+- Routed existing single-message provider rejection and the generic project-input storage recovery policy to the coordinator as follow-up candidates. Neither changes the current durability or lexical fallback behavior.
 
 | Finding | Disposition |
 | --- | --- |

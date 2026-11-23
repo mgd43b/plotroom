@@ -51,13 +51,21 @@ def render_search(page: SearchPage, budget: int) -> dict[str, Any]:
         raise LedgerError("unavailable", "search reply exceeds the configured token budget")
     for hit in page.hits:
         data["omitted"] = page.total - len(hits) - 1
-        row = asdict(hit)
+        row = {"id": hit.id, "kind": hit.kind, "excerpt": hit.excerpt}
         if _add(data, hits, row, budget):
             continue
-        if not hits and len(hit.excerpt) > 80:
-            row["excerpt"] = hit.excerpt[:80] + "…"
-            if _add(data, hits, row, budget):
-                continue
+        if not hits:
+            excerpt = hit.excerpt
+            if hit.match_span is not None:
+                start, end = hit.match_span
+                excerpt = excerpt[start:end]
+                row["excerpt"] = excerpt
+                if _add(data, hits, row, budget):
+                    continue
+            if len(excerpt) > 80:
+                row["excerpt"] = excerpt[:80] + "…"
+                if _add(data, hits, row, budget):
+                    continue
         data["omitted"] += 1
         break
     return data

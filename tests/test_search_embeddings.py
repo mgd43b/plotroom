@@ -633,6 +633,15 @@ async def test_daemon_starts_embedding_only_for_configured_project(
             )
             assert render_search(result, 100)["omitted"] == 1
 
+            for limit in (1, 5):
+                worker = asyncio.create_task(
+                    enabled.search("secure doorway", None, limit, role="worker:fixture")
+                )
+                (await endpoint.next_request(MODEL, "secure doorway")).vectors([0, 1])
+                assert await worker == SearchPage(
+                    (SearchHit(public.id, public.kind, public.body),), 1, "semantic"
+                )
+
             for invalid in (None, {"data": [{"index": 0, "embedding": [1e100, 1]}]}):
                 fallback = asyncio.create_task(
                     enabled.search("hatch", (DECISION_KIND,), 5, role="orchestrator")

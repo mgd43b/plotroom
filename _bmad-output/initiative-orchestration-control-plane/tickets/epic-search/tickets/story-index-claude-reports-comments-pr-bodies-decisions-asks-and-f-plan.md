@@ -10,7 +10,7 @@ route_source: pinned
 risk: high
 review: thorough
 review_source: pinned
-lenses_ran: []
+lenses_ran: [blind-hunter, edge-case-hunter, verification-gap, intent-alignment]
 review_loop_iteration: 0
 context: ['{project-root}/AGENTS.md']
 ---
@@ -39,14 +39,14 @@ Use fixture-only records. No live Claude or external provider calls, hosted work
 - `core/unit_of_work.py` owns append, insert_decision, save_ask, and save_github_resource. Use exact words, ask text, and complete current COMMENTS per comment scope. For FLAKE_EVENT include meaningful check fields because check-level body can be empty. Use actual evt IDs on ledger events and actual decision/ask IDs.
 - `core/github.py:_project_pull` has the accepted ObservedPull body after the stale guard, including body-only edits and when no gate workflow is configured. Also handle complete PULL_TEXT snapshots as appropriate without stale overwrites. Preserve existing intake/polling rules and avoid new network fetches. Stable GitHub references must include repository plus native PR or comment identity.
 - `ports/search.py` and `adapters/store_sqlite/{store,ledger_sql,search_sql}.py` provide the project-bound port, transaction guard and FTS. `adapters/mcp/server.py` knows the role. `core/ledger.py` owns query validation. Use public kind names `decision`, `ask`, `github.issue_comment`, `github.pr_body`, and existing qualified event kinds for Switchboard, Claude and flakes.
-- Reserve Alembic 0022, parent actual main 0021. Add ordinary `search_records` keyed by (kind, record_id) with INTEGER PRIMARY KEY AUTOINCREMENT sequence and exact stored body. Reuse message_fts by seeding metadata at its existing rowids via a join to existing Switchboard events in upgrade. Existing FTS hits must survive upgrade. Reuse rowids for FTS join and keep mutation atomic. A changed source gets a fresh sequence for #118 to follow; identical writes keep sequence. Preserve empty updates as records to prevent backfill restoring removed text. Keep existing embedding tables and follower operational in this slice. Expose an insert-if-absent mode for #117. Alembic's FTS exclusion stays intact.
+- Reserve Alembic 0022, parent actual main 0018. Add ordinary `search_records` keyed by (kind, record_id) with INTEGER PRIMARY KEY AUTOINCREMENT sequence and exact stored body. Reuse message_fts by seeding metadata at its existing rowids via a join to existing Switchboard events in upgrade. Existing FTS hits must survive upgrade. Reuse rowids for FTS join and keep mutation atomic. A changed source gets a fresh sequence for #118 to follow; identical writes keep sequence. Preserve empty updates as records to prevent backfill restoring removed text. Keep existing embedding tables and follower operational in this slice. Expose an insert-if-absent mode for #117. Alembic's FTS exclusion stays intact.
 - The SQLite event index must validate the actual local event before deriving its text, so fabricated or foreign bodies cannot be indexed through a valid local transaction. Keep the existing guard and replay coverage.
 
 ## Tasks & Acceptance
 
 - [x] Extend the Search port and SQLite index for record identity, updates, and exact kind filtering in both result and total queries.
 - [x] Wire immutable event and mutable projection/domain sources through the existing writer. Add role-aware search in Ledger and MCP without changing the tool arguments.
-- [x] Add focused fixture cases in `tests/test_search.py` or `tests/test_search_sources.py` for source shapes, exact words, kind filter, edit, idempotence, isolation, and rollback. Verify 0022 preserves existing FTS hits over populated 0021 while keeping a single head.
+- [x] Add focused fixture cases in `tests/test_search.py` or `tests/test_search_sources.py` for source shapes, exact words, kind filter, edit, idempotence, isolation, and rollback. Verify 0022 preserves existing FTS hits over populated 0018 while keeping a single head.
 
 Given saved records with distinct source kinds and projects, when a matching authenticated search is called, then each hit links to the current source and forbidden or nonmatching kinds contribute no hits or omissions.
 
@@ -58,6 +58,9 @@ Given saved records with distinct source kinds and projects, when a matching aut
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Filtered-out records affected lexical rank through FTS5 corpus statistics. Use per-record ordering and verify that an unrelated private decision cannot move a worker's top hit.
+- Same-version PR detail could overwrite a newer list-poll body. The accepted list snapshot owns live body changes and detail can seed a previously absent row.
 
 ## Verification
 

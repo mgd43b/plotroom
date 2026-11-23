@@ -16,7 +16,7 @@ from plotroom.core.ask_checks import Ask
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import Event, NewEvent
 from plotroom.core.github import COMMENTS, ObservedPull
-from plotroom.core.github_projection import PULL_TEXT, GitHubResource
+from plotroom.core.github_projection import PULL_TEXT, GitHubResource, apply_resource
 from plotroom.core.human_queue import Decision
 from plotroom.core.intake import SESSION_MESSAGE, TURN_REPORT
 from plotroom.core.ledger import Ledger
@@ -63,8 +63,9 @@ async def _seed_snapshots(uow: UnitOfWork) -> None:
     head = "a" * 40
     pull = ObservedPull(7, "pull", head, REPO, "open", START, "superseded open body")
     await project_pull(uow, pull)
-    await project_pull(uow, replace(pull, updated_at=LATEST))
-    await uow.save_github_resource(
+    await project_pull(uow, replace(pull, updated_at=LATER))
+    await apply_resource(
+        uow,
         REPO,
         PULL_TEXT,
         "7",
@@ -77,7 +78,14 @@ async def _seed_snapshots(uow: UnitOfWork) -> None:
                 "body": "needle retained body edit",
             },
         ),
+        LATER,
     )
+    await project_pull(uow, replace(pull, updated_at=LATEST))
+    await apply_resource(uow, REPO, PULL_TEXT, "7", GitHubResource((), complete=False), LATEST)
+    retained = await uow.github_resource(REPO, PULL_TEXT, "7")
+    assert retained is not None
+    assert not retained.complete
+    assert retained.attributes["body"] == "needle retained body edit"
 
     fallback = replace(pull, number=9)
     await project_pull(uow, fallback)

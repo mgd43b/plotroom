@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
@@ -31,6 +31,8 @@ class SearchHit:
     id: str
     kind: str
     excerpt: str
+    # Half-open bounds of the lexical match within the excerpt.
+    match_span: tuple[int, int] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)

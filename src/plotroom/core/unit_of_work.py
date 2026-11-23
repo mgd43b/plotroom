@@ -287,7 +287,8 @@ class UnitOfWork:
             elif resource == PULL_TEXT:
                 pull = await self._tx.pull_request(repository, int(scope))
                 if pull is not None and (record := pull_text_record(pull, result)) is not None:
-                    await self.index_search_record(record)
+                    # Accepted list observations own the live text, including same-version edits.
+                    await self.index_search_record(record, only_if_absent=True)
         if resource in (MAIN, MAIN_CI):
             self.all_merge_pulls = True
         elif resource == CHECKS:

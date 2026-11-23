@@ -10,7 +10,7 @@ route_source: pinned
 risk: high
 review: thorough
 review_source: pinned
-lenses_ran: []
+lenses_ran: [blind-hunter, edge-case-hunter, verification-gap, intent-alignment]
 review_loop_iteration: 0
 context: ['{project-root}/AGENTS.md']
 ---
@@ -58,6 +58,9 @@ Vectors are bound to immutable search record revisions. The migration preserves 
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Verified that a ready private decision cannot appear in a worker's vector query even when it is the closest vector.
+- Verified legacy Unicode-only whitespace is cursor-only after upgrade and preserves existing cache and guardrails data.
 
 ## Verification
 

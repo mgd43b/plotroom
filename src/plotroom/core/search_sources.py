@@ -63,13 +63,17 @@ def pull_body_record(repository: str, number: int, body: str) -> SearchRecord:
 
 
 def pull_text_record(
-    pull: PullRequest, resource: GitHubResource, *, updated_since: str | None = None
+    pull: PullRequest,
+    resource: GitHubResource,
+    *,
+    updated_since: str | None = None,
+    allow_incomplete: bool = False,
 ) -> SearchRecord | None:
     attributes = resource.attributes
     body = attributes.get("body")
     updated_at = attributes.get("pull_updated_at")
     if (
-        resource.complete
+        (resource.complete or allow_incomplete)
         and isinstance(body, str)
         and isinstance(updated_at, str)
         and attributes.get("head_sha") == pull.head_sha

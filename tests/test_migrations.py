@@ -249,11 +249,24 @@ async def test_search_records_migration_preserves_populated_fts(tmp_path: Path) 
                 ),
             )
         ).event
+        whitespace = "\u2003\u202f\u3000\t"
+        blank = (
+            await ledger.append(
+                "system",
+                NewEvent(
+                    "switchboard",
+                    "switchboard.message",
+                    "old-blank",
+                    {"sender": "fixture"},
+                    whitespace,
+                ),
+            )
+        ).event
         await ledger.stop()
         with closing(sqlite3.connect(store.path)) as db, db:
-            db.execute(
+            db.executemany(
                 "INSERT INTO message_fts (rowid, body) VALUES (?, ?)",
-                (original.seq, "legacy needle"),
+                [(original.seq, "legacy needle"), (blank.seq, whitespace)],
             )
             db.execute(
                 "INSERT INTO embedding_cursors (model, dimension, index_seq) VALUES (?, ?, ?)",
@@ -275,12 +288,18 @@ async def test_search_records_migration_preserves_populated_fts(tmp_path: Path) 
         ]
         index = store.embedding_index(EmbeddingModel("fixture", 1))
         assert await index.cursor() == 0
-        assert await index.revisions_after(0, 32) == [EmbeddingRevision(original.seq, None)]
+        assert await index.revisions_after(0, 32) == [
+            EmbeddingRevision(original.seq, None),
+            EmbeddingRevision(blank.seq, None),
+        ]
         assert (await index.query_vector("demo", (0,), 10)).hits[0].id == original.id
         with closing(sqlite3.connect(store.path)) as db:
             assert db.execute(
-                "SELECT seq, kind, record_id, body FROM search_records"
-            ).fetchall() == [(original.seq, original.kind, original.id, original.body)]
+                "SELECT seq, kind, record_id, body FROM search_records ORDER BY seq"
+            ).fetchall() == [
+                (original.seq, original.kind, original.id, original.body),
+                (blank.seq, blank.kind, blank.id, whitespace),
+            ]
             assert db.execute("SELECT index_seq FROM embedding_cursors").fetchall() == []
             assert db.execute(
                 "SELECT model, dimension, record_seq, vector FROM search_vectors"

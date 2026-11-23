@@ -27,15 +27,16 @@ COUNT_MATCHES = text("""
     WHERE message_fts MATCH :query
       AND (:kinds IS NULL OR search_records.kind IN (SELECT value FROM json_each(:kinds)))
 """)
-# Rank and limit the row IDs before highlighting their bodies.
+# Rank and limit the row IDs before highlighting their bodies. Rank each record
+# by its own byte length so hidden records cannot influence visible results.
 FIND_MATCHES = text("""
     WITH ranked AS MATERIALIZED (
         SELECT search_records.record_id AS id, search_records.kind, search_records.seq,
-               message_fts.rank
+               octet_length(search_records.body) AS body_bytes
         FROM message_fts JOIN search_records ON search_records.seq = message_fts.rowid
         WHERE message_fts MATCH :query
           AND (:kinds IS NULL OR search_records.kind IN (SELECT value FROM json_each(:kinds)))
-        ORDER BY message_fts.rank, search_records.seq DESC
+        ORDER BY body_bytes, search_records.seq DESC
         LIMIT :limit
     ), matches AS MATERIALIZED (
         SELECT ranked.*, message_fts.body,
@@ -47,13 +48,16 @@ FIND_MATCHES = text("""
                instr(marked_body, :close_marker) - instr(marked_body, :open_marker)
                    - length(:open_marker) AS match_length
         FROM matches
+    ), windows AS (
+        SELECT *, max(1, match_start - min(60, max(0, :excerpt_limit - match_length)))
+                      AS excerpt_start
+        FROM spans
     )
     SELECT id, kind,
-           substr(
-               body, max(1, match_start - min(60, max(0, :excerpt_limit - match_length))),
-               :excerpt_limit
-           ) AS excerpt
-    FROM spans ORDER BY rank, seq DESC
+           substr(body, excerpt_start, :excerpt_limit) AS excerpt,
+           match_start - excerpt_start AS match_offset,
+           min(:excerpt_limit, match_start - excerpt_start + match_length) AS match_end
+    FROM windows ORDER BY body_bytes, seq DESC
 """)
 
 
@@ -93,5 +97,8 @@ async def search_records(
             "close_marker": f">{marker}",
         },
     )
-    hits = tuple(SearchHit(row.id, row.kind, row.excerpt) for row in rows)
+    hits = tuple(
+        SearchHit(row.id, row.kind, row.excerpt, match_span=(row.match_offset, row.match_end))
+        for row in rows
+    )
     return SearchPage(hits, total)

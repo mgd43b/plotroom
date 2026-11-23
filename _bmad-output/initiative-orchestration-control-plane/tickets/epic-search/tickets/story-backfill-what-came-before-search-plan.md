@@ -10,7 +10,7 @@ route_source: pinned
 risk: high
 review: thorough
 review_source: pinned
-lenses_ran: []
+lenses_ran: [blind-hunter, edge-case-hunter, verification-gap, intent-alignment]
 review_loop_iteration: 0
 context: ['{project-root}/AGENTS.md']
 ---
@@ -58,6 +58,8 @@ Given a project upgraded from a populated prior schema, when lexical backfill st
 ## Plan Change Log
 
 ## Review Triage Log
+
+- A failed PR detail refresh can retain usable body provenance. Historical scanning accepts still-provenance-matched retained attributes and keeps its lifecycle fallback.
 
 ## Verification
 

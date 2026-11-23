@@ -205,12 +205,17 @@ async def test_source_edits_replay_empty_text_and_rollback(tmp_path: Path) -> No
         async def snapshots_and_removal(uow: UnitOfWork) -> None:
             projected = await uow.pull_request(REPO, 7)
             assert projected is not None
+            await uow.save_pull_request(replace(projected, number=8))
             attrs = {"head_sha": projected.head_sha, "pull_version": projected.version}
-            for updated, body in [(START, "stalebody"), (LATER, "currentbody")]:
+            for number, updated, body in [
+                (7, START, "stalebody"),
+                (7, LATER, "sameversiondetail"),
+                (8, LATER, "seededbydetail"),
+            ]:
                 await uow.save_github_resource(
                     REPO,
                     PULL_TEXT,
-                    "7",
+                    str(number),
                     GitHubResource(
                         (), attributes=attrs | {"pull_updated_at": updated, "body": body}
                     ),
@@ -224,6 +229,10 @@ async def test_source_edits_replay_empty_text_and_rollback(tmp_path: Path) -> No
         assert indexed_rows(store.path)[ISSUE_COMMENT_KIND, COMMENT_ID][1] == ""
         assert await ledger.search("newcomment", None, 10) == SearchPage((), 0)
         assert await ledger.search("stalebody", None, 10) == SearchPage((), 0)
-        assert await ledger.search("currentbody", None, 10) == SearchPage(
-            (SearchHit(PULL_ID, PR_BODY_KIND, "currentbody"),), 1
+        assert await ledger.search("sameversiondetail", None, 10) == SearchPage((), 0)
+        assert await ledger.search("newpull", None, 10) == SearchPage(
+            (SearchHit(PULL_ID, PR_BODY_KIND, "newpull"),), 1
+        )
+        assert await ledger.search("seededbydetail", None, 10) == SearchPage(
+            (SearchHit(f"{REPO}#8", PR_BODY_KIND, "seededbydetail"),), 1
         )
