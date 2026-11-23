@@ -43,6 +43,8 @@ An orchestrator can bring supported clerk ledger rows into the same local import
 
 ## Plan Change Log
 
+- Integrated the landed search change from main commit `60ac5ffd247dd21fff701d066db55df480e53c91` and parented unmerged revision 0019 on its revision 0020. The populated predecessor upgrade and shared transport tests cover both changes.
+
 ## Review Triage Log
 
 - Medium, acceptance. The header was ignored and could target the wrong repository. The combined batch now refuses a mismatch before any effects.
@@ -69,3 +71,4 @@ An orchestrator can bring supported clerk ledger rows into the same local import
 - Check the populated prior revision upgrades to one head and preserves prior records.
 - On the reviewed opening tree, 841 local Python 3.14 tests passed. The 40 affected tests passed on Python 3.14 and 3.15.
 - After review changes, 47 affected tests passed on both Python versions. The hold-state round trip preserves existing lane IDs and explicit skips take precedence.
+- After integrating merged search, 147 combined fixture, migration, transport, search, snapshot and configuration tests passed on both Python versions. Independent integration review confirmed the shared tool paths and sole migration head.

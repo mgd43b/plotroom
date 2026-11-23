@@ -28,8 +28,10 @@ from plotroom.core.snapshot import (
     DEFAULT_SNAPSHOT_BUDGET,
     render_claims,
     render_next,
+    render_search,
     render_snapshot,
 )
+from plotroom.ports.search import DEFAULT_SEARCH_LIMIT
 from plotroom.ports.session_reader import SessionEvent
 from plotroom.ports.work_items import WorkItemSource
 
@@ -144,6 +146,7 @@ def build_app(
     unavailable: str | None = None,
     snapshot_budget: int = DEFAULT_SNAPSHOT_BUDGET,
     next_budget: int = DEFAULT_SNAPSHOT_BUDGET,
+    search_budget: int = DEFAULT_SNAPSHOT_BUDGET,
 ) -> Starlette:
     """The ASGI app serving the tool set at ``/mcp``.
 
@@ -232,6 +235,23 @@ def build_app(
             return err(exc.code, exc.message)
 
     server.tool(name="next")(next_items)
+
+    @server.tool()
+    async def search(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request],
+        text: str,
+        kinds: list[str] | None = None,
+        limit: int = DEFAULT_SEARCH_LIMIT,
+    ) -> dict[str, Any]:
+        """Find a word or phrase in the current project's committed Switchboard messages."""
+        try:
+            caller = board_access(ctx)
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            page = await caller.ledger.search(text, None if kinds is None else tuple(kinds), limit)
+            return ok(render_search(page, search_budget))
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
 
     @server.tool()
     async def brief(  # pyright: ignore[reportUnusedFunction]

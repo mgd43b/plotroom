@@ -6,7 +6,8 @@ from plotroom.core.envelope import ok
 from plotroom.core.events import LedgerError
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
-from plotroom.core.snapshot import estimate_tokens, render_next, render_snapshot
+from plotroom.core.snapshot import estimate_tokens, render_next, render_search, render_snapshot
+from plotroom.ports.search import SearchHit, SearchPage
 
 
 def test_empty_board() -> None:
@@ -26,6 +27,20 @@ def test_empty_board() -> None:
 def test_estimator_counts_utf8_bytes() -> None:
     assert estimate_tokens("🧪🧪a") == 3
     assert estimate_tokens(json.dumps({})) == 1
+
+
+def test_search_keeps_its_top_hit_when_its_excerpt_exceeds_the_budget() -> None:
+    first = SearchHit("evt_first", "switchboard.message", "needle " + "🧪" * 233)
+    second = SearchHit("evt_second", "switchboard.message", "another needle")
+    page = render_search(SearchPage((first, second), 3), 256)
+    assert page["hits"][0] == {
+        "id": first.id,
+        "kind": first.kind,
+        "excerpt": first.excerpt[:80] + "…",
+    }
+    assert page["hits"][1]["id"] == second.id
+    assert page["omitted"] == 1
+    assert estimate_tokens(json.dumps(ok(page), ensure_ascii=False, indent=2)) <= 256
 
 
 def test_next_pages_include_ids_for_oversize_items() -> None:
