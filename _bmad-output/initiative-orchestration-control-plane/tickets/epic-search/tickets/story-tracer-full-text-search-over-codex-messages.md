@@ -9,7 +9,7 @@ hitl: false
 risk: medium
 tracker_id: "114"
 remote: "https://github.com/mgd43b/plotroom/issues/114"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Tracer: full-text search over Codex messages
