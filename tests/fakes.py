@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import sqlite3
+from collections import Counter
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
@@ -233,7 +234,16 @@ class MemoryStore:
         items = [
             copy.deepcopy(i) for i in self._items.values() if i.state == "open" and visible(i, role)
         ]
-        return self._seq, sorted(items, key=lambda i: (i.rank_class, i.opened_seq)), {}, []
+        lanes = [
+            lane
+            for lane in self._lanes.values()
+            if role in {"orchestrator", "clerk", f"worker:{lane.worker}"}
+        ]
+        counts = dict(Counter(lane.state for lane in lanes))
+        current = sorted(
+            (lane for lane in lanes if lane.state != "archived"), key=lambda lane: lane.id
+        )
+        return self._seq, sorted(items, key=lambda i: (i.rank_class, i.opened_seq)), counts, current
 
     async def ready_work_items(self) -> tuple[WorkItem, ...]:
         return self._work_items

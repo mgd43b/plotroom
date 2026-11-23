@@ -55,16 +55,23 @@ def render_snapshot(
         "items": listed,
         "left_out": len(items),
     }
+    page: list[dict[str, Any]] = []
+    if lane_details:
+        board["lane_details"] = page
+        if lane_offset < len(lane_details):
+            board["next_lane_offset"] = lane_offset
     if not _fits(board, budget):
         raise LedgerError("unavailable", "snapshot summary exceeds the configured token budget")
     if lane_details:
-        page: list[dict[str, Any]] = []
-        board["lane_details"] = page
         for index, lane in enumerate(lane_details[lane_offset:], start=lane_offset):
             board["next_lane_offset"] = index + 1
             if not _add(board, page, lane.render(), budget) and not _add(
                 board, page, {"id": lane.id, "details_omitted": True}, budget
             ):
+                if not page:
+                    raise LedgerError(
+                        "unavailable", "lane summary exceeds the configured token budget"
+                    )
                 board["next_lane_offset"] = index
                 break
         else:

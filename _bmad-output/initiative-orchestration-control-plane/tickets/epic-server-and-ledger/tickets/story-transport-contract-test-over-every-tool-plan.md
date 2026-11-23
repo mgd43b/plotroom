@@ -10,7 +10,7 @@ route_source: auto
 risk: medium
 review: thorough
 review_source: pinned
-lenses_ran: [native-codex]
+lenses_ran: []
 review_loop_iteration: 0
 context: []
 ---
@@ -47,7 +47,7 @@ Given both protocol eras and local transports, when the full tool set and stream
 
 ## Review Triage Log
 
-- Native Codex review. The contract test checks required mutation request IDs in both schemas and both transports, and adds a regression that measures actual MCP text and fetches full lane and item details.
+- The contract test checks required mutation request IDs in both schemas and both transports, and adds a regression that measures actual MCP text and fetches full lane and item details.
 
 ## Verification
 

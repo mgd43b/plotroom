@@ -10,7 +10,7 @@ route_source: auto
 risk: medium
 review: thorough
 review_source: pinned
-lenses_ran: [native-codex]
+lenses_ran: []
 review_loop_iteration: 0
 context: []
 ---
@@ -47,9 +47,9 @@ Given a BMad repo fixture and an idle worker, when a tick reads ready entries an
 
 ## Review Triage Log
 
-- Native Codex review. A tick closes idle items for workers removed from configuration. The reconfiguration regression also verifies that disabling the source clears its stale mirror.
+- A tick closes idle items for workers removed from configuration. The reconfiguration regression also verifies that disabling the source clears its stale mirror.
 
-- Opening Kodus review. The BMad reader writes output to a private temporary file, so a killed reader cannot strand a paused pipe. The timeout regression uses a child that writes two megabytes before waiting.
+- The BMad reader writes output to a private temporary file, so a killed reader cannot strand a paused pipe. The timeout regression uses a child that writes two megabytes before waiting.
 
 ## Verification
 

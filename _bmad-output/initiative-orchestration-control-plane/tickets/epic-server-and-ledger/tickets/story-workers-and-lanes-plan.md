@@ -10,7 +10,7 @@ route_source: auto
 risk: medium
 review: thorough
 review_source: pinned
-lenses_ran: [native-codex]
+lenses_ran: []
 review_loop_iteration: 0
 context: []
 ---
@@ -47,9 +47,9 @@ Given one fixture worker and an orchestrator, when both transports call lane too
 
 ## Review Triage Log
 
-- Native Codex review. Snapshot includes role-scoped current lane records and can page or fetch a named lane. The smoke verifies an active record after restart and a ready record after the waiting item clears. Mutating tools require caller-generated request IDs.
+- Snapshot includes role-scoped current lane records and can page or fetch a named lane. The smoke verifies an active record after restart and a ready record after the waiting item clears. Mutating tools require caller-generated request IDs.
 
-- Opening Kodus review. A lane start checks work-item assignment inside the writer transaction, including when an older idle suggestion is used.
+- A lane start checks work-item assignment inside the writer transaction, including when an older idle suggestion is used.
 
 ## Verification
 

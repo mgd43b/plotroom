@@ -1,6 +1,10 @@
 import json
 
+import pytest
+
 from plotroom.core.envelope import ok
+from plotroom.core.events import LedgerError
+from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.core.snapshot import estimate_tokens, render_next, render_snapshot
 
@@ -51,3 +55,15 @@ def test_next_pages_include_ids_for_oversize_items() -> None:
         assert following > offset
         offset = following
     assert ids == [item.id for item in items]
+
+
+def test_empty_lane_page_metadata_is_included_in_the_budget() -> None:
+    lane = Lane("lane", "fixture", (), "demo")
+    counts = {"active": 1}
+    summary = render_snapshot("demo", 1, [], counts, 2000)
+    summary_budget = estimate_tokens(json.dumps(ok(summary), indent=2))
+    with pytest.raises(LedgerError, match="snapshot summary exceeds"):
+        render_snapshot("demo", 1, [], counts, summary_budget, lane_details=[lane], lane_offset=1)
+    page = render_snapshot("demo", 1, [], counts, 256, lane_details=[lane], lane_offset=1)
+    assert page["lane_details"] == []
+    assert estimate_tokens(json.dumps(ok(page), indent=2)) <= 256

@@ -8,7 +8,9 @@ from mcp.client.client import Client
 from mcp.client.stdio import StdioServerParameters
 
 from conftest import authenticated_client, start_plotroom, tool_json, write_config
+from fakes import MemoryStore
 from plotroom.app.tokens import TokenRegistry
+from plotroom.core.lanes import Lane
 
 
 @asynccontextmanager
@@ -116,3 +118,15 @@ async def test_local_lane_smoke(transport: str, tmp_path: Path, token_home: Path
             assert archived["data"]["state"] == "archived"
     finally:
         second.stop()
+
+
+async def test_memory_board_matches_lane_visibility_and_counts() -> None:
+    store = MemoryStore()
+    active = Lane("active", "fixture", (), "demo")
+    archived = Lane("archived", "other", (), "closed", state="archived")
+    async with store.transaction() as tx:
+        await tx.save_lane(active)
+        await tx.save_lane(archived)
+    assert (await store.read_board("orchestrator"))[2:] == ({"active": 1, "archived": 1}, [active])
+    assert (await store.read_board("worker:fixture"))[2:] == ({"active": 1}, [active])
+    assert (await store.read_board("worker:other"))[2:] == ({"archived": 1}, [])
