@@ -11,6 +11,7 @@ risk: high
 tracker_id: "138"
 remote: "https://github.com/mgd43b/plotroom/issues/138"
 tracker_status: backlog
+status: built
 ---
 
 # Bind local stdio credentials to the intended daemon
@@ -31,3 +32,4 @@ Verify: With controlled fixtures, confirm that a configuration or path change ca
 ## Notes
 
 - High risk because a credential or request may reach the wrong daemon. Also verify that the proxy reestablishes daemon identity after a daemon restart before resuming authenticated requests.
+- Built: https://github.com/mgd43b/plotroom/pull/143
