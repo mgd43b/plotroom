@@ -36,3 +36,35 @@ store_config = "path/to/project/_bmad/custom/ticketing-store-config.toml"
 The Issues source layers that file over the trusted installation's BMad GitHub
 starter. Without a milestone filter it includes open milestones and standalone
 tickets. The daemon preserves the last mirror when a source refresh fails.
+
+## Local merge readiness
+
+The orchestrator and clerk can call `merge_gate(pr)` for an advisory verdict
+with the checked PR head, the evidence watermark, and the first reason for a
+refusal. Configure the gate in the project's GitHub table.
+
+```toml
+[projects.example.github]
+repository = "owner/repository"
+min_checks = 2
+ignore_checks = ["Optional review"]
+ci_workflow = "ci.yml"
+fix_label = "main-fix"
+authorized_label_logins = ["maintainer"]
+```
+
+`min_checks` has no default. An ignored check still holds the gate while
+pending. `ci_workflow` selects a workflow filename or numeric ID. The optional
+fix label waives a red main verdict when a configured GitHub user applied it.
+An authorized user can apply `allow-overlap` after Plotroom has observed the
+current PR head. The waiver applies to that head occurrence. Automatic branch
+updates run through an injected fixture write port.
+
+The orchestrator can set the deploy window with `freeze(reason, request_id)` and
+clear it with `unfreeze(request_id)`. The window is stored in the project ledger
+and holds all PRs until it is cleared. `snapshot()` shows the active window.
+
+For flake detection across main commits, a successful check can attach a
+notice annotation with the test ID as its title, the source file as its path,
+and the exact message `plotroom:test-outcome=passed`. This gives Plotroom
+evidence that the previously failing test ran and passed.

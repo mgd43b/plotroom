@@ -1,5 +1,6 @@
 """Focused tests of normalization and projection reconciliation."""
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -16,6 +17,7 @@ from plotroom.core.events import LedgerError
 from plotroom.core.github import PULL_REQUESTS, ObservedPull, apply_pull_poll
 from plotroom.core.github_projection import FILES, GitHubRecord, GitHubResource, apply_resource
 from plotroom.core.ledger import Ledger
+from plotroom.core.unit_of_work import UnitOfWork
 
 REPO = "fixture/repo"
 AT = "2026-11-22T12:00:00Z"
@@ -82,6 +84,37 @@ def files(number: int, head: str, *paths: str) -> GitHubResource:
         for path in paths
     )
     return GitHubResource(rows, attributes={"head_sha": head})
+
+
+async def test_file_provenance_refresh_preserves_claims_without_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    changes: list[str] = []
+    original = UnitOfWork.pull_overlaps_changed
+
+    def track(uow: UnitOfWork) -> None:
+        changes.append("files changed")
+        original(uow)
+
+    ledger = Ledger(MemoryStore(), build_catalog(), FixedClock(), github_repository=REPO)
+    ledger.start()
+    try:
+        observed = ObservedPull(1, "branch", "A", REPO, "open", AT, "")
+        await ledger.run("system", lambda uow: apply_pull_poll(uow, REPO, None, (observed,), AT))
+        monkeypatch.setattr(UnitOfWork, "pull_overlaps_changed", track)
+        initial = files(1, "A", "src/first.py")
+        refreshed = replace(initial, attributes={**initial.attributes, "base_sha": "new"})
+        for observation in (initial, refreshed):
+            await ledger.run(
+                "system",
+                lambda uow, data=observation: apply_resource(uow, REPO, FILES, "1", data, AT),
+            )
+        assert changes == ["files changed"]
+        resource = await ledger.github_resource(REPO, FILES, "1")
+        assert resource is not None
+        assert resource.attributes == refreshed.attributes
+    finally:
+        await ledger.stop()
 
 
 async def test_stale_resources_and_binding_changes_reconcile_all_open_prs() -> None:

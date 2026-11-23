@@ -5,7 +5,7 @@ import json
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from plotroom.core.actions import Action
+from plotroom.core.actions import BRANCH_UPDATE, Action, QueuedAction
 
 _INSERT = text(
     "INSERT INTO actions (action_key, kind, cause_id, payload, attempts, state) "
@@ -13,7 +13,10 @@ _INSERT = text(
     "ON CONFLICT(action_key) DO NOTHING"
 )
 _UPDATE = text("UPDATE actions SET attempts = :attempts, state = :state WHERE action_key = :key")
-_PENDING = text("SELECT * FROM actions WHERE state = 'pending' ORDER BY rowid LIMIT 1")
+_PENDING = text(
+    "SELECT rowid AS queue_position, * FROM actions WHERE state = 'pending' AND rowid > :after "
+    "AND (:skip_branch_updates = 0 OR kind != :branch_update) ORDER BY rowid LIMIT :limit"
+)
 
 
 async def insert_action(connection: AsyncConnection, action: Action) -> None:
@@ -34,10 +37,33 @@ async def update_action(connection: AsyncConnection, action: Action) -> None:
     )
 
 
-async def pending_action(connection: AsyncConnection) -> Action | None:
-    row = (await connection.execute(_PENDING)).first()
-    if row is None:
-        return None
-    return Action(
-        row.action_key, row.kind, row.cause_id, json.loads(row.payload), row.attempts, row.state
+async def pending_actions(
+    connection: AsyncConnection,
+    *,
+    after: int,
+    limit: int,
+    skip_branch_updates: bool,
+) -> tuple[QueuedAction, ...]:
+    rows = await connection.execute(
+        _PENDING,
+        {
+            "after": after,
+            "limit": limit,
+            "skip_branch_updates": skip_branch_updates,
+            "branch_update": BRANCH_UPDATE,
+        },
+    )
+    return tuple(
+        QueuedAction(
+            row.queue_position,
+            Action(
+                row.action_key,
+                row.kind,
+                row.cause_id,
+                json.loads(row.payload),
+                row.attempts,
+                row.state,
+            ),
+        )
+        for row in rows
     )

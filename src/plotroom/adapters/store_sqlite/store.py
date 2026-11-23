@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from sqlalchemy.pool import ConnectionPoolEntry
 
 from plotroom.adapters.store_sqlite import github_sql, outbox_sql, triggers_sql
-from plotroom.adapters.store_sqlite.actions_sql import pending_action
+from plotroom.adapters.store_sqlite.actions_sql import pending_actions
 from plotroom.adapters.store_sqlite.claims_sql import count_claims, read_claims
 from plotroom.adapters.store_sqlite.items_sql import (
     first_change,
@@ -33,11 +33,12 @@ from plotroom.adapters.store_sqlite.ledger_sql import (
 )
 from plotroom.adapters.store_sqlite.migrate import upgrade_to_head
 from plotroom.adapters.store_sqlite.work_items_sql import ready_work_items
-from plotroom.core.actions import Action
+from plotroom.core.actions import Action, QueuedAction
 from plotroom.core.claims import Claim
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
 from plotroom.core.github_projection import GitHubResource
+from plotroom.core.merge_gate import GateSnapshot, load_gate_snapshot
 from plotroom.core.next_items import Item
 from plotroom.ports.store import Board
 from plotroom.ports.work_items import WorkItem
@@ -193,7 +194,7 @@ class SqliteStore:
 
     async def read_snapshot(
         self, role: str, repository: str | None
-    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int]:
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
         async with self._engine.connect() as connection:
             board, github = (
                 (await self._board(connection, role), None)
@@ -202,7 +203,8 @@ class SqliteStore:
             )
             trigger_counts = await triggers_sql.trigger_counts(connection)
             claim_count = await count_claims(connection, role)
-            return board, github, trigger_counts, claim_count
+            freeze_reason = await SqliteTransaction(connection).deploy_freeze()
+            return board, github, trigger_counts, claim_count, freeze_reason
 
     async def read_github_board(self, role: str, repository: str) -> tuple[Board, GitHubSummary]:
         async with self._engine.connect() as connection:
@@ -232,6 +234,10 @@ class SqliteStore:
     async def list_triggers(self, lane: str | None) -> list[Trigger]:
         async with self._engine.connect() as connection:
             return await triggers_sql.list_triggers(connection, lane)
+
+    async def read_merge_gate(self, repository: str | None, number: int) -> GateSnapshot:
+        async with self._engine.connect() as connection, connection.begin():
+            return await load_gate_snapshot(SqliteTransaction(connection), repository, number)
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         async with self._engine.connect() as connection:
@@ -274,8 +280,16 @@ class SqliteStore:
             return await ready_work_items(connection)
 
     async def pending_action(self) -> Action | None:
+        page = await self.pending_actions(after=0, limit=1)
+        return page[0].action if page else None
+
+    async def pending_actions(
+        self, *, after: int, limit: int, skip_branch_updates: bool = False
+    ) -> tuple[QueuedAction, ...]:
         async with self._engine.connect() as connection:
-            return await pending_action(connection)
+            return await pending_actions(
+                connection, after=after, limit=limit, skip_branch_updates=skip_branch_updates
+            )
 
     async def outbox_readiness(self, now: str) -> OutboxReadiness:
         async with self._engine.connect() as connection:

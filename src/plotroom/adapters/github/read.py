@@ -113,6 +113,8 @@ class GitHubReadClient:
         *,
         params: Mapping[str, Any] | None = None,
         key: str | None = None,
+        verify_total: bool = False,
+        verify_terminal: bool = False,
     ) -> tuple[list[Row], bool]:
         value, response = await self._read(
             client,
@@ -124,8 +126,25 @@ class GitHubReadClient:
         if len(records) > 100:
             raise GitHubUnavailable("GitHub returned an oversized page")
         link = response.links.get("next")
+        if verify_total:
+            total = obj(value).get("total_count")
+            covered = (page - 1) * 100 + len(records)
+            if type(total) is not int or not (
+                total == covered if link is None else len(records) == 100 and total > covered
+            ):
+                raise GitHubUnavailable("GitHub returned an incomplete result count")
         if link is None:
-            return records, False
+            # Array endpoints cannot give a total. A full page might be the
+            # last one, so probe by number instead of trusting an absent Link.
+            last = response.links.get("last") if verify_terminal else None
+            if last is not None:
+                try:
+                    last_page = int(httpx.URL(last["url"]).params["page"])
+                except KeyError, ValueError, httpx.InvalidURL:
+                    raise GitHubUnavailable("GitHub returned invalid pagination") from None
+                if last_page != page:
+                    raise GitHubUnavailable("GitHub returned incomplete pagination")
+            return records, verify_terminal and len(records) == 100
         try:
             next_page = int(httpx.URL(link["url"]).params["page"])
         except KeyError, ValueError, httpx.InvalidURL:
@@ -143,9 +162,20 @@ class GitHubReadClient:
         params: Mapping[str, Any] | None = None,
         key: str | None = None,
         recent: bool = False,
+        verify_total: bool = False,
+        verify_terminal: bool = False,
     ) -> AsyncIterator[Row]:
         for page in range(1, MAX_PAGES + 1):
-            records, more = await self.page(client, token, path, page, params=params, key=key)
+            records, more = await self.page(
+                client,
+                token,
+                path,
+                page,
+                params=params,
+                key=key,
+                verify_total=verify_total,
+                verify_terminal=verify_terminal,
+            )
             for row in records:
                 yield row
             if recent or not more:
@@ -153,11 +183,13 @@ class GitHubReadClient:
         raise GitHubUnavailable("GitHub read exceeded the page limit")
 
     async def review_threads(
-        self, client: httpx.AsyncClient, token: str, pull: int
+        self, client: httpx.AsyncClient, token: str, pull: int, head_sha: str
     ) -> AsyncIterator[Row]:
         owner, name = self.repository.split("/")
         cursor: str | None = None
-        seen: set[str] = set()
+        cursors: set[str] = set()
+        identifiers: set[str] = set()
+        expected: int | None = None
         for _ in range(MAX_PAGES):
             result, response = await self._read(
                 client,
@@ -174,17 +206,33 @@ class GitHubReadClient:
                 if any(error.get("type") == "RATE_LIMITED" for error in errors):
                     raise GitHubRateLimited(response.headers)
                 raise GitHubUnavailable("GitHub review thread query failed")
-            connection = obj(document["data"]["repository"]["pullRequest"]["reviewThreads"])
-            for row in rows(connection["nodes"]):
+            current = obj(document["data"]["repository"]["pullRequest"])
+            if string(current["headRefOid"]) != head_sha:
+                raise GitHubUnavailable("PR head moved during review thread poll")
+            connection = obj(current["reviewThreads"])
+            total = connection["totalCount"]
+            if type(total) is not int or total < 0 or (expected is not None and total != expected):
+                raise GitHubUnavailable("GitHub returned an inconsistent review thread count")
+            expected = total
+            nodes = rows(connection["nodes"])
+            if len(nodes) > 100:
+                raise GitHubUnavailable("GitHub returned an oversized review thread page")
+            for row in nodes:
+                identifier = string(row["id"])
+                if not identifier or identifier in identifiers:
+                    raise GitHubUnavailable("GitHub returned an invalid review thread ID")
+                identifiers.add(identifier)
                 yield row
             page = obj(connection["pageInfo"])
             more = page["hasNextPage"]
-            if more is False:
+            if more is False and len(identifiers) == expected:
                 return
+            if more is not True or not nodes or len(identifiers) >= expected:
+                raise GitHubUnavailable("GitHub returned an incomplete review thread list")
             cursor = string(page["endCursor"])
-            if more is not True or not cursor or cursor in seen:
+            if not cursor or cursor in cursors:
                 raise GitHubUnavailable("GitHub returned invalid review thread pagination")
-            seen.add(cursor)
+            cursors.add(cursor)
         raise GitHubUnavailable("GitHub review threads exceeded the page limit")
 
 
@@ -192,7 +240,9 @@ REVIEW_THREADS_QUERY = """
 query PullReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
+      headRefOid
       reviewThreads(first: 100, after: $after) {
+        totalCount
         nodes { id isResolved path line }
         pageInfo { hasNextPage endCursor }
       }

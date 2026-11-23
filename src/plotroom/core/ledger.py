@@ -6,11 +6,11 @@ import asyncio
 import copy
 import math
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
-from plotroom.core.actions import Action
+from plotroom.core.actions import ACTION_PAGE_SIZE, Action, QueuedAction
 from plotroom.core.catalog import Catalog
 from plotroom.core.claims import PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, Claim, sync_items
 from plotroom.core.commands import COMMAND_APPENDER, command_kind
@@ -25,6 +25,7 @@ from plotroom.core.events import (
 )
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
 from plotroom.core.github_projection import GitHubResource
+from plotroom.core.merge_gate import GatePolicy, GateVerdict, evaluate_gate
 from plotroom.core.next_items import Item
 from plotroom.core.roles import OwnershipView, role_family
 from plotroom.core.unit_of_work import UnitOfWork
@@ -62,6 +63,7 @@ class Ledger:
         watcher_roles: tuple[str, ...] = (),
         wait_cap: int = 240,
         github_repository: str | None = None,
+        merge_gate_policy: GatePolicy | None = None,
         github_tree_path: str | None = None,
         session_workers: Mapping[str, str] | None = None,
         drain_enabled: bool = False,
@@ -73,6 +75,7 @@ class Ledger:
         self.watchers = Watchers(watcher_roles)
         self._wait_cap = wait_cap
         self.github_repository = github_repository
+        self._merge_gate_policy = merge_gate_policy or GatePolicy()
         self._github_tree_path = github_tree_path
         self.github_error = "waiting for the first GitHub poll" if github_repository else None
         self.session_workers = dict(session_workers or {})
@@ -83,8 +86,19 @@ class Ledger:
     def commit_signal(self) -> asyncio.Event:
         return self._writer.commit_signal
 
+    @property
+    def merge_gate_policy(self) -> GatePolicy:
+        return self._merge_gate_policy
+
     async def pending_action(self) -> Action | None:
         return await self._store.pending_action()
+
+    async def pending_actions(
+        self, *, after: int, skip_branch_updates: bool
+    ) -> tuple[QueuedAction, ...]:
+        return await self._store.pending_actions(
+            after=after, limit=ACTION_PAGE_SIZE, skip_branch_updates=skip_branch_updates
+        )
 
     @property
     def project_id(self) -> str:
@@ -317,6 +331,11 @@ class Ledger:
         board, github, _, _ = await self.read_snapshot(role)
         return board, github
 
+    async def snapshot_summary(
+        self, role: str
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
+        return await self._store.read_snapshot(role, self.github_repository)
+
     async def snapshot_with_triggers(
         self, role: str
     ) -> tuple[Board, GitHubSummary | None, dict[str, int]]:
@@ -326,7 +345,8 @@ class Ledger:
     async def read_snapshot(
         self, role: str
     ) -> tuple[Board, GitHubSummary | None, dict[str, int], int]:
-        return await self._store.read_snapshot(role, self.github_repository)
+        board, github, counts, claims, _ = await self.snapshot_summary(role)
+        return board, github, counts, claims
 
     async def read_claims(
         self, role: str, lane: str | None, offset: int, limit: int
@@ -342,6 +362,18 @@ class Ledger:
         if _check_role(role) != "orchestrator":
             raise LedgerError("forbidden", "only the orchestrator may list triggers")
         return [trigger.render() for trigger in await self._store.list_triggers(lane)]
+
+    async def merge_gate(self, role: str, pr: int) -> GateVerdict:
+        if _check_role(role) not in {"clerk", "orchestrator"}:
+            raise LedgerError(
+                "forbidden", "only the clerk and orchestrator may query the merge gate"
+            )
+        if not 1 <= pr <= 2**63 - 1:
+            raise LedgerError("invalid", "pr must be a positive SQLite integer")
+        snapshot = await self._store.read_merge_gate(self.github_repository, pr)
+        if self.github_error is not None:
+            snapshot = replace(snapshot, github_unavailable=True)
+        return evaluate_gate(snapshot, self._merge_gate_policy, self._clock.now())
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None:
         return await self._store.pull_request(repository, number)

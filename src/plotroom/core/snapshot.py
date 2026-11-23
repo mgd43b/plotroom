@@ -52,6 +52,7 @@ def render_snapshot(
     github_error: str | None = None,
     claim_count: int = 0,
     trigger_counts: dict[str, int] | None = None,
+    freeze_reason: str | None = None,
 ) -> dict[str, Any]:
     listed: list[dict[str, Any]] = []
     board: dict[str, Any] = {
@@ -76,6 +77,10 @@ def render_snapshot(
         board["lane_details"] = page
         if lane_offset < len(lane_details):
             board["next_lane_offset"] = lane_offset
+    if freeze_reason is not None:
+        board["freezes"] = {"deploy": {"reason": freeze_reason}}
+        if not _fits(board, budget):
+            board["freezes"] = {"deploy": {"reason_omitted": True}}
     if not _fits(board, budget):
         raise LedgerError("unavailable", "snapshot summary exceeds the configured token budget")
     if lane_details:
