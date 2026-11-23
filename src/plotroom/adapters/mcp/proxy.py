@@ -134,7 +134,7 @@ class StdioProxy:
         answerable = (
             message.get("method") is not None and _valid_id(request_id) and request_id is not None
         )
-        if answerable and len(self._tasks) < 2 * self._max_pending:
+        if answerable and len(self._tasks) + len(self._orphaned_writes) < 2 * self._max_pending:
             refusal = asyncio.ensure_future(
                 self._emit(
                     _error_response(request_id, "plotroom proxy has too many pending requests")

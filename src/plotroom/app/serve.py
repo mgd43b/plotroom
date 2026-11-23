@@ -25,6 +25,12 @@ class _Server(uvicorn.Server):
         super().__init__(config)
         self._started_future = started
 
+    shutdown_begun = False
+
+    async def shutdown(self, sockets: Any = None) -> None:
+        self.shutdown_begun = True
+        await super().shutdown(sockets=sockets)
+
     async def startup(self, sockets: Any = None) -> None:
         await super().startup(sockets=sockets)
         if self.started and not self._started_future.done():
@@ -77,8 +83,9 @@ class Daemon:
             try:
                 await self._server.serve()
             except asyncio.CancelledError:
-                # uvicorn skips its own shutdown when the main loop is cancelled
-                if self._server.started:
+                # uvicorn skips its own shutdown when the main loop is cancelled; one begun
+                # already (cancelled mid-shutdown) is not started a second time
+                if self._server.started and not self._server.shutdown_begun:
                     await self._server.shutdown()
                 raise
             finally:

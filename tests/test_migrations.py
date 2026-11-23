@@ -121,10 +121,20 @@ async def test_a_migration_that_fails_after_its_first_ddl_leaves_nothing_behind(
     with sqlite3.connect(tmp_path / "demo.db") as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "half" not in tables
-    broken.unlink()
+    # the same revision, repaired, runs from the state the failure left
+    broken.write_text(
+        'import sqlalchemy as sa\nfrom alembic import op\n\nrevision = "0002"\n'
+        'down_revision = "0001"\nbranch_labels = None\ndepends_on = None\n\n\n'
+        "def upgrade() -> None:\n"
+        '    op.create_table("half", sa.Column("id", sa.Integer(), primary_key=True))\n',
+        encoding="utf-8",
+    )
     again = SqliteStore("demo", tmp_path)
     try:
-        await again.migrate()
-        assert await again.revision() == head_revision()
+        await upgrade_to_head(again._engine, cfg)  # pyright: ignore[reportPrivateUsage]
+        assert await again.revision() == "0002"
     finally:
         await again.close()
+    with sqlite3.connect(tmp_path / "demo.db") as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "half" in tables

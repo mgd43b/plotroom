@@ -704,3 +704,52 @@ def test_unsafe_or_unusable_endpoints_are_refused(url: str) -> None:
 )
 def test_loopback_https_and_unauthenticated_endpoints_are_allowed(url: str) -> None:
     check_endpoint(url)
+
+
+async def test_refusals_stay_bounded_while_a_cancelled_write_is_stuck() -> None:
+    write_started = threading.Event()
+    release = threading.Event()
+
+    class StuckOutput(Output):
+        def write(self, data: Any) -> int:
+            write_started.set()
+            assert release.wait(timeout=30)
+            return super().write(data)
+
+    stdout = StuckOutput()
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=result_for(json.loads(http_request.content)),
+            headers={"content-type": "application/json"},
+        )
+
+    class Stdin:
+        def __init__(self) -> None:
+            self._script = [
+                modern("tools/list", 1, {}),
+                request("notifications/cancelled", None, {"requestId": 1}),
+                modern("tools/list", 2, {}),
+                modern("tools/list", 3, {}),
+                modern("tools/list", 4, {}),
+            ]
+
+        def readline(self) -> bytes:
+            if len(self._script) == 4:  # request 1 is answered and its write is stuck
+                assert write_started.wait(timeout=30)
+            if not self._script:
+                release.set()
+                return b""
+            return json.dumps(self._script.pop(0)).encode() + b"\n"
+
+    proxy = StdioProxy(
+        "http://daemon/mcp",
+        stdin=Stdin(),  # pyright: ignore[reportArgumentType]
+        stdout=stdout,
+        http=client_for(handler),
+        max_pending=1,
+    )
+    await asyncio.wait_for(proxy.run(), timeout=30)
+    # one orphaned write plus one refusal reach the limit of 2 * max_pending; the rest are dropped
+    assert [m["id"] for m in stdout.messages() if "error" in m] == [2]

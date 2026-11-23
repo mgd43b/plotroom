@@ -109,6 +109,8 @@ Second pass, 9 inline PR threads from a review bot, all verified against the cod
 
 Third pass, 9 inline PR threads from a second review bot, all verified and patched with tests (each new test checked to fail without its fix): a non-ASCII method could end a request with no answer, now any forwarding failure answers the request (low); a boolean cancel target matched request id 1 (low); a plaintext http URL carrying userinfo or a query to a non-local host is refused before any request (low); a stream cut after its response no longer adds a second error (low); a write left behind by a cancelled request counts toward the pending limit, and an over-limit refusal no longer waits on stdout (low); migration DDL and its revision commit in one transaction (medium); httpx request logs, which carry the URL, are silenced below WARNING (medium); cancelling `Daemon.run()` shuts the listener down before the lock is released (low); the dependency check accepts `from plotroom import core` inside core and ports (low).
 
+Fourth pass, 3 inline PR threads on the previous fixes, all valid: the failed-migration test deleted the broken revision instead of retrying a repaired one (test now retries and checks revision 0002); over-limit refusals ignored writes left by cancelled requests (now counted); cancelling during uvicorn's own shutdown started a second shutdown (now guarded, test fails without it).
+
 ## Design Notes
 
 - Migrations live in the package (`adapters/store_sqlite/migrations/`), not the spine's root `migrations/`: a wheel must carry them. `alembic.ini` points there for `alembic revision`. Reported to the coordinator.

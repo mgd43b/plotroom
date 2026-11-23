@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
+import uvicorn
 from mcp.client.client import Client
 
 from conftest import tool_json
@@ -125,3 +127,26 @@ async def test_cancelling_the_daemon_closes_the_listener_before_the_lock_is_rele
     again = Daemon(config)  # and the directory can be owned again
     task2, _ = await run_daemon(again)
     await stop(again, task2)
+
+
+async def test_cancelling_during_uvicorns_own_shutdown_does_not_shut_down_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+    in_shutdown = asyncio.Event()
+
+    async def stuck_shutdown(self: uvicorn.Server, sockets: Any = None) -> None:
+        nonlocal calls
+        calls += 1
+        in_shutdown.set()
+        await asyncio.Event().wait()  # never finishes; only a cancel ends it
+
+    monkeypatch.setattr(uvicorn.Server, "shutdown", stuck_shutdown)
+    daemon = Daemon(make_config(tmp_path))
+    task, _ = await run_daemon(daemon)
+    daemon.stop()  # uvicorn starts its graceful shutdown
+    await asyncio.wait_for(in_shutdown.wait(), timeout=30)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=10)  # a second, stuck shutdown would hit the timeout
+    assert calls == 1
