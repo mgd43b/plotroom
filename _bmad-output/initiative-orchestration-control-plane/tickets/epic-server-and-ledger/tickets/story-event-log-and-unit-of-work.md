@@ -10,6 +10,7 @@ risk: high
 tracker_id: "15"
 remote: "https://github.com/mgd43b/plotroom/issues/15"
 tracker_status: backlog
+status: built
 ---
 
 # Event log and unit of work
@@ -31,3 +32,4 @@ Verify: With a fixture command registered in the test suite, replaying a recorde
 ## Notes
 
 - Check beyond its criteria: killing the server mid-transaction leaves no partial input in the file.
+- Built: https://github.com/mgd43b/plotroom/pull/50

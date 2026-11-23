@@ -13,7 +13,7 @@ import ipaddress
 import json
 import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, BinaryIO, cast
 from urllib.parse import urlsplit, urlunsplit
 
@@ -24,11 +24,16 @@ from mcp_types import PROTOCOL_VERSION_META_KEY
 log = logging.getLogger("plotroom.proxy")
 
 JSONRPC_INTERNAL_ERROR = -32603
+LISTEN_METHOD = "subscriptions/listen"  # 2026 era: a request whose stream ends only when canceled
 DEFAULT_MAX_PENDING = 256
 _BASE_HEADERS = {
     "content-type": "application/json",
     "accept": "application/json, text/event-stream",
 }
+
+
+class UpstreamStartError(Exception):
+    """The server the proxy fronts is not running and could not be started; the text says why."""
 
 
 def envelope_headers(message: Mapping[str, Any], negotiated: str | None) -> dict[str, str]:
@@ -75,6 +80,7 @@ class StdioProxy:
         stdout: BinaryIO | None = None,
         http: httpx.AsyncClient | None = None,
         max_pending: int = DEFAULT_MAX_PENDING,
+        ensure: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         check_endpoint(url)
         self._url = url
@@ -87,7 +93,12 @@ class StdioProxy:
         self._http = http
         self._write_lock = asyncio.Lock()
         self._inflight: dict[Any, asyncio.Task[None]] = {}
+        self._streams: set[asyncio.Task[None]] = set()
+        self._gone = False
         self._negotiated: str | None = None
+        self._ensure = ensure
+        self._starting: asyncio.Task[None] | None = None
+        self._ready = ensure is None
 
     async def run(self) -> None:
         """Read messages until stdin closes, then let in-flight calls finish."""
@@ -107,6 +118,8 @@ class StdioProxy:
                 if not isinstance(message, dict):
                     log.error("dropped a message that is not a JSON object")
                     continue
+                if self._gone:
+                    break
                 if self._over_limit(message):  # pyright: ignore[reportUnknownArgumentType]
                     self._reject_busy(message)  # pyright: ignore[reportUnknownArgumentType]
                     continue
@@ -114,6 +127,10 @@ class StdioProxy:
                 if task is not None:
                     tasks.add(task)
                     task.add_done_callback(tasks.discard)
+            # stdin closed: the client is shutting down. A listen stream has no end of its own, so
+            # it would hold this process open forever; every other call may still be answered.
+            for stream in self._streams:
+                stream.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
         finally:
@@ -160,6 +177,9 @@ class StdioProxy:
                 pending.cancel()
             return None
         task = asyncio.ensure_future(self._forward(http, body, message))
+        if method == LISTEN_METHOD:
+            self._streams.add(task)
+            task.add_done_callback(self._streams.discard)
         if method is not None and request_id is not None:
             self._inflight[request_id] = task
 
@@ -170,11 +190,38 @@ class StdioProxy:
             task.add_done_callback(forget)
         return task
 
-    async def _forward(self, http: httpx.AsyncClient, body: bytes, message: dict[str, Any]) -> None:
+    async def _ensure_ready(self) -> asyncio.Task[None] | None:
+        """Wait until the server is up, starting it once however many requests wait on it.
+
+        Returns the start this request relied on, so a refusal can tell whether that start is
+        still the current one.
+        """
+        if self._ensure is None:
+            return None
+        if self._ready:
+            return self._starting
+        starting = self._starting
+        if starting is None or (starting.done() and starting.exception() is not None):
+            starting = self._starting = asyncio.ensure_future(self._ensure())
+        # Shielded: one canceled request must not abort the start the others are waiting on.
+        await asyncio.shield(starting)
+        self._ready = True
+        return starting
+
+    async def _forward(
+        self,
+        http: httpx.AsyncClient,
+        body: bytes,
+        message: dict[str, Any],
+        *,
+        retried: bool = False,
+    ) -> None:
         request_id = message.get("id")
         is_request = message.get("method") is not None and request_id is not None
         answered = False
+        relied_on: asyncio.Task[None] | None = None
         try:
+            relied_on = await self._ensure_ready()
             headers = envelope_headers(message, self._negotiated)
             async with http.stream("POST", self._url, content=body, headers=headers) as response:
                 content_type = response.headers.get("content-type", "")
@@ -193,7 +240,8 @@ class StdioProxy:
                 raw = await response.aread()
                 if raw.strip() and await self._relay(raw.strip(), message):
                     return
-                log.error("daemon answered HTTP %s with no JSON-RPC body", response.status_code)
+                if is_request or response.status_code >= 400:  # a notification's 202 is expected
+                    log.error("daemon answered HTTP %s with no JSON-RPC body", response.status_code)
                 if is_request:
                     await self._emit(
                         _error_response(
@@ -201,8 +249,32 @@ class StdioProxy:
                             f"plotroom server answered HTTP {response.status_code} without a reply",
                         )
                     )
-        except asyncio.CancelledError, BrokenPipeError:
+        except asyncio.CancelledError:
             raise
+        except BrokenPipeError:
+            raise
+        except UpstreamStartError as exc:
+            log.error("plotroom is not running: %s", exc)
+            if is_request:
+                await self._emit(_error_response(request_id, f"plotroom is not running: {exc}"))
+        except httpx.ConnectError:
+            if self._ensure is not None and not retried:
+                # Refused before any byte was sent, so the daemon never saw it: start it and retry.
+                # Several requests refused together share one restart: only the first one to get
+                # here retires the start they all relied on.
+                if self._starting is relied_on:
+                    self._ready = False
+                    self._starting = None
+                await self._forward(http, body, message, retried=True)
+                return
+            log.error("cannot reach plotroom at %s: ConnectError", self._shown_url)
+            if is_request:
+                await self._emit(
+                    _error_response(
+                        request_id,
+                        f"cannot reach plotroom at {self._shown_url}; run `plotroom serve`",
+                    )
+                )
         except httpx.HTTPError as exc:
             # the exception's text can repeat the full URL, so only its type is logged
             log.error("cannot reach plotroom at %s: %s", self._shown_url, type(exc).__name__)
@@ -220,6 +292,12 @@ class StdioProxy:
                 await self._emit(
                     _error_response(request_id, "the message cannot be forwarded to plotroom")
                 )
+
+    def _client_gone(self) -> None:
+        """Nobody reads stdout any more: abort every call, so the server stops working for them."""
+        self._gone = True
+        for task in list(self._tasks):
+            task.cancel()
 
     async def _relay(self, payload: bytes, request: Mapping[str, Any]) -> bool:
         """Write one server message to stdout; ``False`` when it is not JSON-RPC."""
@@ -258,6 +336,7 @@ class StdioProxy:
                 await asyncio.to_thread(self._write_blocking, payload)
             except BrokenPipeError:
                 log.error("stdout closed; the client is gone")
+                self._client_gone()
                 raise
 
     def _write_blocking(self, payload: bytes) -> None:

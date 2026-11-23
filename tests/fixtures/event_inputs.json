@@ -1,0 +1,59 @@
+[
+  {
+    "input": "event",
+    "role": "system",
+    "source": "github",
+    "kind": "github.pr_merged",
+    "upstream_id": "pr-104@merged",
+    "fields": {"pr": 104, "merged_by": "octocat"},
+    "body": "Merged by the gate. <b>Not parsed</b>"
+  },
+  {
+    "input": "event",
+    "role": "worker:ada",
+    "source": "claude",
+    "kind": "claude.turn_end",
+    "upstream_id": "turn-1",
+    "fields": {"turns": 3, "ratio": 0.5, "done": true, "meta": {"a": [1, 2, {"b": null}]}, "tags": ["x", "y"]},
+    "lane_id": "lane_demo",
+    "body": "Turn one finished.\nSecond line, with a unicode snowman: ☃"
+  },
+  {
+    "input": "command",
+    "role": "orchestrator",
+    "command": "record_note",
+    "request_id": "req-1",
+    "args": {"key": "note-1", "text": "first"}
+  },
+  {
+    "input": "command",
+    "role": "orchestrator",
+    "command": "record_note",
+    "request_id": "req-1",
+    "args": {"key": "note-1", "text": "first"}
+  },
+  {
+    "input": "command",
+    "role": "clerk",
+    "command": "record_note",
+    "request_id": "req-1",
+    "args": {"key": "note-2", "text": "second"}
+  },
+  {
+    "input": "event",
+    "role": "bridge",
+    "source": "github",
+    "kind": "github.pr_merged",
+    "upstream_id": "pr-104@merged",
+    "fields": {"pr": 999},
+    "body": "A duplicate of the first event with other fields and body."
+  },
+  {
+    "input": "event",
+    "role": "system",
+    "source": "github",
+    "kind": "github.pr_merged",
+    "upstream_id": "pr-105@merged",
+    "fields": {"pr": 105}
+  }
+]
