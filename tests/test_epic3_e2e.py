@@ -319,6 +319,10 @@ def workflow(run_id: int, attempt: int, sha: str) -> dict[str, Any]:
         "status": "completed",
         "conclusion": "success",
         "created_at": AS_OF,
+        "event": "push",
+        "head_branch": "main",
+        "repository": {"full_name": REPO},
+        "head_repository": {"full_name": REPO},
     }
 
 
@@ -337,8 +341,8 @@ async def observe_main(
         "/issues": [],
         "/issues/comments": [],
         "/deployments": [],
-        f"/commits/{MAIN_SHA}/check-runs": {"check_runs": []},
-        f"/commits/{PREVIOUS_SHA}/check-runs": {"check_runs": []},
+        f"/commits/{MAIN_SHA}/check-runs": {"total_count": 0, "check_runs": []},
+        f"/commits/{PREVIOUS_SHA}/check-runs": {"total_count": 0, "check_runs": []},
     }
     for row in runs:
         run_id, attempt = row["id"], row["run_attempt"]

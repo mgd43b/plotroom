@@ -9,7 +9,7 @@ hitl: false
 risk: low
 tracker_id: "78"
 remote: "https://github.com/mgd43b/plotroom/issues/78"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Ticket-tree moves against open PRs

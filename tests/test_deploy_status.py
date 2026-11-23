@@ -74,7 +74,7 @@ class DeploymentFixture:
         if path == "/actions/runs":
             return httpx.Response(200, json={"workflow_runs": []})
         if path == f"/commits/{SHA}/check-runs":
-            return httpx.Response(200, json={"check_runs": []})
+            return httpx.Response(200, json={"total_count": 0, "check_runs": []})
         assert path in {"/issues", "/issues/comments"}, path
         return httpx.Response(200, json=[])
 

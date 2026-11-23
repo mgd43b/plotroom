@@ -9,7 +9,7 @@ hitl: false
 risk: low
 tracker_id: "79"
 remote: "https://github.com/mgd43b/plotroom/issues/79"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # overlaps() and claims in snapshot()

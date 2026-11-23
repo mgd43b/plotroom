@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Any, Protocol
 
-from plotroom.core.actions import Action
+from plotroom.core.actions import Action, QueuedAction
 from plotroom.core.claims import Claim
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
@@ -16,6 +16,7 @@ from plotroom.core.next_items import Item
 from plotroom.ports.work_items import WorkItem
 
 if TYPE_CHECKING:
+    from plotroom.core.merge_gate import GateSnapshot
     from plotroom.core.outbox import OutboxLease, OutboxMessage, OutboxReadiness
     from plotroom.core.triggers import Trigger
 
@@ -110,6 +111,10 @@ class Transaction(Protocol):
 
     async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None: ...
 
+    async def deploy_freeze(self) -> str | None: ...
+
+    async def set_deploy_freeze(self, reason: str | None) -> None: ...
+
     async def open_pulls(self, repository: str) -> tuple[PullRequest, ...]: ...
 
     async def save_github_resource(
@@ -165,7 +170,7 @@ class Store(Protocol):
 
     async def read_snapshot(
         self, role: str, repository: str | None
-    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int]: ...
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]: ...
 
     async def read_claims(
         self, role: str, lane: str | None, offset: int, limit: int
@@ -176,6 +181,8 @@ class Store(Protocol):
     ) -> tuple[int, list[Item]]: ...
 
     async def list_triggers(self, lane: str | None) -> list[Trigger]: ...
+
+    async def read_merge_gate(self, repository: str | None, number: int) -> GateSnapshot: ...
 
     async def pull_request(self, repository: str, number: int) -> PullRequest | None: ...
 
@@ -196,6 +203,10 @@ class Store(Protocol):
     ) -> tuple[int, dict[str, Any] | None]: ...
 
     async def pending_action(self) -> Action | None: ...
+
+    async def pending_actions(
+        self, *, after: int, limit: int, skip_branch_updates: bool = False
+    ) -> tuple[QueuedAction, ...]: ...
 
     async def outbox_readiness(self, now: str) -> OutboxReadiness: ...
 

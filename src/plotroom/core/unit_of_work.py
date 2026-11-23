@@ -128,6 +128,12 @@ class UnitOfWork:
     async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None:
         return await self._tx.open_branch_pull(repository, branch)
 
+    async def deploy_freeze(self) -> str | None:
+        return await self._tx.deploy_freeze()
+
+    async def set_deploy_freeze(self, reason: str | None) -> None:
+        await self._tx.set_deploy_freeze(reason)
+
     async def open_pulls(self, repository: str) -> tuple[PullRequest, ...]:
         return await self._tx.open_pulls(repository)
 
@@ -182,12 +188,22 @@ class UnitOfWork:
         await self._tx.save_lane(lane)
 
     async def enqueue_action(
-        self, cause: Event, kind: str, payload: dict[str, Any], *, discriminator: str = ""
+        self,
+        cause: Event,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        discriminator: str = "",
+        stable_key: str | None = None,
     ) -> str:
         """Queue an effect in its causing transaction. Reusing a key preserves the first effect."""
         if not kind or ":" in kind:
             raise LedgerError("invalid", "action kind must be nonempty and contain no colon")
-        key = f"{cause.id}:{kind}:{discriminator}"
+        if stable_key is not None and (
+            self._append_role != "system" or not stable_key.startswith(f"{kind}:")
+        ):
+            raise LedgerError("forbidden", "only core may supply a stable action key")
+        key = stable_key or f"{cause.id}:{kind}:{discriminator}"
         await self._tx.insert_action(Action(key, kind, cause.id, payload))
         return key
 

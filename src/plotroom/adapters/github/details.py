@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable, LocalGitHubCredential
-from plotroom.adapters.github.ci import fetch_checks, fetch_main
+from plotroom.adapters.github.ci import fetch_checks, fetch_comparison, fetch_main, fetch_main_ci
 from plotroom.adapters.github.deployments import poll_deployments
 from plotroom.adapters.github.issue_details import (
     fetch_comment_backfill,
@@ -18,9 +18,17 @@ from plotroom.adapters.github.issue_details import (
     fetch_issues,
 )
 from plotroom.adapters.github.pr_details import fetch_files, fetch_labels, fetch_threads
+from plotroom.adapters.github.pull_comparison import fetch_pull_comparison
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.core.events import format_time
-from plotroom.core.github import DETAILS, PULL_REQUESTS, FetchCursor, FetchRetry, apply_comments
+from plotroom.core.github import (
+    DETAILS,
+    PULL_REQUESTS,
+    FetchCursor,
+    FetchRetry,
+    PullRequest,
+    apply_comments,
+)
 from plotroom.core.github_projection import (
     CHECKS,
     COMMENT_BACKFILL,
@@ -30,15 +38,30 @@ from plotroom.core.github_projection import (
     ISSUES,
     LABELS,
     MAIN,
+    MAIN_CI,
+    MAIN_CI_WINDOW,
     THREADS,
+    GitHubRecord,
     GitHubResource,
     apply_resource,
     main_verdict,
 )
 from plotroom.core.ledger import Ledger
+from plotroom.core.merge_flakes import (
+    FLAKE_COMPARISONS,
+    MainPair,
+    main_pairs,
+    main_runs,
+    record_main_flakes,
+    record_pull_flakes,
+    record_same_head,
+)
+from plotroom.core.merge_overlap import PULL_COMPARISON, bind_overlap_labels
+from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.ports.clock import Clock
 
 log = logging.getLogger("plotroom.github")
+MAX_NEW_COMPARISONS = 4
 _READ_ERRORS = (
     GitHubUnavailable,
     httpx.RequestError,
@@ -59,6 +82,8 @@ class GitHubDetailPoller:
         image_jobs: tuple[str, ...] = (),
         *,
         include_issue_tree: bool = False,
+        ci_workflow: str | None = None,
+        on_merge_evidence: Callable[[int], Awaitable[object]] | None = None,
     ) -> None:
         self.ledger = ledger
         self.clock = clock
@@ -66,6 +91,9 @@ class GitHubDetailPoller:
         self.credential = credential
         self.image_jobs = image_jobs
         self.include_issue_tree = include_issue_tree
+        self.ci_workflow = ci_workflow
+        self.on_merge_evidence = on_merge_evidence
+        self._comparison_cursor = 0
 
     async def cooling_down(self) -> bool:
         repository = self.api.repository
@@ -75,6 +103,7 @@ class GitHubDetailPoller:
         return any(row and datetime.fromisoformat(row.until) > now for row in (retry, pr_retry))
 
     async def record_rate_limit(self, exc: GitHubRateLimited) -> None:
+        self.ledger.github_error = "GitHub rate limit reached"
         repository = self.api.repository
         retry = await self.ledger.fetch_retry(repository, DETAILS)
         backoff = retry.next_backoff if retry else 60
@@ -110,6 +139,13 @@ class GitHubDetailPoller:
             "",
             lambda previous: fetch_main(api, client, token, self.image_jobs, previous),
         )
+        main_ci = None
+        if (workflow := self.ci_workflow) is not None:
+            main_ci = await self._refresh(
+                MAIN_CI,
+                "",
+                lambda previous: fetch_main_ci(api, client, token, workflow, previous, main),
+            )
         issues = await self._refresh(
             ISSUES, "", lambda previous: fetch_issues(api, client, token, previous)
         )
@@ -121,23 +157,43 @@ class GitHubDetailPoller:
             )
             await self._poll_comments(client, token, numbers)
         targets: dict[str, list[int]] = {}
+        history = tuple(
+            sorted(
+                {
+                    run.key: run
+                    for run in (*main_runs(main), *main_runs(main_ci, limit=MAIN_CI_WINDOW))
+                }.values(),
+                key=lambda run: (
+                    run.details["created_at"],
+                    run.fields["id"],
+                    run.fields["attempt"],
+                ),
+                reverse=True,
+            )
+        )
         if main is not None:
             targets[main.attributes["head_sha"]] = []
             verdict = main_verdict(main)
             if verdict is not None:
                 targets[verdict.fields["head_sha"]] = []
+        for run in history:
+            targets.setdefault(run.fields["head_sha"], [])
         pulls = await self.ledger.github_pull_targets(api.repository)
         for pull in pulls:
             targets.setdefault(pull.head_sha, []).append(pull.number)
+        checks: dict[str, GitHubResource] = {}
         for sha, numbers in targets.items():
-            await self._refresh(
+            result = await self._refresh(
                 CHECKS,
                 sha,
-                lambda _, sha=sha: fetch_checks(api, client, token, sha),
+                lambda previous, sha=sha: fetch_checks(api, client, token, sha, previous),
                 pulls=tuple(numbers),
             )
+            if result is not None:
+                checks[sha] = result
         for pull in pulls:
             complete = True
+            files = None
             for resource, read in (
                 (THREADS, fetch_threads),
                 (FILES, fetch_files),
@@ -148,12 +204,45 @@ class GitHubDetailPoller:
                     str(pull.number),
                     lambda _, read=read, pull=pull: read(api, client, token, pull),
                     pulls=(pull.number,),
+                    pull=pull,
                 )
                 complete = complete and result is not None
+                if resource == FILES:
+                    files = result
+            if main is not None and main.complete and self.ci_workflow is not None:
+                await self._refresh(
+                    PULL_COMPARISON,
+                    str(pull.number),
+                    lambda previous, pull=pull: fetch_pull_comparison(
+                        api,
+                        client,
+                        token,
+                        pull,
+                        main.attributes["branch"],
+                        main.attributes["head_sha"],
+                        previous,
+                    ),
+                    pull=pull,
+                )
+            if files is not None and (observed := checks.get(pull.head_sha)) is not None:
+                await self.ledger.run(
+                    "system",
+                    partial(
+                        record_pull_flakes,
+                        repository=api.repository,
+                        pull=pull,
+                        checks=observed,
+                        files=files,
+                    ),
+                )
             check = await self.ledger.github_resource(api.repository, CHECKS, pull.head_sha)
             complete = complete and check is not None and check.complete
             watermark = f"{pull.updated_at}:{pull.version}" if complete else ""
             await self._record_pull_attempt(pull.number, watermark)
+        await self._poll_main_flakes(client, token, history, checks)
+        if self.on_merge_evidence is not None:
+            for pull in pulls:
+                await self.on_merge_evidence(pull.number)
 
         if self.include_issue_tree:
             if issues is not None:
@@ -165,6 +254,43 @@ class GitHubDetailPoller:
             else:
                 await self._mark_incomplete(ISSUE_TREE, "")
         await poll_deployments(self.ledger, api, client, token, format_time(self.clock.now()))
+
+    async def _poll_main_flakes(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+        history: tuple[GitHubRecord, ...],
+        checks: dict[str, GitHubResource],
+    ) -> None:
+        api = self.api
+        pairs = main_pairs(history, checks)
+        distinct = {(pair.base, pair.head): pair for pair in pairs if pair.base != pair.head}
+        observations: dict[str, GitHubResource | None] = {}
+        pending: list[tuple[str, MainPair]] = []
+        for pair in distinct.values():
+            key = f"{pair.base}...{pair.head}"
+            cached = await self.ledger.github_resource(api.repository, FLAKE_COMPARISONS, key)
+            if cached is not None and cached.complete:
+                observations[key] = cached
+            else:
+                pending.append((key, pair))
+        if pending:
+            offset = self._comparison_cursor % len(pending)
+            for key, pair in (pending[offset:] + pending[:offset])[:MAX_NEW_COMPARISONS]:
+                observations[key] = await self._refresh(
+                    FLAKE_COMPARISONS,
+                    key,
+                    lambda _, pair=pair: fetch_comparison(api, client, token, pair.base, pair.head),
+                )
+            self._comparison_cursor = offset + MAX_NEW_COMPARISONS
+        for pair in pairs:
+            comparison = observations.get(f"{pair.base}...{pair.head}")
+            await self.ledger.run(
+                "system",
+                partial(
+                    record_main_flakes, repository=api.repository, pair=pair, comparison=comparison
+                ),
+            )
 
     async def _record_pull_attempt(self, number: int, watermark: str) -> None:
         repository = self.api.repository
@@ -234,6 +360,7 @@ class GitHubDetailPoller:
         read: Callable[[GitHubResource | None], Awaitable[GitHubResource]],
         *,
         pulls: tuple[int, ...] = (),
+        pull: PullRequest | None = None,
     ) -> GitHubResource | None:
         repository = self.api.repository
         previous = await self.ledger.github_resource(repository, resource, scope)
@@ -250,12 +377,33 @@ class GitHubDetailPoller:
                 )
                 await self._mark_incomplete(resource, scope, pulls)
             return None
-        await self.ledger.run(
-            "system",
-            lambda uow: apply_resource(
-                uow, repository, resource, scope, result, format_time(self.clock.now()), pulls=pulls
-            ),
-        )
+
+        async def write(uow: UnitOfWork) -> None:
+            if pull is not None:
+                current = await uow.pull_request(repository, pull.number)
+                if current is None or (pull.head_sha, pull.version, pull.updated_at) != (
+                    current.head_sha,
+                    current.version,
+                    current.updated_at,
+                ):
+                    return
+            observed = result
+            if resource == LABELS and pull is not None:
+                previous_labels = await uow.github_resource(repository, LABELS, scope)
+                observed = bind_overlap_labels(result, previous_labels, pull)
+            await apply_resource(
+                uow,
+                repository,
+                resource,
+                scope,
+                observed,
+                format_time(self.clock.now()),
+                pulls=pulls,
+            )
+            if resource == CHECKS:
+                await record_same_head(uow, repository, result)
+
+        await self.ledger.run("system", write)
         return result
 
     async def issue_tree(self) -> tuple[dict[str, Any], ...]:

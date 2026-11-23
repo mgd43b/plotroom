@@ -380,6 +380,7 @@ class Daemon:
                 watcher_roles=self._config.watchers.get(project_id, ()),
                 wait_cap=self._config.wait_cap,
                 github_repository=repository,
+                merge_gate_policy=github.merge_gate_policy if github is not None else None,
                 github_tree_path=remote_tree[0] if remote_tree is not None else None,
                 session_workers=desktop.sessions if desktop is not None else None,
                 drain_enabled=project_id in self._config.drain_sessions,
@@ -422,6 +423,7 @@ class Daemon:
                     credential,
                     github.image_jobs,
                     include_issue_tree=issue_source is not None,
+                    ci_workflow=github.merge_gate_policy.ci_workflow,
                 )
                 inputs.append(partial(poller.run, details.poll))
                 if remote_tree is not None:
