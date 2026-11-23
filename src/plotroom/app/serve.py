@@ -14,13 +14,20 @@ from types import FrameType
 from typing import Any
 
 import uvicorn
+from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from plotroom.adapters.mcp import build_app
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.app.clock import SystemClock
-from plotroom.app.config import Config
+from plotroom.app.config import Config, ConfigError
 from plotroom.app.lock import DataDirLock
-from plotroom.app.portfile import remove_port, write_port
+from plotroom.app.portfile import (
+    directory_identity,
+    directory_key,
+    prepare_local_socket,
+    remove_port,
+    write_port,
+)
 from plotroom.app.sqlite_floor import floor_problem
 from plotroom.app.tokens import TokenRegistry
 from plotroom.core.catalog import build_catalog
@@ -67,11 +74,24 @@ class _Server(uvicorn.Server):
             # Published before anyone is told the server is up: a client that sees "serving" in
             # the log, or reads the file, finds the same port.
             try:
-                write_port(self._data_dir, port, host=host)
+                local_socket = prepare_local_socket(self._data_dir)
+                loop = asyncio.get_running_loop()
+
+                def protocol() -> asyncio.Protocol:
+                    # Use the same app, lifespan, and tracked connections as the TCP listener.
+                    return H11Protocol(
+                        config=self.config,
+                        server_state=self.server_state,
+                        app_state=self.lifespan.state,
+                        _loop=loop,
+                    )
+
+                self.servers.append(await loop.create_unix_server(protocol, path=local_socket))
+                write_port(self._data_dir, port, host=host, local_socket=local_socket)
             except BaseException:
                 # uvicorn skips its own shutdown when startup raises, which would leave the
                 # listener open after the lock is released.
-                await self.shutdown_task()
+                await _finish(self.shutdown_task())
                 raise
             self._started_future.set_result(port)
 
@@ -101,8 +121,10 @@ class Daemon:
         *,
         sqlite_version: str | None = None,
         clock: Clock | None = None,
+        expected_directory: str | None = None,
     ) -> None:
         self._config = config
+        self._expected_directory = expected_directory
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._projects: dict[str, _Project] = {}
         self._sqlite_version = (
@@ -156,7 +178,9 @@ class Daemon:
         config = self._config
         if self._started is None:
             self._started = asyncio.get_running_loop().create_future()
+        self._check_directory()
         with DataDirLock(config.data_dir):
+            self._check_directory()
             # Whatever an earlier daemon left behind is not this one's: gone before it binds.
             remove_port(config.data_dir)
             try:
@@ -204,6 +228,12 @@ class Daemon:
                 current = asyncio.current_task()
                 if current is not None and current.cancelling():
                     raise asyncio.CancelledError  # a cancel that arrived mid-teardown still counts
+
+    def _check_directory(self) -> None:
+        if self._expected_directory is not None:
+            found = directory_key(directory_identity(self._config.data_dir))
+            if self._expected_directory != found:
+                raise ConfigError("the canonical plotroom data directory changed during startup")
 
     async def _announce(self) -> None:
         port = await self.wait_started()

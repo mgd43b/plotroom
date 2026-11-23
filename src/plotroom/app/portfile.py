@@ -9,12 +9,16 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 PORT_FILE_NAME = "plotroom.port"
+START_DIRECTORY_ENV = "_PLOTROOM_START_DIRECTORY"
 _MAX_PORT = 65535
+
+type DirectoryIdentity = tuple[int, int]
 
 
 @dataclass(frozen=True)
@@ -22,9 +26,51 @@ class PublishedListener:
     pid: int
     port: int
     host: str | None
+    local_socket: str | None = None
 
 
-def write_port(data_dir: Path, port: int, *, host: str | None = None) -> None:
+def directory_identity(data_dir: Path) -> DirectoryIdentity:
+    info = data_dir.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode):
+        raise NotADirectoryError(f"not a data directory: {data_dir}")
+    return info.st_dev, info.st_ino
+
+
+def local_socket_path(identity: DirectoryIdentity) -> Path:
+    # Keep the path within the Unix socket length limit even for deep data directories or TMPDIR.
+    return Path("/tmp") / f"plotroom-{os.geteuid()}" / f"{directory_key(identity)}.sock"  # noqa: S108
+
+
+def directory_key(identity: DirectoryIdentity) -> str:
+    device, inode = identity
+    return f"{device:x}-{inode:x}"
+
+
+def private_socket_directory(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.geteuid()
+        and stat.S_IMODE(info.st_mode) == 0o700
+    )
+
+
+def prepare_local_socket(data_dir: Path) -> Path:
+    path = local_socket_path(directory_identity(data_dir))
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    if not private_socket_directory(path.parent):
+        raise PermissionError(
+            f"local socket directory must be private and owned by this user: {path.parent}"
+        )
+    return path
+
+
+def write_port(
+    data_dir: Path, port: int, *, host: str | None = None, local_socket: Path | None = None
+) -> None:
     """Publish this process's address atomically. Legacy callers may omit the host."""
     data_dir.mkdir(parents=True, exist_ok=True)
     target = data_dir / PORT_FILE_NAME
@@ -32,6 +78,8 @@ def write_port(data_dir: Path, port: int, *, host: str | None = None) -> None:
     fields: dict[str, str | int] = {"pid": os.getpid(), "port": port}
     if host is not None:
         fields["host"] = host
+    if local_socket is not None:
+        fields["local_socket"] = str(local_socket)
     scratch.write_text(json.dumps(fields), encoding="utf-8")
     os.replace(scratch, target)
 
@@ -70,4 +118,7 @@ def read_listener(data_dir: Path) -> PublishedListener | None:
         ipaddress.ip_address(host)
     except ValueError:
         return PublishedListener(pid, port, None)
-    return PublishedListener(pid, port, host)
+    local_socket = fields.get("local_socket")
+    return PublishedListener(
+        pid, port, host, local_socket if isinstance(local_socket, str) else None
+    )

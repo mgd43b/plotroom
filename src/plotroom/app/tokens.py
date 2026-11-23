@@ -92,7 +92,7 @@ def _write(path: Path, records: dict[str, Any]) -> None:
 
 
 def _local_tokens(records: dict[str, Any], data_dir: Path) -> dict[str, str]:
-    raw: Any = records.get(str(data_dir.resolve()), {})
+    raw: Any = records.get(str(data_dir), {})
     if not isinstance(raw, dict):
         raise TokenError("invalid local token entries for this data directory")
     entries = cast("dict[str, Any]", raw)
@@ -104,6 +104,7 @@ def _local_tokens(records: dict[str, Any], data_dir: Path) -> dict[str, str]:
 
 
 def select_local_token(data_dir: Path, token_id: str | None) -> str | None:
+    """Select the credential keyed by the connection's already-canonical data directory."""
     entries = _local_tokens(_read(local_token_path()), data_dir)
     if token_id is not None:
         if token_id not in entries:

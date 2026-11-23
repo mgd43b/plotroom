@@ -13,9 +13,13 @@ import ipaddress
 import json
 import logging
 import re
+import socket
+import struct
 import sys
-from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, BinaryIO, cast
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Any, BinaryIO, Protocol, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -36,6 +40,74 @@ _BEARER = re.compile(r"[A-Za-z0-9._~+/-]+=*")
 
 class UpstreamStartError(Exception):
     """The server the proxy fronts is not running and could not be started; the text says why."""
+
+
+class _PeerStream(Protocol):
+    def get_extra_info(self, info: str) -> socket.socket | None: ...
+
+    async def aclose(self) -> None: ...
+
+
+def _peer_pid(sock: socket.socket) -> int:
+    if sys.platform == "darwin":
+        # macOS sys/un.h: SOL_LOCAL = 0, LOCAL_PEERPID = 2. Python exports neither.
+        return sock.getsockopt(0, 2)
+    if sys.platform == "linux":
+        credentials = struct.Struct("iII")  # struct ucred: pid, uid, gid
+        return credentials.unpack(
+            sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, credentials.size)
+        )[0]
+    raise OSError("Unix socket peer PID verification is unavailable on this platform")
+
+
+@dataclass(frozen=True)
+class LocalEndpoint:
+    """The lock owner's published endpoint, verified on each Unix connection before HTTP writes."""
+
+    url: str
+    host: str
+    socket_path: str
+    pid: int
+
+    @asynccontextmanager
+    async def stream(
+        self, method: str, *, content: bytes | None = None, headers: Mapping[str, str] | None = None
+    ) -> AsyncGenerator[httpx.Response]:
+        verified = False
+
+        async def verify(event: str, info: dict[str, Any]) -> None:
+            nonlocal verified
+            if event == "connection.connect_unix_socket.complete":
+                peer = cast(_PeerStream, info["return_value"])
+                try:
+                    sock = peer.get_extra_info("socket")
+                    verified = sock is not None and _peer_pid(sock) == self.pid
+                except OSError:
+                    verified = False
+                if not verified:
+                    await peer.aclose()
+                    raise httpx.ConnectError("local daemon identity could not be verified")
+            elif event == "http11.send_request_headers.started" and not verified:
+                raise httpx.ConnectError("local daemon identity could not be verified")
+
+        # One request per client. Use a fresh kernel peer check for readiness, dispatch, and retry.
+        transport = httpx.AsyncHTTPTransport(uds=self.socket_path, trust_env=False)
+        async with (
+            httpx.AsyncClient(
+                transport=transport, timeout=httpx.Timeout(10.0, read=None), trust_env=False
+            ) as http,
+            http.stream(
+                method,
+                self.url,
+                content=content,
+                headers={**(headers or {}), "host": self.host},
+                extensions={"trace": verify},
+            ) as response,
+        ):
+            yield response
+
+
+type _Endpoint = str | LocalEndpoint
 
 
 def envelope_headers(message: Mapping[str, Any], negotiated: str | None) -> dict[str, str]:
@@ -82,15 +154,14 @@ class StdioProxy:
         stdout: BinaryIO | None = None,
         http: httpx.AsyncClient | None = None,
         max_pending: int = DEFAULT_MAX_PENDING,
-        ensure: Callable[[], Awaitable[str | None]] | None = None,
+        ensure: Callable[[], Awaitable[_Endpoint | None]] | None = None,
         bearer: str | None = None,
-        current_url: Callable[[], Awaitable[str | None]] | None = None,
-        host_alias: str | None = None,
+        current_endpoint: Callable[[], Awaitable[LocalEndpoint | None]] | None = None,
     ) -> None:
         if bearer is not None and not _BEARER.fullmatch(bearer):
             raise EndpointError("invalid bearer token")
         check_endpoint(url, credentialed=bearer is not None)
-        self._url = url
+        self._target: _Endpoint = url
         self._bearer = bearer
         self._shown_url = _display_url(url)
         self._max_pending = max_pending
@@ -105,9 +176,8 @@ class StdioProxy:
         self._gone = False
         self._negotiated: str | None = None
         self._ensure = ensure
-        self._current_url = current_url
-        self._host_alias = host_alias
-        self._starting: asyncio.Task[str | None] | None = None
+        self._current_endpoint = current_endpoint
+        self._starting: asyncio.Task[_Endpoint | None] | None = None
         self._ready = ensure is None
 
     async def run(self) -> None:
@@ -202,7 +272,7 @@ class StdioProxy:
             task.add_done_callback(forget)
         return task
 
-    async def _ensure_ready(self) -> asyncio.Task[str | None] | None:
+    async def _ensure_ready(self) -> asyncio.Task[_Endpoint | None] | None:
         """Wait until the server is up, starting it once however many requests wait on it.
 
         A start that reports where the server listens (a daemon on a port of its own choosing) moves
@@ -213,22 +283,29 @@ class StdioProxy:
             return None
         if self._ready:
             previous = self._starting
-            # A local bearer stays bound to the owner of its data directory, even if another
-            # listener takes the port after that daemon exits.
-            current = self._url if self._current_url is None else await self._current_url()
-            if self._ready and current == self._url:
+            current = (
+                self._target if self._current_endpoint is None else await self._current_endpoint()
+            )
+            if self._ready and current == self._target:
                 return self._starting
             if self._starting is previous:
                 self._ready = False
                 self._starting = None
         starting = self._starting
-        if starting is None or (starting.done() and starting.exception() is not None):
+        if (
+            starting is None
+            or starting.cancelled()
+            or (starting.done() and starting.exception() is not None)
+        ):
             starting = self._starting = asyncio.ensure_future(self._ensure())
         # Shielded: one canceled request must not abort the start the others are waiting on.
-        url = await asyncio.shield(starting)
-        if url is not None:
+        target = await asyncio.shield(starting)
+        if self._current_endpoint is not None and not isinstance(target, LocalEndpoint):
+            raise UpstreamStartError("no verified local daemon endpoint is available")
+        if target is not None:
+            url = target.url if isinstance(target, LocalEndpoint) else target
             check_endpoint(url, credentialed=self._bearer is not None)
-            self._url = url
+            self._target = target
             self._shown_url = _display_url(url)
         self._ready = True
         return starting
@@ -244,15 +321,19 @@ class StdioProxy:
         request_id = message.get("id")
         is_request = message.get("method") is not None and request_id is not None
         answered = False
-        relied_on: asyncio.Task[str | None] | None = None
+        relied_on: asyncio.Task[_Endpoint | None] | None = None
         try:
             relied_on = await self._ensure_ready()
             headers = envelope_headers(message, self._negotiated)
             if self._bearer is not None:
                 headers["authorization"] = f"Bearer {self._bearer}"
-            if self._host_alias is not None:
-                headers["host"] = f"{self._host_alias}:{urlsplit(self._url).port}"
-            async with http.stream("POST", self._url, content=body, headers=headers) as response:
+            target = self._target
+            stream = (
+                target.stream("POST", content=body, headers=headers)
+                if isinstance(target, LocalEndpoint)
+                else http.stream("POST", target, content=body, headers=headers)
+            )
+            async with stream as response:
                 content_type = response.headers.get("content-type", "")
                 if "text/event-stream" in content_type:
                     async for payload in _sse_payloads(response):

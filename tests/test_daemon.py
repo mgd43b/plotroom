@@ -19,7 +19,14 @@ from plotroom.adapters.mcp.server import execute_command
 from plotroom.adapters.store_sqlite import SqliteStore, head_revision
 from plotroom.app.config import Config
 from plotroom.app.lock import LockError
-from plotroom.app.portfile import PORT_FILE_NAME, PublishedListener, read_listener, read_port
+from plotroom.app.portfile import (
+    PORT_FILE_NAME,
+    PublishedListener,
+    directory_identity,
+    local_socket_path,
+    read_listener,
+    read_port,
+)
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import TokenRegistry
 from plotroom.core.catalog import build_catalog
@@ -219,18 +226,19 @@ async def test_a_failed_port_publication_closes_the_listener_and_frees_the_direc
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = make_config(tmp_path)
-    bound: list[int] = []
+    bound: list[tuple[int, Path]] = []
 
-    def refuse(_data_dir: Path, port: int, *, host: str) -> None:
-        bound.append(port)
+    def refuse(_data_dir: Path, port: int, *, host: str, local_socket: Path) -> None:
+        bound.append((port, local_socket))
         raise OSError("no space left on device")
 
     monkeypatch.setattr("plotroom.app.serve.write_port", refuse)
     with pytest.raises(OSError, match="no space left"):
         await asyncio.wait_for(Daemon(config).run(), timeout=30)
-    [port] = bound
+    [(port, socket_path)] = bound
     with pytest.raises(ConnectionRefusedError):  # the socket was bound; it is closed again
         await asyncio.open_connection("127.0.0.1", port)
+    assert not socket_path.exists()
     monkeypatch.undo()
     again = Daemon(config)  # and the directory can be owned again
     task, _ = await run_daemon(again)
@@ -297,7 +305,10 @@ async def test_the_bound_port_is_published_with_the_pid_and_answers(tmp_path: Pa
     try:
         assert port != 0, "the config's port of 0 became the port that was bound"
         assert read_port(config.data_dir) == (os.getpid(), port)
-        assert read_listener(config.data_dir) == PublishedListener(os.getpid(), port, "127.0.0.1")
+        path = local_socket_path(directory_identity(config.data_dir))
+        assert read_listener(config.data_dir) == PublishedListener(
+            os.getpid(), port, "127.0.0.1", str(path)
+        )
         async with authenticated_client(f"http://127.0.0.1:{port}/mcp", bearer(config)) as client:
             assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
     finally:

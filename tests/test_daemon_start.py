@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import io
 import json
 import os
 import signal
@@ -11,9 +12,10 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from textwrap import dedent
 from typing import Any
 
 import httpx
@@ -22,22 +24,28 @@ from mcp.client.client import Client
 from mcp.client.stdio import StdioServerParameters
 
 from conftest import child_env, start_plotroom, tool_json, write_config
+from plotroom.adapters.mcp.proxy import LocalEndpoint, UpstreamStartError
 from plotroom.app.cli import EXIT_LOCKED, main
 from plotroom.app.config import load_config
 from plotroom.app.daemon_start import (
     LOG_FILE_NAME,
-    answers_ping,
-    current_url,
+    DaemonLocation,
     daemon_env,
+    endpoint_ready,
     ensure_daemon,
     lock_owner,
     logged_reason,
     serve_command,
-    speaks_mcp,
     start_daemon,
 )
 from plotroom.app.lock import LOCK_FILE_NAME, DataDirLock, LockError
-from plotroom.app.portfile import PORT_FILE_NAME, read_port, write_port
+from plotroom.app.portfile import (
+    PORT_FILE_NAME,
+    DirectoryIdentity,
+    prepare_local_socket,
+    read_port,
+    write_port,
+)
 from plotroom.app.tokens import TokenRegistry, select_local_token
 from rawproxy import ERAS, RawProxy, connected, first_request, spawn_proxy
 
@@ -226,26 +234,26 @@ def test_the_reason_is_read_from_the_start_of_a_file_that_rolled_since_the_offse
 PING_RESULT = '{"jsonrpc":"2.0","id":"probe","result":{}}'
 
 
-def test_only_the_result_for_the_probes_own_ping_counts_as_an_answer() -> None:
-    assert answers_ping(PING_RESULT)
-    assert answers_ping(f"event: message\ndata: {PING_RESULT}\n\n")
-    assert not answers_ping('{"jsonrpc":"2.0","id":"probe","error":{"code":-32601,"message":"x"}}')
-    assert not answers_ping('{"jsonrpc":"2.0","id":"other","result":{}}')
-    assert not answers_ping("<html>jsonrpc</html>")
-    assert not answers_ping("")
+async def answer_on_unix(
+    path: Path, reply: bytes | None
+) -> tuple[asyncio.Server, asyncio.Queue[bytes]]:
+    requests: asyncio.Queue[bytes] = asyncio.Queue()
 
-
-async def answer_with(raw: bytes, *, then_stall: bool = False) -> tuple[asyncio.Server, str]:
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await reader.readuntil(b"\r\n\r\n")
-        writer.write(raw)
-        await writer.drain()
-        if then_stall:
-            await asyncio.sleep(WAIT)  # trickles nothing more, until the test ends
-        writer.close()
+        try:
+            requests.put_nowait(await reader.readuntil(b"\r\n\r\n"))
+            if reply is None:
+                await reader.read()  # keep waiting until the client's readiness timeout
+            else:
+                writer.write(reply)
+                await writer.drain()
+        except asyncio.IncompleteReadError as exc:
+            requests.put_nowait(exc.partial)
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
-    server = await asyncio.start_server(handle, "127.0.0.1", 0)
-    return server, f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/mcp"
+    return await asyncio.start_unix_server(handle, path), requests
 
 
 def http_reply(status: str, body: str, content_type: str = "application/json") -> bytes:
@@ -255,34 +263,96 @@ def http_reply(status: str, body: str, content_type: str = "application/json") -
 
 
 @pytest.mark.parametrize(
-    ("reply", "expected"),
+    ("status", "matches", "expected"),
     [
-        (http_reply("200 OK", PING_RESULT), True),
-        (http_reply("200 OK", f"data: {PING_RESULT}\n\n", "text/event-stream"), True),
-        (http_reply("401 Unauthorized", ""), True),
-        (http_reply("421 Misdirected Request", ""), False),
-        (http_reply("500 Internal Server Error", PING_RESULT), False),
-        (http_reply("200 OK", '{"jsonrpc":"2.0","id":"x","result":{}}'), False),
-        (http_reply("200 OK", "<html>hello</html>", "text/html"), False),
+        ("401 Unauthorized", True, True),
+        ("401 Unauthorized", False, False),
+        ("421 Misdirected Request", True, False),
+        ("200 OK", True, False),
     ],
 )
-async def test_the_probe_accepts_a_successful_ping_or_a_401(reply: bytes, expected: bool) -> None:
-    server, url = await answer_with(reply)
-    try:
-        assert await speaks_mcp(url) is expected
-    finally:
-        server.close()
+async def test_readiness_requires_a_401_from_the_verified_peer(
+    tmp_path: Path, status: str, matches: bool, expected: bool
+) -> None:
+    path = prepare_local_socket(tmp_path)
+    server, requests = await answer_on_unix(path, http_reply(status, ""))
+    endpoint = LocalEndpoint(
+        "http://127.0.0.1:41000/mcp",
+        "localhost:41000",
+        str(path),
+        os.getpid() if matches else os.getppid(),
+    )
+    async with server:
+        assert await endpoint_ready(endpoint) is expected
+        received = await asyncio.wait_for(requests.get(), WAIT)
+    if matches:
+        assert received.startswith(b"HEAD /mcp HTTP/1.1\r\n")
+        assert b"\r\nhost: localhost:41000\r\n" in received.lower()
+        assert b"authorization:" not in received.lower()
+        assert b"content-length:" not in received.lower()
+    else:
+        assert received == b""
 
 
-async def test_the_probe_is_bounded_in_total_not_per_read() -> None:
-    partial = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n: keepalive\n"
-    server, url = await answer_with(partial, then_stall=True)
+async def test_the_verified_probe_is_bounded_when_the_peer_stalls(tmp_path: Path) -> None:
+    path = prepare_local_socket(tmp_path)
+    server, requests = await answer_on_unix(path, None)
+    endpoint = LocalEndpoint(
+        "http://127.0.0.1:41000/mcp", "localhost:41000", str(path), os.getpid()
+    )
+    async with server:
+        async with asyncio.timeout(5):
+            assert await endpoint_ready(endpoint, within=0.3) is False
+            assert (await requests.get()).startswith(b"HEAD /mcp ")
+
+
+async def test_a_reconnect_sends_no_http_to_a_different_peer_at_the_same_path(
+    tmp_path: Path,
+) -> None:
+    path = prepare_local_socket(tmp_path)
+    endpoint = LocalEndpoint(
+        "http://127.0.0.1:41000/mcp", "localhost:41000", str(path), os.getpid()
+    )
+    server, _ = await answer_on_unix(path, http_reply("401 Unauthorized", ""))
+    async with server:
+        assert await endpoint_ready(endpoint)
+    script = dedent("""\
+        import socket
+        import sys
+
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(sys.argv[1])
+            listener.listen()
+            print("ready", flush=True)
+            conn, _ = listener.accept()
+            with conn:
+                print(len(conn.recv(4096)), flush=True)
+        """)
+    foreign = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        str(path),
+        stdout=asyncio.subprocess.PIPE,
+    )
     try:
-        started = time.monotonic()
-        assert await speaks_mcp(url, within=0.3) is False
-        assert time.monotonic() - started < 5
+        assert foreign.stdout is not None
+        async with asyncio.timeout(WAIT):
+            assert await foreign.stdout.readline() == b"ready\n"
+            with pytest.raises(httpx.ConnectError, match="identity could not be verified"):
+                async with endpoint.stream(
+                    "POST",
+                    content=b'{"jsonrpc":"2.0","method":"ping","id":1}',
+                    headers={"authorization": "Bearer fixture"},
+                ):
+                    pytest.fail("the foreign peer was accepted")
+            assert await foreign.stdout.readline() == b"0\n"
+            assert await foreign.wait() == 0
     finally:
-        server.close()
+        if foreign.returncode is None:
+            foreign.kill()
+            await foreign.wait()
+        path.unlink(missing_ok=True)
 
 
 # --- starting on demand --------------------------------------------------------------------
@@ -299,6 +369,41 @@ async def test_a_client_gets_snapshot_with_the_daemon_started_on_demand(
     assert tool_json(result) == {"ok": True, "data": EMPTY_BOARD_DATA}
     assert is_locked(data_dir), "the daemon outlives the proxy that started it"
     assert len(serving_lines(data_dir)) == 1
+
+
+def test_config_and_alias_changes_after_token_selection_keep_the_same_instance(
+    tmp_path: Path, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = TokenRegistry(data_dir).issue("demo", "orchestrator")
+    other_dir = tmp_path / "other"
+    TokenRegistry(other_dir).issue("demo", "clerk")
+    alias = tmp_path / "alias"
+    alias.symlink_to(data_dir, target_is_directory=True)
+    path = tmp_path / "config.toml"
+    path.write_text('data_dir = "alias"\nport = 0\n[projects.demo]\n', encoding="utf-8")
+
+    def select_then_edit(directory: Path, token_id: str | None) -> str | None:
+        assert directory == data_dir.resolve()
+        selected = select_local_token(directory, token_id)
+        assert selected == first.bearer
+        alias.unlink()
+        alias.symlink_to(other_dir, target_is_directory=True)
+        path.write_text('data_dir = "other"\nport = 0\n[projects.demo]\n', encoding="utf-8")
+        return selected
+
+    stdin = io.TextIOWrapper(io.BytesIO(json.dumps(first_request("modern")).encode() + b"\n"))
+    result = io.BytesIO()
+    stdout = io.TextIOWrapper(result)
+    with monkeypatch.context() as patch:
+        patch.setattr("plotroom.app.cli.select_local_token", select_then_edit)
+        patch.setattr(sys, "stdin", stdin)
+        patch.setattr(sys, "stdout", stdout)
+        assert main(["connect", "--stdio", "--config", str(path)]) == 0
+    response = json.loads(result.getvalue())
+    assert response["result"]["isError"] is False
+    assert is_locked(data_dir)
+    assert not (other_dir / LOCK_FILE_NAME).exists()
+    assert not (other_dir / PORT_FILE_NAME).exists()
 
 
 async def test_a_package_in_the_data_directory_cannot_shadow_plotroom(
@@ -426,7 +531,8 @@ async def test_a_daemon_started_on_demand_publishes_the_port_it_serves_on(
     assert pid == owner_pid(data_dir)
     [announced] = serving_lines(data_dir)
     assert announced["port"] == port
-    assert await speaks_mcp(f"http://127.0.0.1:{port}/mcp")
+    async with httpx.AsyncClient(trust_env=False) as http:
+        assert (await http.head(f"http://127.0.0.1:{port}/mcp")).status_code == 401
 
 
 async def test_a_killed_daemons_file_is_not_trusted_and_a_new_client_reaches_the_new_daemon(
@@ -444,7 +550,8 @@ async def test_a_killed_daemons_file_is_not_trusted_and_a_new_client_reaches_the
     second, second_port = published(data_dir)
     assert second == owner_pid(data_dir) != first
     assert len(serving_lines(data_dir)) == 2
-    assert await speaks_mcp(f"http://127.0.0.1:{second_port}/mcp")
+    async with httpx.AsyncClient(trust_env=False) as http:
+        assert (await http.head(f"http://127.0.0.1:{second_port}/mcp")).status_code == 401
 
 
 @pytest.mark.parametrize("owner", ["a dead pid", "a live pid that holds no lock"])
@@ -522,18 +629,31 @@ async def test_the_proxy_selects_the_requested_project_token_by_id(
     assert len(serving_lines(data_dir)) == 1
 
 
-async def test_the_proxy_preserves_an_explicitly_allowed_localhost_header(
-    tmp_path: Path, data_dir: Path
+@pytest.mark.parametrize(
+    ("server_host", "alias", "pattern"),
+    [
+        ("localhost", "localhost", "localhost:*"),
+        ("127.0.0.1", "LOCALHOST", "localhost"),
+        ("127.0.0.1", "127.0.0.2", "127.0.0.2:*"),
+        ("127.0.0.1", "::1", "[::1]:*"),
+    ],
+)
+async def test_the_proxy_preserves_an_explicitly_allowed_loopback_header(
+    tmp_path: Path, data_dir: Path, server_host: str, alias: str, pattern: str
 ) -> None:
-    config = tmp_path / "config.toml"
-    config.write_text(
-        'data_dir = "data"\nhost = "localhost"\nport = 0\n'
-        'allowed_hosts = ["localhost:*"]\n[projects.demo]\n',
-        encoding="utf-8",
-    )
-    async with Client(proxy_params(config), mode="auto") as client:
-        assert tool_json(await client.call_tool("snapshot", {}))["data"]["project"] == "demo"
-    assert len(serving_lines(data_dir)) == 1
+    shared = f'data_dir = "data"\nport = 0\nallowed_hosts = ["{pattern}"]\n[projects.demo]\n'
+    server_path = tmp_path / "serve.toml"
+    server_path.write_text(f'host = "{server_host}"\n{shared}', encoding="utf-8")
+    client_path = tmp_path / "connect.toml"
+    client_path.write_text(f'host = "{alias}"\n{shared}', encoding="utf-8")
+    server = start_plotroom("serve", "--config", str(server_path))
+    try:
+        server.wait_for_log("serving")
+        async with Client(proxy_params(client_path), mode="auto") as client:
+            assert tool_json(await client.call_tool("snapshot", {}))["data"]["project"] == "demo"
+        assert not (data_dir / LOG_FILE_NAME).exists()
+    finally:
+        server.stop()
 
 
 # --- reading the port back ------------------------------------------------------------------
@@ -602,15 +722,23 @@ def test_lock_owner_checks_pid_liveness(
     assert lock_owner(tmp_path) == (pid if error is PermissionError else None)
 
 
-async def test_a_fixed_port_is_the_configs_own_url_whatever_the_directory_holds(
-    tmp_path: Path, held_port: int
-) -> None:
+async def test_a_fixed_port_requires_a_matching_publication(tmp_path: Path, held_port: int) -> None:
     config = load_config(write_config(tmp_path, port=held_port), {})
-    assert await current_url(config) == f"http://127.0.0.1:{held_port}/mcp"
-    assert await current_url(config, require_published=True) is None
-    write_port(config.data_dir, held_port + 1)  # a file nobody owns
-    assert await current_url(config) == f"http://127.0.0.1:{held_port}/mcp"
-    assert await current_url(config, require_published=True) is None
+    assert await DaemonLocation(config).current_endpoint() is None
+    with DataDirLock(config.data_dir):
+        path = prepare_local_socket(config.data_dir)
+        location = DaemonLocation(config)
+        write_port(
+            config.data_dir,
+            65535 if held_port != 65535 else 65534,
+            host="127.0.0.1",
+            local_socket=path,
+        )
+        assert await location.current_endpoint() is None
+        write_port(config.data_dir, held_port, host="127.0.0.1", local_socket=path)
+        assert await location.current_endpoint() == LocalEndpoint(
+            config.url, f"127.0.0.1:{held_port}", str(path), os.getpid()
+        )
 
 
 async def test_a_local_bearer_uses_the_published_host_even_with_a_different_config_host(
@@ -618,13 +746,17 @@ async def test_a_local_bearer_uses_the_published_host_even_with_a_different_conf
 ) -> None:
     config = replace(load_config(write_config(tmp_path, port=41000), {}), host="127.0.0.2")
     with DataDirLock(config.data_dir):
-        write_port(config.data_dir, config.port)
-        assert await current_url(config) == "http://127.0.0.2:41000/mcp"
-        assert await current_url(config, require_published=True) is None
-
+        path = prepare_local_socket(config.data_dir)
+        location = DaemonLocation(config)
         write_port(config.data_dir, config.port, host="127.0.0.1")
-        assert await current_url(config, require_published=True) == "http://127.0.0.1:41000/mcp"
-    assert await current_url(config, require_published=True) is None
+        assert await location.current_endpoint() is None
+        assert await location.requires_upgrade()
+
+        write_port(config.data_dir, config.port, host="127.0.0.1", local_socket=path)
+        assert await location.current_endpoint() == LocalEndpoint(
+            "http://127.0.0.1:41000/mcp", "127.0.0.1:41000", str(path), os.getpid()
+        )
+    assert await location.current_endpoint() is None
 
 
 async def test_a_local_bearer_is_not_sent_to_a_foreign_listener_on_a_fixed_port(
@@ -648,19 +780,109 @@ async def test_a_local_bearer_is_not_sent_to_a_foreign_listener_on_a_fixed_port(
     assert requests == []
 
 
+async def test_a_running_pre_upgrade_daemon_requires_restart_without_sending_a_probe(
+    tmp_path: Path, data_dir: Path
+) -> None:
+    requests: list[bytes] = []
+
+    async def respond(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        requests.append(await reader.read(4096))
+        writer.close()
+        await writer.wait_closed()
+
+    foreign = await asyncio.start_server(respond, "127.0.0.1", 0)
+    async with foreign, asyncio.timeout(WAIT):
+        port = int(foreign.sockets[0].getsockname()[1])
+        config = write_config(tmp_path, port=port)
+        TokenRegistry(data_dir).issue("demo", "orchestrator")
+        with DataDirLock(data_dir):
+            write_port(data_dir, port, host="127.0.0.1")
+            proxy = await spawn_proxy("--config", str(config))
+            assert "restart the running plotroom serve" in await first_error(proxy, "modern")
+    assert requests == []
+    assert not (data_dir / LOG_FILE_NAME).exists()
+
+
 async def test_a_port_of_zero_is_the_published_port_only_while_its_pid_owns_the_lock(
     tmp_path: Path,
 ) -> None:
     config = load_config(write_config(tmp_path), {})
-    assert await current_url(config) is None, "nothing published"
-    write_port(config.data_dir, 41000)  # names this process
-    assert await current_url(config) is None, "this process does not hold the lock yet"
+    config.data_dir.mkdir()
+    location = DaemonLocation(config)
+    assert await location.current_endpoint() is None, "nothing published"
+    path = prepare_local_socket(config.data_dir)
+    write_port(config.data_dir, 41000, host="127.0.0.1", local_socket=path)
+    assert await location.current_endpoint() is None, "this process does not hold the lock yet"
     with DataDirLock(config.data_dir):
-        assert await current_url(config) == "http://127.0.0.1:41000/mcp"
-        (config.data_dir / PORT_FILE_NAME).write_text('{"pid": 1, "port": 41000}', "utf-8")
-        assert await current_url(config) is None, "the file names a pid that is not the owner"
-    write_port(config.data_dir, 41000)
-    assert await current_url(config) is None, "the lock is free again"
+        endpoint = await location.current_endpoint()
+        assert endpoint == LocalEndpoint(
+            "http://127.0.0.1:41000/mcp", "127.0.0.1:41000", str(path), os.getpid()
+        )
+        fields = {
+            "pid": os.getppid(),
+            "port": 41000,
+            "host": "127.0.0.1",
+            "local_socket": str(path),
+        }
+        (config.data_dir / PORT_FILE_NAME).write_text(json.dumps(fields), "utf-8")
+        assert await location.current_endpoint() is None, (
+            "the file names a pid that is not the owner"
+        )
+        write_port(config.data_dir, 41000, host="127.0.0.1", local_socket=path)
+    assert await location.current_endpoint() is None, "the lock is free again"
+
+
+async def test_a_replaced_data_directory_is_never_used_by_the_pinned_proxy(tmp_path: Path) -> None:
+    path = write_config(tmp_path)
+    config = load_config(path, {})
+    config.data_dir.mkdir()
+    location = DaemonLocation(config)
+    config.data_dir.rename(tmp_path / "previous")
+    with DataDirLock(config.data_dir):
+        socket_path = prepare_local_socket(config.data_dir)
+        write_port(config.data_dir, 41000, host="127.0.0.1", local_socket=socket_path)
+        assert await location.current_endpoint() is None
+        with pytest.raises(UpstreamStartError, match="canonical plotroom data directory changed"):
+            await ensure_daemon(location, path, env=child_env())
+    assert not (config.data_dir / LOG_FILE_NAME).exists()
+
+
+async def test_the_child_refuses_a_directory_replaced_during_launch(
+    tmp_path: Path, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = write_config(tmp_path)
+    location = DaemonLocation(load_config(config_path, {}))
+
+    def replace_then_start(
+        command: Sequence[str], env: Mapping[str, str], cwd: Path, log_path: Path
+    ) -> subprocess.Popen[bytes]:
+        cwd.rename(tmp_path / "previous")
+        cwd.mkdir()
+        return start_daemon(command, env, cwd, log_path)
+
+    monkeypatch.setattr("plotroom.app.daemon_start.start_daemon", replace_then_start)
+    with pytest.raises(UpstreamStartError, match="canonical plotroom data directory changed"):
+        await ensure_daemon(location, config_path, env=child_env(), wait=WAIT)
+    assert not (data_dir / PORT_FILE_NAME).exists()
+    assert not (data_dir / LOCK_FILE_NAME).exists()
+
+
+async def test_a_published_socket_in_a_nonprivate_directory_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_config(write_config(tmp_path), {})
+    socket_dir = tmp_path / "shared"
+    socket_dir.mkdir(mode=0o755)
+    socket_dir.chmod(0o755)
+    path = socket_dir / "daemon.sock"
+
+    def fixture_socket(_identity: DirectoryIdentity) -> Path:
+        return path
+
+    monkeypatch.setattr("plotroom.app.daemon_start.local_socket_path", fixture_socket)
+    with DataDirLock(config.data_dir):
+        write_port(config.data_dir, 41000, host="127.0.0.1", local_socket=path)
+        assert await DaemonLocation(config).current_endpoint() is None
 
 
 @pytest.mark.parametrize("pid", [10**12, 2**63, 2**200])
@@ -670,7 +892,7 @@ async def test_a_port_file_with_an_impossible_pid_is_ignored_not_fatal(
     config = load_config(write_config(tmp_path), {})
     (config.data_dir).mkdir(parents=True)
     (config.data_dir / PORT_FILE_NAME).write_text(f'{{"pid": {pid}, "port": 41000}}', "utf-8")
-    assert await current_url(config) is None
+    assert await DaemonLocation(config).current_endpoint() is None
 
 
 # --- refusals ------------------------------------------------------------------------------
@@ -755,7 +977,9 @@ async def test_a_start_that_lost_the_lock_to_a_daemon_still_shutting_down_starts
     config = load_config(path, {})
     old_owner = DataDirLock(data_dir)
     old_owner.acquire()
-    starting = asyncio.ensure_future(ensure_daemon(config, path, env=child_env(), wait=WAIT))
+    starting = asyncio.ensure_future(
+        ensure_daemon(DaemonLocation(config), path, env=child_env(), wait=WAIT)
+    )
     try:
         log = data_dir / LOG_FILE_NAME
         async with asyncio.timeout(WAIT):

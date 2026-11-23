@@ -9,10 +9,11 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Sequence
+from functools import partial
 from pathlib import Path
 
-from plotroom.app.config import Config, ConfigError, load_config
+from plotroom.app.config import ConfigError, load_config
 from plotroom.app.lock import LockError
 from plotroom.app.logging import setup_logging
 from plotroom.app.tokens import TokenError, TokenRegistry, select_local_token
@@ -118,6 +119,7 @@ def _token(args: argparse.Namespace) -> int:
 
 
 def _serve(config_path: Path | None, log_file: Path | None) -> int:
+    from plotroom.app.portfile import START_DIRECTORY_ENV
     from plotroom.app.serve import Daemon
 
     # The limits come from the config, so it is read before logging is set up; until then, and when
@@ -135,7 +137,11 @@ def _serve(config_path: Path | None, log_file: Path | None) -> int:
             log.error("cannot open the log file", extra={"path": str(log_file), "reason": str(exc)})
             return EXIT_FAILURE
     try:
-        asyncio.run(Daemon(config).run_as_service())
+        daemon = Daemon(config, expected_directory=os.environ.get(START_DIRECTORY_ENV))
+        asyncio.run(daemon.run_as_service())
+    except ConfigError as exc:
+        log.error("invalid configuration", extra={"reason": str(exc)})
+        return EXIT_CONFIG
     except LockError as exc:
         # The winner owns the log file: a loser must not roll or delete it through its own handler.
         setup_logging(sys.stderr)
@@ -152,48 +158,38 @@ def _serve(config_path: Path | None, log_file: Path | None) -> int:
 def _connect(
     url: str | None, config_path: Path | None, start_timeout: float, token_id: str | None
 ) -> int:
-    from plotroom.adapters.mcp.proxy import EndpointError, StdioProxy
+    from plotroom.adapters.mcp.proxy import EndpointError, StdioProxy, UpstreamStartError
+    from plotroom.app.daemon_start import DaemonLocation, ensure_daemon
 
-    target = url or os.environ.get("PLOTROOM_URL")
-    bearer = os.environ.get("PLOTROOM_TOKEN")
-    token_id = token_id or os.environ.get("PLOTROOM_TOKEN_ID")
-    ensure: Callable[[], Awaitable[str | None]] | None = None
-    published: Callable[[], Awaitable[str | None]] | None = None
-    host_alias: str | None = None
+    env = os.environ.copy()
+    target = url or env.get("PLOTROOM_URL")
+    bearer = env.get("PLOTROOM_TOKEN")
+    token_id = token_id or env.get("PLOTROOM_TOKEN_ID")
     try:
         if token_id is not None and (target is not None or bearer is not None):
             raise TokenError("--token-id is for locally stored credentials and config-derived URLs")
-        if target is None:
-            config = load_config(config_path, os.environ, require_projects=False)
-            target = config.url
+        if target is not None:
+            proxy = StdioProxy(target, bearer=bearer)
+        else:
+            if config_path is not None:
+                config_path = config_path.resolve()
+            elif path := env.get("PLOTROOM_CONFIG"):
+                env["PLOTROOM_CONFIG"] = str(Path(path).expanduser().resolve())
+            config = load_config(config_path, env, require_projects=False)
+            location = DaemonLocation(config)
             if bearer is None:
                 bearer = select_local_token(config.data_dir, token_id)
-            ensure, published = _starter(config, config_path, start_timeout, bearer is not None)
-            if bearer is not None and config.host.lower() == "localhost":
-                # Connect to the published socket while preserving an explicitly allowed Host.
-                host_alias = "localhost"
-        proxy = StdioProxy(
-            target, ensure=ensure, bearer=bearer, current_url=published, host_alias=host_alias
-        )
-    except (ConfigError, EndpointError, TokenError, OSError) as exc:
+                if bearer is not None and location.identity is None:
+                    raise TokenError("the local token's data directory no longer exists")
+            proxy = StdioProxy(
+                config.url,
+                ensure=partial(ensure_daemon, location, config_path, env=env, wait=start_timeout),
+                bearer=bearer,
+                current_endpoint=location.current_endpoint,
+            )
+    except (ConfigError, EndpointError, TokenError, UpstreamStartError, OSError) as exc:
         log.error("invalid connection configuration", extra={"reason": str(exc)})
         return EXIT_CONFIG
     with contextlib.suppress(KeyboardInterrupt, BrokenPipeError):
         asyncio.run(proxy.run())
     return 0
-
-
-def _starter(
-    config: Config, config_path: Path | None, timeout: float, credentialed: bool
-) -> tuple[Callable[[], Awaitable[str | None]], Callable[[], Awaitable[str | None]] | None]:
-    from plotroom.app.daemon_start import current_url, ensure_daemon
-
-    async def start() -> str | None:
-        return await ensure_daemon(
-            config, config_path, env=os.environ, wait=timeout, require_published=credentialed
-        )
-
-    async def published_url() -> str | None:
-        return await current_url(config, require_published=True)
-
-    return start, published_url if credentialed else None

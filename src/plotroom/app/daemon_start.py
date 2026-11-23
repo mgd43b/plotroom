@@ -1,9 +1,8 @@
 """Start ``plotroom serve`` on demand for ``plotroom connect --stdio`` (AD-3).
 
-Readiness comes from an MCP ping result or HTTP 401. The daemon publishes its listener address in
-the data directory's port file, which is trusted while the lock is held by the pid it names.
-Port 0 and credentialed connections use that publication. A second ``serve`` exits with the lock
-code, and the client that started it waits for the lock's owner to answer.
+The daemon publishes its listeners in the data directory. Local readiness requires HTTP 401 on a
+Unix connection to the verified lock owner. A second ``serve`` exits with the lock code, and the
+client that started it waits for the lock's owner to answer.
 """
 
 from __future__ import annotations
@@ -24,11 +23,21 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from plotroom.adapters.mcp.proxy import UpstreamStartError
+from plotroom.adapters.mcp.proxy import LocalEndpoint, UpstreamStartError
+from plotroom.adapters.mcp.server import allowed_host
 from plotroom.app.cli import DEFAULT_START_TIMEOUT, EXIT_LOCKED
 from plotroom.app.config import Config
 from plotroom.app.lock import LOCK_FILE_NAME, DataDirLock, LockError
-from plotroom.app.portfile import read_listener
+from plotroom.app.portfile import (
+    START_DIRECTORY_ENV,
+    DirectoryIdentity,
+    PublishedListener,
+    directory_identity,
+    directory_key,
+    local_socket_path,
+    private_socket_directory,
+    read_listener,
+)
 
 log = logging.getLogger("plotroom.daemon_start")
 
@@ -95,56 +104,18 @@ def start_daemon(
         )
 
 
-PROBE_ID = "probe"
-
-
-def answers_ping(body: str) -> bool:
-    """Whether ``body`` (JSON, or an event stream) holds the result for the probe's ping."""
-    candidates = [line[5:].strip() for line in body.splitlines() if line.startswith("data:")]
-    for text in candidates or [body]:
-        try:
-            decoded: Any = json.loads(text)
-        except ValueError:
-            continue
-        if isinstance(decoded, dict):
-            reply = cast("dict[str, Any]", decoded)
-            if reply.get("jsonrpc") == "2.0" and reply.get("id") == PROBE_ID and "result" in reply:
-                return True
-    return False
-
-
-async def speaks_mcp(
-    url: str, *, within: float = _PROBE_TIMEOUT, host_alias: str | None = None
-) -> bool:
-    """Whether the endpoint answers a JSON-RPC ping or requires authentication.
-
-    A bare TCP connect would take any program on the port for the daemon. ``within`` bounds the
-    whole probe, not each read.
-    """
+async def endpoint_ready(endpoint: LocalEndpoint, *, within: float = _PROBE_TIMEOUT) -> bool:
+    """The verified peer accepts the configured Host and requires authentication."""
     if within <= 0:
         return False
-    ping = {"jsonrpc": "2.0", "id": PROBE_ID, "method": "ping"}
-    headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
-    if host_alias is not None:
-        headers["host"] = f"{host_alias}:{urlsplit(url).port}"
-    body = b""
     try:
-        async with asyncio.timeout(min(within, _PROBE_TIMEOUT)):
-            async with (
-                httpx.AsyncClient(trust_env=False) as http,
-                http.stream("POST", url, json=ping, headers=headers) as response,
-            ):
-                if response.status_code == 401:
-                    return True
-                if not response.is_success:
-                    return False
-                async for chunk in response.aiter_bytes():
-                    body += chunk
-                    if answers_ping(body.decode("utf-8", errors="replace")) or len(body) > 8192:
-                        break
+        async with (
+            asyncio.timeout(min(within, _PROBE_TIMEOUT)),
+            endpoint.stream("HEAD") as response,
+        ):
+            return response.status_code == 401
     except httpx.HTTPError, OSError, TimeoutError:
         return False
-    return answers_ping(body.decode("utf-8", errors="replace"))
 
 
 def logged_reason(log_path: Path, since: int) -> str | None:
@@ -216,26 +187,6 @@ def _lock_still_held_by(data_dir: Path, pid: int) -> bool:
     return holds_lock(data_dir) and lock_owner(data_dir) == pid
 
 
-def _current_url(config: Config, require_published: bool) -> str | None:
-    if config.port != 0 and not require_published:
-        return config.url
-    published = read_listener(config.data_dir)
-    if published is None:
-        return None
-    pid, port, host = published.pid, published.port, published.host
-    if config.port not in (0, port):
-        return None
-    if require_published and host is None:
-        return None
-    # A killed daemon leaves both files behind. Skip the kernel check unless their PIDs match
-    # and the process is live. The PID files alone cannot establish ownership of the listener.
-    if lock_owner(config.data_dir) != pid or not _lock_still_held_by(config.data_dir, pid):
-        return None
-    return replace(
-        config, host=host if require_published and host is not None else config.host, port=port
-    ).url
-
-
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -246,51 +197,122 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-async def current_url(config: Config, *, require_published: bool = False) -> str | None:
-    """Where the daemon for ``config`` is meant to be listening, or ``None`` when that is unknown.
+class DaemonLocation:
+    """One canonical data directory shared by token selection, startup, and listener discovery."""
 
-    Credentialed clients require the lock owner's published address. Clients with port 0
-    without credentials may use a legacy port-only publication.
-    """
-    return await asyncio.to_thread(_current_url, config, require_published)
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.identity = self._identify()
+
+    def _identify(self) -> DirectoryIdentity | None:
+        directory = self.config.data_dir
+        if directory.resolve() != directory:
+            raise UpstreamStartError("the canonical plotroom data directory changed")
+        try:
+            return directory_identity(directory)
+        except FileNotFoundError:
+            return None
+
+    def prepare(self) -> DirectoryIdentity:
+        current = self._identify()
+        if self.identity is None:
+            if current is None:
+                self.config.data_dir.mkdir(parents=True, exist_ok=True)
+                current = self._identify()
+            self.identity = current
+        if current is None or current != self.identity:
+            raise UpstreamStartError("the canonical plotroom data directory changed")
+        return current
+
+    def _publication(self) -> PublishedListener | None:
+        directory = self.config.data_dir
+        if self.identity is None or self._identify() != self.identity:
+            return None
+        published = read_listener(directory)
+        if published is None or self.config.port not in (0, published.port):
+            return None
+        # Both records may survive a crash. Confirm the recorded PID and the kernel lock, then
+        # make sure publication still comes from the directory selected by the proxy.
+        if lock_owner(directory) != published.pid or not _lock_still_held_by(
+            directory, published.pid
+        ):
+            return None
+        return published if self._identify() == self.identity else None
+
+    def _current_endpoint(self) -> LocalEndpoint | None:
+        published = self._publication()
+        if published is None or published.host is None or self.identity is None:
+            return None
+        socket_path = local_socket_path(self.identity)
+        if published.local_socket != str(socket_path) or not private_socket_directory(
+            socket_path.parent
+        ):
+            return None
+        config = replace(self.config, port=published.port)
+        url = replace(config, host=published.host).url
+        published_host = urlsplit(url).netloc
+        alias = urlsplit(config.url).netloc.lower()
+        candidates = (
+            alias,
+            published_host,
+            alias.rsplit(":", 1)[0],
+            published_host.rsplit(":", 1)[0],
+        )
+        host = next(
+            (name for name in candidates if allowed_host(name, config.allowed_hosts)),
+            published_host,
+        )
+        return LocalEndpoint(url, host, str(socket_path), published.pid)
+
+    async def current_endpoint(self) -> LocalEndpoint | None:
+        return await asyncio.to_thread(self._current_endpoint)
+
+    async def requires_upgrade(self) -> bool:
+        published = await asyncio.to_thread(self._publication)
+        return published is not None and published.local_socket is None
 
 
-async def _ready_url(config: Config, require_published: bool, within: float) -> str | None:
-    url = await current_url(config, require_published=require_published)
-    host_alias = "localhost" if require_published and config.host.lower() == "localhost" else None
-    if url is None or not await speaks_mcp(url, within=within, host_alias=host_alias):
+async def _ready_endpoint(location: DaemonLocation, within: float) -> LocalEndpoint | None:
+    endpoint = await location.current_endpoint()
+    if endpoint is None or not await endpoint_ready(endpoint, within=within):
         return None
-    if require_published and url != await current_url(config, require_published=True):
-        return None  # the daemon may have relinquished the port during the probe
-    return url
+    return endpoint if endpoint == await location.current_endpoint() else None
 
 
 async def ensure_daemon(
-    config: Config,
+    location: DaemonLocation,
     config_path: Path | None,
     *,
     env: Mapping[str, str],
     wait: float = DEFAULT_START_TIMEOUT,
     command: Sequence[str] | None = None,
-    require_published: bool = False,
-) -> str:
-    """Return the URL where a server answers, starting ``plotroom serve`` if needed.
-
-    A fixed port without credentials uses the config URL. Other requests use the publication.
-    Raises ``UpstreamStartError`` with a reason fit for the client when it cannot.
-    """
-    url = await _ready_url(config, require_published, _PROBE_TIMEOUT)
-    if url is not None:
-        return url
+) -> LocalEndpoint:
+    """Find or start the daemon for the pinned data directory and verify its ready listener."""
+    identity = await asyncio.to_thread(location.prepare)
+    endpoint = await _ready_endpoint(location, _PROBE_TIMEOUT)
+    if endpoint is not None:
+        return endpoint
+    if await location.requires_upgrade():
+        raise UpstreamStartError(
+            "restart the running plotroom serve to enable verified local stdio"
+        )
+    config = location.config
     log_path = config.data_dir / LOG_FILE_NAME
     argv = list(command) if command is not None else serve_command(config_path, log_path)
+    # The child rereads the config from its own cwd. Pin the instance even if the file changes.
+    child_env = {
+        **daemon_env(env),
+        "PLOTROOM_DATA_DIR": str(config.data_dir),
+        START_DIRECTORY_ENV: directory_key(identity),
+    }
     deadline = time.monotonic() + wait
     reason: str | None = None
     while True:
+        await asyncio.to_thread(location.prepare)
         offset = log_path.stat().st_size if log_path.exists() else 0
         try:
             child = await asyncio.to_thread(
-                start_daemon, argv, daemon_env(env), config.data_dir, log_path
+                start_daemon, argv, child_env, config.data_dir, log_path
             )
         except OSError as exc:
             raise UpstreamStartError(f"cannot start plotroom serve: {exc.strerror or exc}") from exc
@@ -301,9 +323,9 @@ async def ensure_daemon(
         # Wait on this child. When it loses the lock it waits for the winner to listen, and starts
         # again only if that winner went away (a daemon still shutting down keeps the lock a while).
         while (remaining := deadline - time.monotonic()) > 0:
-            url = await _ready_url(config, require_published, remaining)
-            if url is not None:
-                return url
+            endpoint = await _ready_endpoint(location, remaining)
+            if endpoint is not None:
+                return endpoint
             code = child.poll()
             if code is not None:
                 if not exited:  # read the log once per child, off the event loop
@@ -318,7 +340,12 @@ async def ensure_daemon(
         else:
             break
     owner = await asyncio.to_thread(lock_owner, config.data_dir)
-    url = await current_url(config, require_published=require_published)
+    endpoint = await location.current_endpoint()
+    if await location.requires_upgrade():
+        raise UpstreamStartError(
+            "restart the running plotroom serve to enable verified local stdio"
+        )
+    url = endpoint.url if endpoint is not None else None
     if (
         owner is not None
         and owner != child.pid

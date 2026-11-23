@@ -80,7 +80,7 @@ def load_config(
     may be absent, which leaves environment and defaults to decide.
     """
     explicit = path is not None or "PLOTROOM_CONFIG" in env
-    file_path = path if path is not None else default_config_path(env)
+    file_path = (path if path is not None else default_config_path(env)).resolve()
     raw: dict[str, Any] = {}
     base = Path.cwd()
     if file_path.exists():
@@ -88,7 +88,7 @@ def load_config(
             raw = tomllib.loads(file_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError(f"cannot read config {file_path}: {exc}") from exc
-        base = file_path.resolve().parent
+        base = file_path.parent
     elif explicit:
         raise ConfigError(f"config file {file_path} does not exist")
 
@@ -96,7 +96,7 @@ def load_config(
     if unknown:
         raise ConfigError(f"unknown config keys in {file_path}: {', '.join(unknown)}")
 
-    data_dir = _data_dir(env.get("PLOTROOM_DATA_DIR"), raw.get("data_dir"), base)
+    data_dir = _data_dir(env.get("PLOTROOM_DATA_DIR"), raw.get("data_dir"), base).resolve()
     host = _string("host", env.get("PLOTROOM_HOST", raw.get("host", DEFAULT_HOST)))
     port = _port(env.get("PLOTROOM_PORT", raw.get("port", DEFAULT_PORT)))
     allowed_hosts = _string_list(
@@ -136,7 +136,7 @@ def load_config(
 def _data_dir(env_value: str | None, file_value: Any, base: Path) -> Path:
     """The environment's path is relative to the process; the file's is relative to the file."""
     if env_value is not None:
-        return Path(_string("PLOTROOM_DATA_DIR", env_value)).expanduser().resolve()
+        return Path(_string("PLOTROOM_DATA_DIR", env_value)).expanduser()
     if file_value is None:
         return default_data_dir()
     candidate = Path(_string("data_dir", file_value)).expanduser()
