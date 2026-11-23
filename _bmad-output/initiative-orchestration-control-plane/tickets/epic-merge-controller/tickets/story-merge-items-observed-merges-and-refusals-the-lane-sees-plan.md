@@ -57,6 +57,8 @@ Preserve guard order, the deploy freeze, exact head and main evidence, and durab
 
 - An unread skip label could let intermediate poll facts create refusals. Live processing now waits for the skip decision.
 
+- The authoritative read now records provider backoff on rate limits and refuses overflowing provider timestamps.
+
 ## Verification
 
 - `uv run python -m pytest -q tests` — acceptance and regression suite passes

@@ -112,7 +112,18 @@ class GitHubDetailPoller:
                 httpx.AsyncClient(timeout=15, follow_redirects=False, trust_env=False) as client,
             ):
                 return await self.read_gate_snapshot(client, snapshot)
-        except GitHubUnavailable, httpx.RequestError, TimeoutError, ValueError, KeyError, TypeError:
+        except GitHubRateLimited as exc:
+            await self.record_rate_limit(exc)
+            return None
+        except (
+            GitHubUnavailable,
+            httpx.RequestError,
+            TimeoutError,
+            ValueError,
+            KeyError,
+            TypeError,
+            OverflowError,
+        ):
             return None
 
     async def read_gate_snapshot(
