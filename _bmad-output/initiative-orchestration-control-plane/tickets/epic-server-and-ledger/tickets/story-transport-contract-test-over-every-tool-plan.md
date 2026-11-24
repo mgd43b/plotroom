@@ -3,7 +3,7 @@ title: 'Transport contract test over every tool'
 type: feature
 ticket: 15
 created: '2026-11-22'
-status: in-progress
+status: built
 baseline_revision: '58f90f7bdc88ea5284ba235793294632d485529d'
 route: full
 route_source: auto
