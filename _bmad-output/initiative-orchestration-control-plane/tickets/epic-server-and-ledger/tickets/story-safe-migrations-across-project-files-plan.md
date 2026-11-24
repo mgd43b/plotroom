@@ -53,6 +53,9 @@ continues for other projects. The schema stays at revision 0024.
 - Medium, fixed. Handle project-specific database failures during ledger initialization and
   close partial project resources. The fixture includes an intact SQLite file stamped at head
   whose application schema is incomplete.
+- High, fixed. Isolate value-decoding errors from malformed stored trigger data.
+- Medium, fixed. Read a real snapshot before starting a project's runtime so missing ledger
+  state cannot produce false readiness. Both application-data regressions passed locally.
 - Eight focused probe, migration, backup, and shutdown tests passed after these changes.
 
 ## Verification

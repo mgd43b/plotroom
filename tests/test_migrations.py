@@ -600,6 +600,42 @@ async def test_daemon_upgrades_and_backs_up_two_projects_while_isolating_a_corru
     assert corrupt.read_bytes() == garbage
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "DELETE FROM project_seq",
+        "INSERT INTO triggers (id, predicate, action_kind, action_payload, state, bindings, created_seq) "
+        "VALUES ('fixture', '{', 'fixture', '{}', 'open', '{}', 1)",
+    ],
+    ids=["missing-cursor", "malformed-trigger"],
+)
+async def test_projects_with_invalid_stored_ledger_state_stay_unavailable(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    config = make_config(tmp_path, "problem", "healthy")
+    config.data_dir.mkdir()
+    store = SqliteStore("problem", config.data_dir)
+    try:
+        await store.migrate()
+    finally:
+        await store.close()
+    with closing(sqlite3.connect(store.path)) as db, db:
+        db.execute(statement)
+
+    daemon = Daemon(config)
+    task, port = await run_daemon(daemon)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        async with httpx.AsyncClient(trust_env=False) as http:
+            assert (await http.get(f"{base}/readyz/problem")).status_code == 503
+            assert (await http.get(f"{base}/readyz/healthy")).status_code == 200
+        async with authenticated_client(f"{base}/mcp", bearer(config, "healthy")) as client:
+            assert tool_json(await client.call_tool("snapshot", {}))["ok"]
+    finally:
+        await stop(daemon, task)
+
+
 async def test_backup_failure_prevents_migration(tmp_path: Path) -> None:
     old = alembic_config(_migrations_at(tmp_path / "prior", "0023"))
     store = SqliteStore("demo", tmp_path)

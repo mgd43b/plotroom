@@ -123,9 +123,21 @@ docker compose -p plotroom-local run --rm --no-deps -T plotroom \
 
 Store the returned token privately. Configure an MCP HTTP client with
 `http://127.0.0.1:8765/mcp` and send the token as a bearer. Call `snapshot` to
-check the project. For a restart check, record a disposable decision with
-`decide`, restart the service, and use the same bearer to call `snapshot` and
-`decisions`. The decision and its event are stored in the volume.
+check the project. In a disposable instance, call `decide` with these arguments.
+
+```json
+{
+  "who": "Fixture operator",
+  "exact_words": "Compose restart fixture",
+  "where_ref": {"kind": "chat", "ref": "compose-fixture"},
+  "governs": [],
+  "settles": [],
+  "request_id": "compose-fixture-one"
+}
+```
+
+Restart the service, then use the same bearer to call `snapshot` and `decisions`.
+The project and decision should still be present. The event is stored in the volume.
 
 ```sh
 docker compose -p plotroom-local restart plotroom

@@ -383,7 +383,13 @@ class Daemon:
             self._projects[project_id] = project  # registered first so a failure closes it
             try:
                 await self._open_project(project_id, project, tokens)
-            except (ProjectMigrationError, SQLAlchemyError, sqlite3.Error, OSError) as exc:
+            except (
+                ProjectMigrationError,
+                SQLAlchemyError,
+                sqlite3.Error,
+                OSError,
+                ValueError,
+            ) as exc:
                 reason = (
                     str(exc)
                     if isinstance(exc, ProjectMigrationError)
@@ -453,6 +459,8 @@ class Daemon:
             await project.ledger.run("system", partial(seed_routes, routes=route_seeds))
         await project.ledger.initialize_overlaps()
         await project.ledger.clean_disabled_merge_items()
+        # A valid SQLite file can still be missing required application records.
+        await project.ledger.snapshot_summary("orchestrator")
         relay = self._config.switchboards.get(project_id)
         switchboard = (
             Switchboard(project.ledger, relay.board, relay.command, relay.senders)
