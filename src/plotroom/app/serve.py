@@ -61,7 +61,7 @@ from plotroom.app.sqlite_floor import floor_problem
 from plotroom.app.tokens import TokenRegistry
 from plotroom.core.actions import SWITCHBOARD_SEND
 from plotroom.core.ask_checks import DEFAULT_ASK_STALE_DAYS
-from plotroom.core.catalog import build_catalog
+from plotroom.core.catalog import build_catalog, register_bridge
 from plotroom.core.events import LedgerError
 from plotroom.core.ledger import Ledger
 from plotroom.core.routing import seed_routes
@@ -431,18 +431,21 @@ class Daemon:
                 project.store.embedding_index(embedder.model),
                 HttpEmbedder(project.embedding_client, embedder.url, embedder.model),
             )
+        catalog = build_catalog(
+            workers,
+            github_repository=repository,
+            delivery_routes=routes,
+            image_jobs=github.image_jobs if github is not None else (),
+            lane_idle_minutes=self._config.lane_idle_minutes,
+            human_login=human_login,
+        )
+        if relay is not None and bridged:
+            register_bridge(
+                catalog, relay.board, relay.senders, routes or {}, self._config.action_attempts
+            )
         project.ledger = Ledger(
             project.store,
-            build_catalog(
-                workers,
-                github_repository=repository,
-                delivery_routes=routes,
-                image_jobs=github.image_jobs if github is not None else (),
-                lane_idle_minutes=self._config.lane_idle_minutes,
-                human_login=human_login,
-                bridge_board=relay.board if relay is not None and bridged else None,
-                bridge_senders=relay.senders if relay is not None and bridged else None,
-            ),
+            catalog,
             self._clock,
             watcher_roles=self._config.watchers.get(project_id, ()),
             wait_cap=self._config.wait_cap,

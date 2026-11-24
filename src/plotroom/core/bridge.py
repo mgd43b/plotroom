@@ -50,20 +50,33 @@ async def receive_bridge(
 
 
 async def lease_bridge(
-    uow: UnitOfWork, _args: dict[str, Any], *, routes: Mapping[str, DeliveryRoute]
+    uow: UnitOfWork,
+    args: dict[str, Any],
+    *,
+    routes: Mapping[str, DeliveryRoute],
+    board: str,
+    action_attempts: int,
 ) -> dict[str, Any]:
+    if args["board"] != board:
+        raise LedgerError("forbidden", "the bridge is scoped to another board")
     workers = tuple(routes)
     now = uow.now()
     while (action := await uow.bridge_action(workers, format_time(now))) is not None:
+        if action.attempts >= action_attempts:
+            await finish_action(uow, action, "failed")
+            continue
         if action.kind == SWITCHBOARD_SEND:
             address, body = action.payload["to"], action.payload["body"]
         else:
             worker = action.payload["worker"]
             if action.key.startswith(f"{BUDGET_ITEM.name}:"):
-                lane = await uow.worker_lane(worker)
-                if lane is None or lane.id != action.payload["lane"]:
-                    await finish_action(uow, await record_attempt(uow, action), "done")
-                    continue
+                await finish_action(
+                    uow,
+                    action,
+                    "failed",
+                    failure_reason="the remote bridge cannot fence this send to its original lane",
+                )
+                continue
             address, body = routes[worker].destination, action.payload["text"]
         act_id = f"bridge_{uuid4()}"
         expires = format_time(now + LEASE_DURATION)

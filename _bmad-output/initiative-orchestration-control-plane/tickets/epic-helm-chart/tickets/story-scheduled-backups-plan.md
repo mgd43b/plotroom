@@ -27,3 +27,7 @@ write to a separate mounted volume. Retain the configured number of completed co
 
 The chart uses a read-only fixture token Secret for the scheduler. Only the server mounts either
 PVC. The actual kind CronJob smoke and focused local backup tests passed.
+
+## Independent review dispositions
+
+Retain the backup PVC when disabling the scheduler. A Job supplies its expected project and checks the result, so a misplaced bearer cannot make a run appear complete.

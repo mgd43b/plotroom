@@ -855,14 +855,14 @@ def build_app(
 
         @server.tool()
         async def bridge_lease(  # pyright: ignore[reportUnusedFunction]
-            ctx: Context[Any, Request], request_id: str, consumer_id: str
+            ctx: Context[Any, Request], request_id: str, consumer_id: str, board: str
         ) -> dict[str, Any]:
             """Claim the next pending Switchboard delivery for this bridge."""
             try:
                 scoped = lease_request_id(consumer_id, request_id)
             except LedgerError as exc:
                 return err(exc.code, exc.message)
-            return await execute_command(ctx, "bridge_lease", scoped, {})
+            return await execute_command(ctx, "bridge_lease", f"{board}:{scoped}", {"board": board})
 
         @server.tool()
         async def bridge_done(  # pyright: ignore[reportUnusedFunction]
@@ -903,6 +903,9 @@ def build_app(
         if caller.ledger is None:
             return JSONResponse({"status": "unavailable"}, status_code=503)
         project = caller.identity.project_id
+        expected = request.query_params.get("project")
+        if expected is not None and expected != project:
+            return Response(status_code=403)
         try:
             name = await backup(project)
         except LedgerError:

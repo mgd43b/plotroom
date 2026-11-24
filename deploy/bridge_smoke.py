@@ -201,6 +201,10 @@ def smoke(root: Path, name: str, tag: str) -> None:
             return bridge
 
         first = launch("auto")
+        marker(state, "registrations")
+        time.sleep(6)
+        assert (state / "registrations").read_text().splitlines() == ["registered"]
+        (state / "offer").touch()
         marker(state, "interrupted")
         assert database("event", f"{board}:7") == "1"
         assert not (state / "acked").exists()
@@ -211,6 +215,8 @@ def smoke(root: Path, name: str, tag: str) -> None:
         marker(state, "acked")
         assert (state / "acked").read_text() == "redelivered"
         assert database("event", f"{board}:7") == "1"
+        time.sleep(6)
+        assert (state / "registrations").read_text().splitlines() == ["registered", "registered"]
         asyncio.run(queue_trigger(url, operator))
         (state / "outbound-cause").touch()
         marker(state, "send-first")

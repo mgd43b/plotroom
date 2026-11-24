@@ -27,6 +27,7 @@ async def test_backup_uses_project_scope_and_prunes_only_its_scheduled_copies(
             ).status_code == 403
             token = bearer(config, "alpha")
             headers = {"Authorization": f"Bearer {token}"}
+            assert (await http.post(url + "?project=beta", headers=headers)).status_code == 403
             names: list[str] = []
             for index in range(3):
                 await daemon.ledgers["alpha"].execute(

@@ -3,6 +3,9 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ .Release.Name }}-token
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-delete-policy: before-hook-creation
   labels:
     {{- include "plotroom.labels" . | nindent 4 }}
 spec:

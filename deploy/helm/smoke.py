@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import time
 from pathlib import Path
 
 CHECK_HTTP = """
@@ -115,13 +116,21 @@ def main() -> None:
     # A completed fixture token Job no longer needs to retain the log containing its bearer.
     run([*kube, "delete", job, "--wait=true"])
 
-    def running_pod() -> tuple[str, str]:
-        run([*kube, "rollout", "status", deployment, "--timeout=90s"])
-        [pod] = json.loads(run([*kube, "get", "pods", "-l", selector, "-o", "json"]))["items"]
-        assert any(
-            c["type"] == "Ready" and c["status"] == "True" for c in pod["status"]["conditions"]
-        )
-        return pod["metadata"]["name"], pod["metadata"]["uid"]
+    def running_pod(previous_uid: str | None = None) -> tuple[str, str]:
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            pods = json.loads(run([*kube, "get", "pods", "-l", selector, "-o", "json"]))["items"]
+            ready = [
+                pod for pod in pods if not pod["metadata"].get("deletionTimestamp")
+                and any(c["type"] == "Ready" and c["status"] == "True"
+                        for c in pod["status"].get("conditions", []))
+            ]
+            assert len(ready) <= 1, "more than one server pod is ready"
+            if ready and ready[0]["metadata"]["uid"] != previous_uid:
+                metadata = ready[0]["metadata"]
+                return metadata["name"], metadata["uid"]
+            time.sleep(0.25)
+        raise TimeoutError("the replacement server pod did not become ready")
 
     def check(pod: str, *, create: bool) -> list[str | int]:
         data = {
@@ -137,7 +146,7 @@ def main() -> None:
     old_name, old_uid = running_pod()
     first = check(old_name, create=True)
     run([*kube, "delete", "pod", old_name, "--wait=true", "--timeout=90s"])
-    new_name, new_uid = running_pod()
+    new_name, new_uid = running_pod(old_uid)
     assert new_uid != old_uid
     assert check(new_name, create=False) == first
     print(

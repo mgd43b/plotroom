@@ -46,6 +46,9 @@ def serve(state: Path) -> None:
             name, args = params["name"], params["arguments"]
             if name == "register":
                 assert args == {"name": "plotroom"}
+                if bridge:
+                    with (state / "registrations").open("a") as registrations:
+                        registrations.write("registered\n")
                 payload = {"ok": True, "you": "plotroom"}
             elif name == "wait":
                 receipt = "redelivered" if (state / "interrupted").exists() else "first"
@@ -75,6 +78,8 @@ def serve(state: Path) -> None:
                             "receipt": "cause",
                         }
                     ]
+                if bridge and not (state / "offer").exists():
+                    messages = []
                 if not messages:
                     time.sleep(0.05)
                 payload = {"messages": messages}

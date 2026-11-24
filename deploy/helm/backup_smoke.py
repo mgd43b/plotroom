@@ -154,6 +154,13 @@ def main() -> None:
         run([*kube, "create", "job", f"--from=cronjob/{release}-backup", name])
         run([*kube, "wait", "--for=condition=complete", f"job/{name}", "--timeout=120s"])
     run([*kube, "exec", deployment, "--", "python", "-c", CHECK_BACKUPS])
+    run([
+        "helm", "upgrade", release, chart, "--kubeconfig", args.kubeconfig,
+        "--kube-context", args.context, "--namespace", args.namespace,
+        "--wait", "--timeout", "2m", "--reuse-values", "--set", "backup.enabled=false",
+    ])
+    remaining = json.loads(run([*kube, "get", "pvc", f"{release}-backups", "-o", "json"]))
+    assert remaining["spec"]["volumeName"] == volumes[1]
     print(
         "CronJob smoke passed: separate claim, two retained consistent and reopenable backups per project."
     )

@@ -3,6 +3,8 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ .Release.Name }}-backups
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     {{- include "plotroom.labels" . | nindent 4 }}
 spec:
@@ -40,8 +42,10 @@ spec:
               command: ["python", "-c"]
               args:
                 - |
+                  import json
                   import sys
                   from pathlib import Path
+                  from urllib.parse import urlencode
                   from urllib.request import ProxyHandler, Request, build_opener
 
                   endpoint, *projects = sys.argv[1:]
@@ -50,11 +54,12 @@ spec:
                   for project in projects:
                       try:
                           token = (Path("/tokens") / project).read_text().strip()
-                          request = Request(endpoint, method="POST", headers={
+                          scoped = endpoint + "?" + urlencode({"project": project})
+                          request = Request(scoped, method="POST", headers={
                               "Authorization": "Bearer " + token,
                           })
                           with direct.open(request, timeout=90) as response:
-                              if response.status != 201:
+                              if response.status != 201 or json.load(response).get("project") != project:
                                   failures.append(project)
                       except (OSError, ValueError):
                           failures.append(project)

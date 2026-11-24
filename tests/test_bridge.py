@@ -5,17 +5,26 @@ import pytest
 from fakes import FixedClock
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.actions import SWITCHBOARD_SEND
-from plotroom.core.catalog import build_catalog
+from plotroom.core.budgets import record_budget_observations
+from plotroom.core.catalog import build_catalog, register_bridge
 from plotroom.core.events import LedgerError, NewEvent
 from plotroom.core.ledger import Ledger
+from plotroom.core.trigger_actions import DeliveryRoute
 from plotroom.core.unit_of_work import UnitOfWork
+from plotroom.ports.usage_meter import UsageObservation
 
 
-async def test_bridge_leases_survive_expiry_and_reuse_the_action_key(tmp_path: Path) -> None:
+@pytest.mark.parametrize("complete_retry", [True, False], ids=["complete", "retry-limit"])
+async def test_bridge_leases_survive_expiry_and_reuse_the_action_key(
+    tmp_path: Path,
+    complete_retry: bool,
+) -> None:
     store = SqliteStore("demo", tmp_path)
     await store.migrate()
     clock = FixedClock()
-    ledger = Ledger(store, build_catalog(bridge_board="fixture"), clock, bridge_workers=())
+    catalog = build_catalog()
+    register_bridge(catalog, "fixture", {}, {}, action_attempts=2)
+    ledger = Ledger(store, catalog, clock, bridge_workers=())
     ledger.start()
 
     async def enqueue(uow: UnitOfWork) -> str:
@@ -27,28 +36,96 @@ async def test_bridge_leases_survive_expiry_and_reuse_the_action_key(tmp_path: P
 
     try:
         key = await ledger.run("system", enqueue)
+        with pytest.raises(LedgerError, match="scoped to another board"):
+            await ledger.execute("bridge", "bridge_lease", "other-board", {"board": "other"})
         cursor, item = await ledger.wait_for_item("bridge", None, 0, no_progress)
         assert item is not None
         assert item["kind"] == "bridge_ready"
-        first = (await ledger.execute("bridge", "bridge_lease", "first", {})).result["lease"]
+        first = (
+            await ledger.execute("bridge", "bridge_lease", "first", {"board": "fixture"})
+        ).result["lease"]
         assert first["action_key"] == key
-        assert (await ledger.execute("bridge", "bridge_lease", "second", {})).result[
-            "lease"
-        ] is None
+        assert (
+            await ledger.execute("bridge", "bridge_lease", "second", {"board": "fixture"})
+        ).result["lease"] is None
         assert (await ledger.wait_for_item("bridge", cursor, 0, no_progress))[1] is None
         clock.advance(61)
         _, item = await ledger.wait_for_item("bridge", cursor, 0, no_progress)
         assert item is not None
         assert item["kind"] == "bridge_ready"
-        retry = (await ledger.execute("bridge", "bridge_lease", "retry", {})).result["lease"]
+        retry = (
+            await ledger.execute("bridge", "bridge_lease", "retry", {"board": "fixture"})
+        ).result["lease"]
         assert retry["action_key"] == key
         assert retry["act_id"] != first["act_id"]
         with pytest.raises(LedgerError, match="current bridge lease"):
             await ledger.execute("bridge", "bridge_done", "stale", {"act_id": first["act_id"]})
-        assert (
-            await ledger.execute("bridge", "bridge_done", "current", {"act_id": retry["act_id"]})
-        ).result == {"action_key": key, "state": "done"}
+        if complete_retry:
+            assert (
+                await ledger.execute(
+                    "bridge", "bridge_done", "current", {"act_id": retry["act_id"]}
+                )
+            ).result == {"action_key": key, "state": "done"}
+        else:
+            clock.advance(61)
+            exhausted = await ledger.execute(
+                "bridge", "bridge_lease", "exhausted", {"board": "fixture"}
+            )
+            assert exhausted.result["lease"] is None
+            items = (await ledger.read_board("orchestrator"))[1]
+            [failed] = [item for item in items if item.kind == "failed_action"]
+            assert failed.context["action_key"] == key
         assert await ledger.pending_action() is None
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+async def test_reassigned_worker_never_receives_a_lane_pinned_stop(tmp_path: Path) -> None:
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    clock = FixedClock()
+    routes = {"worker": DeliveryRoute("switchboard", "same-address")}
+    catalog = build_catalog(frozenset(routes), delivery_routes=routes)
+    register_bridge(catalog, "fixture", {}, routes)
+    ledger = Ledger(store, catalog, clock, bridge_workers=tuple(routes))
+    ledger.start()
+    try:
+        for lane in ("original", "replacement"):
+            await ledger.execute(
+                "orchestrator",
+                "lane_start",
+                f"start-{lane}",
+                {"lane": lane, "worker": "worker", "branch": lane, "work_items": []},
+            )
+            if lane == "original":
+                await ledger.execute(
+                    "orchestrator",
+                    "budget_open",
+                    "open",
+                    {
+                        "run": "run",
+                        "lane": lane,
+                        "cap_usd": 1,
+                        "provider": "fixture",
+                        "key_scope": "staging",
+                    },
+                )
+                await ledger.run(
+                    "system",
+                    lambda uow: record_budget_observations(
+                        uow, (UsageObservation("fixture", "run", 1, clock.now()),)
+                    ),
+                )
+                assert await ledger.pending_action() is not None
+                await ledger.execute("orchestrator", "lane_archive", "archive", {"lane": lane})
+
+        lease = await ledger.execute("bridge", "bridge_lease", "lease", {"board": "fixture"})
+        assert lease.result["lease"] is None
+        assert await ledger.pending_action() is None
+        items = (await ledger.read_board("orchestrator"))[1]
+        [failed] = [item for item in items if item.kind == "failed_action"]
+        assert "cannot fence" in failed.context["reason"]
     finally:
         await ledger.stop()
         await store.close()

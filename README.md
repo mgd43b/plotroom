@@ -212,7 +212,8 @@ With `backup.enabled` set, the server mounts the backup volume at `/backups`.
 The scheduler mounts an existing Secret whose keys are the configured project
 names and whose values are their orchestrator bearers. Each request backs up
 the project identified by that bearer. The scheduler does not mount either
-database or backup volume. Delete the disposable cluster when finished.
+database or backup volume. Disabling it leaves the backup claim in place.
+Delete the disposable cluster when finished.
 
 ## Verify the Switchboard bridge locally
 
@@ -234,6 +235,8 @@ relay machine. Configure `PLOTROOM_TOKEN` with that project's bridge bearer and
 run `plotroom bridge --url http://127.0.0.1:8765/mcp --board fixture-board`.
 The daemon retains outgoing Switchboard actions until the bridge completes a
 lease. The relay receives the same action key on each delivery attempt.
+Lane-pinned budget stops require a local lane fence. A bridged project reports
+these as failed actions for operator attention.
 
 ## Local search
 

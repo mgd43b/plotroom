@@ -72,14 +72,17 @@ async def _receive(relay: ClientSession, client: Client, board: str) -> None:
                 log.warning("bridge receipt expired before acknowledgment")
 
 
-async def _send(relay: ClientSession, client: Client, consumer_id: str) -> None:
+async def _send(relay: ClientSession, client: Client, consumer_id: str, board: str) -> None:
     while True:
+        wake = await _tool(client, "wait", timeout=WAIT_SECONDS)
+        item = wake["item"]
+        if item is None or item["kind"] != "bridge_ready":
+            continue
         result = await _tool(
-            client, "bridge_lease", request_id=str(uuid4()), consumer_id=consumer_id
+            client, "bridge_lease", request_id=str(uuid4()), consumer_id=consumer_id, board=board
         )
         lease = result["lease"]
         if lease is None:
-            await _tool(client, "wait", timeout=WAIT_SECONDS)
             continue
         key, address, body = (lease[name] for name in ("action_key", "to", "body"))
         sent = await call_relay(
@@ -115,6 +118,7 @@ async def _bridge(
                     httpx2.AsyncClient(
                         headers={"Authorization": f"Bearer {token}"},
                         trust_env=False,
+                        timeout=httpx2.Timeout(10, read=WAIT_SECONDS + 10),
                     ) as http,
                     Client(streamable_http_client(url, http_client=http), mode=mode) as client,
                 ):
@@ -124,7 +128,7 @@ async def _bridge(
                         raise ValueError("the relay refused the protected bridge address")
                     async with asyncio.TaskGroup() as directions:
                         directions.create_task(_receive(relay, client, board))
-                        directions.create_task(_send(relay, client, consumer))
+                        directions.create_task(_send(relay, client, consumer, board))
         except Exception:
             log.warning("bridge connection unavailable, retrying", extra={"retry_seconds": delay})
         await asyncio.sleep(delay)
