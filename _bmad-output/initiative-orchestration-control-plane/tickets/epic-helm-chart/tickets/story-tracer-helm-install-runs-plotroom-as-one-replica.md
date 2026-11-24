@@ -10,6 +10,7 @@ risk: medium
 tracker_id: "121"
 remote: "https://github.com/mgd43b/plotroom/issues/121"
 tracker_status: backlog
+status: built
 ---
 
 # Tracer: helm install runs plotroom as one replica
@@ -25,3 +26,7 @@ Verify: In CI the chart lints, renders, installs on kind with one pod that passe
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-helm-chart/epic-helm-chart.md
+
+## Notes
+
+- Built: https://github.com/mgd43b/plotroom/pull/185
