@@ -3,7 +3,7 @@ title: Scheduled project backups
 type: feature
 ticket: 4
 created: '2026-11-24'
-status: in-review
+status: built
 baseline_revision: '05cf90f8d014c5072954cfd4e7f1b8765c31dedf'
 route: full
 route_source: auto
@@ -33,3 +33,7 @@ PVC. The actual kind CronJob smoke and focused local backup tests passed.
 Retain the backup PVC when disabling the scheduler. A Job supplies its expected project and checks the result, so a misplaced bearer cannot make a run appear complete.
 
 Bound long CronJob names with a deterministic hash suffix. The smoke resolves the rendered name through the release label.
+
+Two full native Codex passes informed the review dispositions. Both locked Python versions
+passed all 1,086 tests. Ruff, strict typing for both versions, and the dependency check passed.
+The final locally built image passed all three fixture workflows before cleanup.

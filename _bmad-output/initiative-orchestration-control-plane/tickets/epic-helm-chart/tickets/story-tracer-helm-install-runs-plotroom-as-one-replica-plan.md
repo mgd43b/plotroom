@@ -3,7 +3,7 @@ title: Helm install runs Plotroom as one replica
 type: feature
 ticket: 1
 created: '2026-11-24'
-status: in-review
+status: built
 baseline_revision: '4f15cb9cd18f63c7a78c57bf921d4a4adc7c0b0c'
 route: full
 route_source: auto
@@ -33,3 +33,7 @@ CI runs the same smoke on a fresh kind cluster. The smoke captures the token pri
 Poll for a new Ready pod after deletion. Issue the fixture token through a post-install Job so image upgrades do not patch an immutable Job.
 
 A Deployment can create a replacement Pod object while the old one terminates. The init container acquires the same data-directory lock before the daemon starts, so serving owners cannot overlap. The smoke checks init completion and allows the cursor to advance across restart.
+
+Two full native Codex passes informed the review dispositions. Both locked Python versions
+passed all 1,086 tests. Ruff, strict typing for both versions, and the dependency check passed.
+The final locally built image passed all three fixture workflows before cleanup.
