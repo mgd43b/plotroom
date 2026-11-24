@@ -3,13 +3,19 @@
 import asyncio
 import json
 from http import HTTPStatus
-from typing import Any, cast
+from typing import Any, Never, cast
 
 import httpx
 
-from plotroom.ports.search import EmbeddingError, EmbeddingModel
+from plotroom.ports.search import (
+    EmbeddingError,
+    EmbeddingModel,
+    EmbeddingOutcome,
+    EmbeddingRejection,
+)
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_REJECTION_BYTES = 4 * 1024
 
 
 class _BatchTooLarge(EmbeddingError):
@@ -24,18 +30,18 @@ class HttpEmbedder:
         self._url = url
         self._model = model
 
-    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+    async def embed(self, texts: tuple[str, ...]) -> tuple[EmbeddingOutcome, ...]:
         try:
             return await self._embed_batch(texts)
         except _BatchTooLarge:
             if len(texts) <= 1:
                 raise
-        # Keep each response in input order and return only after both halves succeed.
+        # Discard all outcomes if either half raises a batch-level failure.
         middle = len(texts) // 2
         first = await self.embed(texts[:middle])
         return first + await self.embed(texts[middle:])
 
-    async def _embed_batch(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+    async def _embed_batch(self, texts: tuple[str, ...]) -> tuple[EmbeddingOutcome, ...]:
         content = bytearray()
         try:
             async with asyncio.timeout(10):
@@ -49,8 +55,15 @@ class HttpEmbedder:
                         "dimensions": self._model.dimension,
                     },
                 ) as response:
-                    if response.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
-                        raise _BatchTooLarge("embedding endpoint request exceeded size limit")
+                    if (
+                        response.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                        and "Retry-After" not in response.headers
+                    ):
+                        if len(texts) != 1:
+                            raise _BatchTooLarge("embedding endpoint request exceeded size limit")
+                        if await _confirmed_input_rejection(response):
+                            return (EmbeddingRejection.INPUT_TOO_LARGE,)
+                        raise EmbeddingError("embedding endpoint returned an unconfirmed rejection")
                     response.raise_for_status()
                     # Refuse compression so one decoder call cannot inflate past the cap.
                     if response.headers.get("Content-Encoding", "identity").lower() != "identity":
@@ -94,3 +107,39 @@ class HttpEmbedder:
             except OverflowError as exc:
                 raise EmbeddingError("embedding endpoint returned an out-of-range value") from exc
         return tuple(vectors[index] for index in range(size))
+
+
+async def _confirmed_input_rejection(response: httpx.Response) -> bool:
+    if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+        return False
+    body = bytearray()
+    async for chunk in response.aiter_raw(chunk_size=MAX_REJECTION_BYTES + 1):
+        if len(body) + len(chunk) > MAX_REJECTION_BYTES:
+            return False
+        body.extend(chunk)
+    try:
+        payload: Any = json.loads(
+            body.decode("utf-8"),
+            parse_constant=_invalid_json_constant,
+            object_pairs_hook=_unique_json_object,
+        )
+    except ValueError, RecursionError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    error = cast("dict[str, Any]", payload).get("error")
+    return (
+        isinstance(error, dict)
+        and cast("dict[str, Any]", error).get("code") == EmbeddingRejection.INPUT_TOO_LARGE
+    )
+
+
+def _invalid_json_constant(_value: str) -> Never:
+    raise ValueError("nonstandard JSON constant")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate JSON object key")
+    return result

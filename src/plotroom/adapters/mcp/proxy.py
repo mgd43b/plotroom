@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import socket
+import ssl
 import struct
 import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
@@ -170,6 +171,18 @@ class StdioProxy:
         self._stdin = stdin if stdin is not None else sys.stdin.buffer
         self._stdout = stdout if stdout is not None else sys.stdout.buffer
         self._http = http
+        self._https_bearer_transport: httpx.AsyncHTTPTransport | None = None
+        if (
+            http is None
+            and ensure is None
+            and bearer is not None
+            and urlsplit(url).scheme == "https"
+        ):
+            try:
+                # The transport reads the CA environment. Proxy discovery belongs to the client.
+                self._https_bearer_transport = httpx.AsyncHTTPTransport(trust_env=True)
+            except OSError as exc:
+                raise EndpointError("cannot load configured HTTPS CA trust") from exc
         self._write_lock = asyncio.Lock()
         self._inflight: dict[Any, asyncio.Task[None]] = {}
         self._streams: set[asyncio.Task[None]] = set()
@@ -184,7 +197,9 @@ class StdioProxy:
         """Read messages until stdin closes, then let in-flight calls finish."""
         owned = self._http is None
         http = self._http or httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0, read=None), trust_env=self._bearer is None
+            transport=self._https_bearer_transport,
+            timeout=httpx.Timeout(10.0, read=None),
+            trust_env=self._bearer is None,
         )
         tasks = self._tasks
         try:
@@ -367,7 +382,13 @@ class StdioProxy:
             log.error("plotroom is not running: %s", exc)
             if is_request:
                 await self._emit(_error_response(request_id, f"plotroom is not running: {exc}"))
-        except httpx.ConnectError:
+        except httpx.ConnectError as exc:
+            if self._https_bearer_transport is not None and (cert_error := _certificate_error(exc)):
+                detail = f"TLS certificate verification failed: {cert_error}"
+                log.error("%s", detail)
+                if is_request:
+                    await self._emit(_error_response(request_id, detail))
+                return
             if self._ensure is not None and not retried:
                 # Refused before any byte was sent, so the daemon never saw it: start it and retry.
                 # Several requests refused together share one restart: only the first one to get
@@ -485,6 +506,18 @@ def _is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _certificate_error(exc: BaseException) -> str | None:
+    cause: BaseException | None = exc
+    seen: set[int] = set()
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, ssl.SSLCertVerificationError):
+            return cause.verify_message
+        # HTTPcore can suppress the TLS exception's context when reraising its connection error.
+        cause = cause.__cause__ or cause.__context__
+    return None
 
 
 def _valid_id(request_id: Any) -> bool:

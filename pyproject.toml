@@ -20,7 +20,7 @@ dependencies = [
 plotroom = "plotroom.app.cli:main"
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio", "ruff", "pyright"]
+dev = ["pytest", "pytest-asyncio", "ruff", "pyright", "cryptography"]
 
 [build-system]
 requires = ["hatchling"]

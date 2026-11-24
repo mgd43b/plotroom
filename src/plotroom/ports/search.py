@@ -112,6 +112,13 @@ class EmbeddingPending(Exception):
     """At least one requested source is still being indexed."""
 
 
+class EmbeddingRejection(StrEnum):
+    INPUT_TOO_LARGE = "input_too_large"
+
+
+type EmbeddingOutcome = tuple[float, ...] | EmbeddingRejection
+
+
 @dataclass(frozen=True)
 class EmbeddingModel:
     name: str
@@ -127,14 +134,25 @@ class EmbeddedRecord:
 
 
 @dataclass(frozen=True)
+class RejectedRecord:
+    seq: int
+    kind: str
+    id: str
+    reason: EmbeddingRejection
+
+
+type IndexedEmbedding = EmbeddedRecord | RejectedRecord
+
+
+@dataclass(frozen=True)
 class EmbeddingRevision:
     seq: int
     record: SearchRecord | None
 
 
 class Embedder(Protocol):
-    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-        """Return one vector per input, in input order."""
+    async def embed(self, texts: tuple[str, ...]) -> tuple[EmbeddingOutcome, ...]:
+        """Return one vector or confirmed input rejection per input, in order."""
         ...
 
 
@@ -142,6 +160,7 @@ class EmbeddingReadiness(StrEnum):
     EMPTY = "empty"
     READY = "ready"
     PENDING = "pending"
+    REJECTED_MATCH = "rejected_match"
 
 
 class EmbeddingIndex(Protocol):
@@ -155,12 +174,14 @@ class EmbeddingIndex(Protocol):
 
     async def revisions_after(self, after: int, limit: int) -> list[EmbeddingRevision]: ...
 
-    async def preflight(self, kinds: tuple[str, ...]) -> EmbeddingReadiness:
+    async def preflight(
+        self, kinds: tuple[str, ...], text: str | None = None
+    ) -> EmbeddingReadiness:
         """Check whether it is worth requesting a query vector for these sources."""
         ...
 
     async def commit(
-        self, tx: Transaction, expected: int, through: int, records: tuple[EmbeddedRecord, ...]
+        self, tx: Transaction, expected: int, through: int, records: tuple[IndexedEmbedding, ...]
     ) -> bool:
         """Write the batch and advance its cursor together, or return False for a stale attempt."""
         ...
@@ -172,4 +193,5 @@ class EmbeddingIndex(Protocol):
         limit: int,
         *,
         kinds: tuple[str, ...] | None = None,
+        text: str | None = None,
     ) -> SearchPage: ...

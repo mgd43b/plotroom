@@ -201,3 +201,43 @@ async def test_daemon_backfills_the_oldest_record_during_historical_upgrade(tmp_
     finally:
         await reader.close()
         await stop(daemon, task)
+
+
+async def test_mcp_search_keeps_rejected_text_and_ranks_only_vectors(
+    tmp_path: Path, endpoint: Endpoint
+) -> None:
+    config = replace(
+        make_config(tmp_path),
+        search_budget=SEARCH_BUDGET,
+        embedders={"demo": EmbedderConfig(endpoint.url, MODEL)},
+    )
+    token = bearer(config)
+    daemon = Daemon(config)
+    task, port = await run_daemon(daemon)
+    reader = SqliteStore("demo", config.data_dir)
+    try:
+        async with authenticated_client(f"http://127.0.0.1:{port}/mcp", token) as client:
+            rejected_body = "oversized observatory"
+            rejected = await decide(client, "fixture-rejected", rejected_body)
+            (await endpoint.next_request(MODEL, rejected_body)).reject_input()
+            accepted_body = "seal the hatch"
+            accepted = await decide(client, "fixture-accepted", accepted_body)
+            (await endpoint.next_request(MODEL, accepted_body)).vectors([1, 0])
+            ledger = daemon.ledgers["demo"]
+            await await_cursor(ledger, reader.embedding_index(MODEL), 2)
+            await await_backfill(ledger, reader, BackfillSource.DECISIONS)
+            assert await search(client, "observatory", kinds=[DECISION_KIND]) == {
+                "hits": [{"id": rejected, "kind": DECISION_KIND, "excerpt": rejected_body}],
+                "omitted": 0,
+                "mode": "lexical",
+                "fallback_reason": "embedding_rejected",
+            }
+            assert endpoint.requests.empty()
+            assert await semantic_query(client, endpoint, MODEL, "secure doorway", [1, 0]) == {
+                "hits": [{"id": accepted, "kind": DECISION_KIND, "excerpt": accepted_body}],
+                "omitted": 0,
+                "mode": "semantic",
+            }
+    finally:
+        await reader.close()
+        await stop(daemon, task)

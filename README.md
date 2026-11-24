@@ -98,9 +98,30 @@ to verify the local daemon before sending credentials or MCP requests. Restart a
 process that was already running before upgrading so it can publish this socket. Explicit URLs
 continue to use HTTP or HTTPS as configured.
 
+For an explicit HTTPS URL with a bearer token, Plotroom verifies the certificate chain and hostname.
+Set `SSL_CERT_FILE` to a PEM CA bundle or `SSL_CERT_DIR` to an OpenSSL hashed CA directory to
+configure trust. These bearer connections go directly to the endpoint and bypass environment proxies.
+
 Hosted container and Kubernetes setup are tracked in the project plan.
 See the [local server and ledger design](_bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md)
 and the [architecture notes](_bmad-output/initiative-orchestration-control-plane/architecture-orchestration-control-plane/architecture-orchestration-control-plane.md).
+
+## Local search
+
+Search uses the project's full-text index by default. A project can also configure an
+embedding endpoint for semantic search. To confirm that one input is too large, the endpoint must
+return HTTP 413 for a single input, with no `Retry-After` header and `error.code` set to
+`input_too_large` in a JSON response of at most 4 KiB. Plotroom records the rejection for
+that revision, model, and dimension and continues indexing later records. A literal match
+against a rejected record returns lexical results with `fallback_reason: embedding_rejected`.
+Unconfirmed rejections and temporary provider failures retry from the last committed checkpoint.
+
+If SQLite reports write contention or a full database during full-text backfill or
+embedding indexing, Plotroom retries the same checkpointed batch after 100 milliseconds,
+500 milliseconds, and one second. The daemon log reports the project, source, attempt,
+and failure code when a write will retry, recovers, or stops. If the retries are exhausted
+or the write fails permanently, the affected background input stops. Its next start resumes
+from the last committed checkpoint.
 
 ## Local GitHub reads
 

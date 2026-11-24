@@ -16,6 +16,7 @@ from plotroom.adapters.github.read import GitHubReadClient, Row
 from plotroom.app import serve
 from plotroom.app.config import load_config
 from plotroom.core.ledger import Ledger
+from plotroom.core.search import WriteErrorClassifier
 from plotroom.ports.search import SearchBackfill
 from test_epic3_e2e import (
     API,
@@ -302,8 +303,13 @@ def backfill_complete(monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
     complete = asyncio.Event()
     original_backfill = serve.backfill_search
 
-    async def finish_backfill(ledger: Ledger, index: SearchBackfill) -> None:
-        await original_backfill(ledger, index)
+    async def finish_backfill(
+        ledger: Ledger,
+        index: SearchBackfill,
+        *,
+        retryable_write_error: WriteErrorClassifier | None = None,
+    ) -> None:
+        await original_backfill(ledger, index, retryable_write_error=retryable_write_error)
         complete.set()
 
     monkeypatch.setattr(serve, "backfill_search", finish_backfill)

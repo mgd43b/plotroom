@@ -1,17 +1,24 @@
 """Search migrations and restarting a bounded backfill over retained sources."""
 
 import asyncio
+import logging
 import sqlite3
-from contextlib import closing
+from collections.abc import Callable, Generator
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
 import pytest
+from sqlalchemy import URL, create_engine, event
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 
 from fakes import FixedClock
 from plotroom.adapters.store_sqlite import SqliteStore, head_revision, script_heads
 from plotroom.adapters.store_sqlite.migrate import alembic_config, upgrade_to_head
+from plotroom.adapters.store_sqlite.store import retryable_search_write_error
+from plotroom.core import search
 from plotroom.core.ask_checks import Ask
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import Event, NewEvent
@@ -349,6 +356,253 @@ async def test_failed_page_rolls_back_insert_and_cursor_then_retries(tmp_path: P
         assert not await ledger.run("system", commit)
         assert indexed_rows(store.path) == before
         assert len(before) == 2
+
+
+async def test_physical_sqlite_commit_failure_discards_writer_and_rolls_back_search_page(
+    tmp_path: Path,
+) -> None:
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        source = BackfillSource.DECISIONS
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.executescript("""
+                CREATE TABLE commit_parent (id INTEGER PRIMARY KEY);
+                CREATE TABLE commit_child (
+                    parent INTEGER REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED
+                );
+            """)
+        first = SearchRecord(DECISION_KIND, "a", "committed before failure")
+        await ledger.run(
+            "system",
+            lambda uow: uow.save_search_backfill(store, source, (), BackfillPage(("a",), (first,))),
+        )
+        before = indexed_rows(store.path)
+        page = BackfillPage(
+            ("c",),
+            (
+                SearchRecord(DECISION_KIND, "b", "first record in retry"),
+                SearchRecord(DECISION_KIND, "c", "second record in retry"),
+            ),
+        )
+        write = partial(
+            UnitOfWork.save_search_backfill, index=store, source=source, expected=("a",), page=page
+        )
+        engine = store._engine.sync_engine  # pyright: ignore[reportPrivateUsage]
+        connections: list[object] = []
+        inserted = False
+
+        def after_checkpoint(
+            connection: Connection,
+            _cursor: object,
+            sql: str,
+            parameters: tuple[object, ...],
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            nonlocal inserted
+            if "INSERT INTO project_meta (key, value)" in sql and parameters == (
+                f"search.backfill.{source}",
+                '["c"]',
+            ):
+                connections.append(connection.connection.dbapi_connection)
+                if len(connections) == 1:
+                    connection.exec_driver_sql("INSERT INTO commit_child VALUES (1)")
+                    inserted = True
+
+        event.listen(engine, "after_cursor_execute", after_checkpoint)
+        try:
+            with pytest.raises(IntegrityError) as failed:
+                await ledger.run("system", write)
+            assert inserted
+            assert failed.value.statement is None  # SQLite rejected COMMIT, after both INSERTs.
+            original = failed.value.orig
+            assert isinstance(original, sqlite3.IntegrityError)
+            assert original.sqlite_errorcode == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY
+            assert retryable_search_write_error(failed.value) is None
+            assert await store.backfill_position(source) == ("a",)
+            assert indexed_rows(store.path) == before
+            assert await ledger.run("system", write)
+        finally:
+            event.remove(engine, "after_cursor_execute", after_checkpoint)
+
+        failed_connection, successful_connection = connections
+        assert failed_connection is not successful_connection
+        assert await store.backfill_position(source) == ("c",)
+        assert set(indexed_rows(store.path)) == {(DECISION_KIND, id_) for id_ in ("a", "b", "c")}
+        with closing(sqlite3.connect(store.path)) as db:
+            assert db.execute("SELECT * FROM commit_child").fetchall() == []
+
+
+@contextmanager
+def contend_after_checkpoint(
+    store: SqliteStore,
+    fault_path: Path,
+    checkpoint: Callable[[str, tuple[object, ...]], bool],
+    on_write: Callable[[], bool],
+    *,
+    at_commit: bool = False,
+    full: bool = False,
+) -> Generator[None]:
+    """Inject a real SQLite BUSY or FULL after checkpoint SQL or at commit."""
+    with closing(sqlite3.connect(fault_path, isolation_level=None)) as blocker:
+        blocker.execute("CREATE TABLE held (value BLOB)")
+        if not full:
+            blocker.execute("BEGIN IMMEDIATE")
+        fault_engine = create_engine(
+            URL.create("sqlite", database=str(fault_path)), connect_args={"timeout": 0}
+        )
+        engine = store._engine.sync_engine  # pyright: ignore[reportPrivateUsage]
+        pending: Connection | None = None
+
+        def fail_write() -> None:
+            with fault_engine.connect() as connection:
+                if full:
+                    pages = connection.exec_driver_sql("PRAGMA page_count").scalar_one()
+                    connection.exec_driver_sql(f"PRAGMA max_page_count={pages}")
+                    connection.exec_driver_sql("INSERT INTO held VALUES (zeroblob(1048576))")
+                    return
+                connection.exec_driver_sql("INSERT INTO held VALUES (1)")
+
+        def after_write(
+            conn: Connection,
+            _cursor: object,
+            sql: str,
+            parameters: tuple[object, ...],
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            nonlocal pending
+            if checkpoint(sql, parameters) and on_write():
+                if at_commit:
+                    pending = conn
+                else:
+                    fail_write()
+
+        def before_commit(conn: Connection) -> None:
+            nonlocal pending
+            if conn is pending:
+                pending = None
+                fail_write()
+
+        event.listen(engine, "after_cursor_execute", after_write)
+        if at_commit:
+            event.listen(engine, "commit", before_commit)
+        try:
+            yield
+        finally:
+            event.remove(engine, "after_cursor_execute", after_write)
+            if at_commit:
+                event.remove(engine, "commit", before_commit)
+            fault_engine.dispose()
+
+
+@pytest.mark.parametrize("outcome", ["recover", "exhaust", "cancel"])
+async def test_backfill_write_contention_uses_the_committed_checkpoint(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    caplog.set_level(logging.INFO, logger="plotroom.search")
+    source = BackfillSource.DECISIONS
+    delays = (60.0,) * 3 if outcome == "cancel" else (0.0,) * 3
+    monkeypatch.setattr(search, "_WRITE_RETRY_DELAYS", delays)
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        # Retained decisions with no search rows simulate a populated database before backfill.
+        async with store.transaction() as tx:
+            for decision_id in ("a", "b", "c", "d"):
+                await tx.insert_decision(
+                    Decision(decision_id, "human", f"needle {decision_id}", {}, [], [], START)
+                )
+        failed = asyncio.Event()
+        page_attempts: list[set[tuple[str, str]]] = []
+
+        def observe() -> bool:
+            with closing(sqlite3.connect(store.path)) as db:
+                checkpoint = db.execute(
+                    "SELECT value FROM project_meta WHERE key = ?", (f"search.backfill.{source}",)
+                ).fetchone()
+                assert checkpoint == ('["b"]',)
+            page_attempts.append(set(indexed_rows(store.path)))
+            failed.set()
+            return outcome != "recover" or len(page_attempts) == 1
+
+        with contend_after_checkpoint(
+            store,
+            tmp_path / "contended.db",
+            lambda sql, parameters: (
+                "INSERT INTO project_meta (key, value)" in sql
+                and parameters == (f"search.backfill.{source}", '["d"]')
+            ),
+            observe,
+        ):
+            task = asyncio.create_task(
+                backfill_search(
+                    ledger, store, limit=2, retryable_write_error=retryable_search_write_error
+                )
+            )
+            if outcome == "cancel":
+                await asyncio.wait_for(failed.wait(), 5)
+                # The writer can service foreground work during the backoff.
+                await ledger.append("system", message("foreground", "foreground only"))
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                await asyncio.wait_for(task, 5)
+
+        if outcome == "recover":
+            assert await store.backfill_position(source) is None
+            assert page_attempts == [{(DECISION_KIND, "a"), (DECISION_KIND, "b")}] * 2
+            expected = [("search write will retry", 1), ("search write recovered", 2)]
+        else:
+            assert await store.backfill_position(source) == ("b",)
+            assert (await ledger.search("needle", None, 20, role="orchestrator")).total == 2
+            attempts = 4 if outcome == "exhaust" else 1
+            assert page_attempts == [{(DECISION_KIND, "a"), (DECISION_KIND, "b")}] * attempts
+            expected = [("search write will retry", 1)]
+            if outcome == "exhaust":
+                expected += [
+                    ("search write will retry", 2),
+                    ("search write will retry", 3),
+                    ("search write stopped", 4),
+                ]
+            await backfill_search(
+                ledger, store, limit=2, retryable_write_error=retryable_search_write_error
+            )
+            assert await store.backfill_position(source) is None
+        page = await ledger.search("needle", None, 20, role="orchestrator")
+        assert page.total == 4
+        assert {hit.id for hit in page.hits} == {"a", "b", "c", "d"}
+        records = [record for record in caplog.records if record.name == "plotroom.search"]
+        assert [(record.getMessage(), record.__dict__["attempt"]) for record in records] == expected
+        for record in records:
+            assert record.__dict__["project"] == "demo"
+            assert record.__dict__["source"] == "backfill.decisions"
+            assert record.__dict__["failure_code"] == "sqlite_busy"
+            assert record.exc_info is None
+
+
+async def test_permanent_search_write_failure_is_logged_once_without_sql_details(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.execute("""
+                CREATE TRIGGER fail_backfill BEFORE INSERT ON project_meta
+                WHEN NEW.key = 'search.backfill.events'
+                BEGIN SELECT RAISE(ABORT, 'private fixture detail'); END
+            """)
+        await backfill_search(ledger, store, retryable_write_error=retryable_search_write_error)
+        assert await store.backfill_position(BackfillSource.EVENTS) == ()
+        records = [record for record in caplog.records if record.name == "plotroom.search"]
+        assert len(records) == 1
+        (record,) = records
+        assert record.getMessage() == "search write stopped"
+        assert record.__dict__["source"] == "backfill.events"
+        assert record.__dict__["attempt"] == 1
+        assert record.__dict__["failure_code"] == "search_write_failed"
+        assert record.exc_info is None
+        assert "private fixture detail" not in str(record.__dict__)
 
 
 async def test_projection_edit_while_page_is_in_flight_preserves_live_text(tmp_path: Path) -> None:

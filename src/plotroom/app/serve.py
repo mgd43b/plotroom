@@ -34,6 +34,7 @@ from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.github.ticket_tree import GitHubTicketTree
 from plotroom.adapters.mcp import build_app
 from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.adapters.store_sqlite.store import retryable_search_write_error
 from plotroom.adapters.switchboard import Switchboard
 from plotroom.adapters.work_items_bmad import BmadTicketTree, read_ticket_body, read_ticket_tree
 from plotroom.adapters.work_items_github_issues import GitHubIssuesWorkItems
@@ -444,7 +445,14 @@ class Daemon:
                 else None
             )
             inputs = [switchboard.run] if switchboard is not None else []
-            inputs.append(partial(backfill_search, project.ledger, project.store))
+            inputs.append(
+                partial(
+                    backfill_search,
+                    project.ledger,
+                    project.store,
+                    retryable_write_error=retryable_search_write_error,
+                )
+            )
             if semantic_search is not None:
                 inputs.append(
                     partial(
@@ -452,6 +460,7 @@ class Daemon:
                         project.ledger,
                         semantic_search.index,
                         semantic_search.embedder,
+                        retryable_write_error=retryable_search_write_error,
                     )
                 )
             if desktop is not None:

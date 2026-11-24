@@ -5,12 +5,19 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import ssl
 import threading
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 from mcp_types import PROTOCOL_VERSION_META_KEY
 
 from plotroom.adapters.mcp.proxy import (
@@ -712,6 +719,171 @@ def test_a_bearer_cannot_be_combined_with_endpoint_user_info() -> None:
     with pytest.raises(EndpointError, match="cannot contain user info") as raised:
         StdioProxy(url, bearer="fixture-bearer")
     assert "fixture-" not in str(raised.value)
+
+
+@pytest.fixture
+def local_tls(tmp_path: Path) -> tuple[ssl.SSLContext, Path]:
+    now = datetime.now(UTC)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    server_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Plotroom Test CA")])
+    server_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+
+    def template() -> x509.CertificateBuilder:
+        return (
+            x509.CertificateBuilder()
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=1))
+        )
+
+    ca = (
+        template()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    cert = (
+        template()
+        .subject_name(server_name)
+        .issuer_name(ca_name)
+        .public_key(server_key.public_key())
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    root = tmp_path / "ca.pem"
+    leaf = tmp_path / "server.pem"
+    key = tmp_path / "server.key"
+    root.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    leaf.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key.write_bytes(
+        server_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(leaf, key)
+    return context, root
+
+
+@pytest.mark.parametrize(
+    ("hostname", "ca_setting", "failure"),
+    [
+        pytest.param("localhost", "SSL_CERT_FILE", None, id="trusted-ca-file"),
+        pytest.param("localhost", "SSL_CERT_DIR", None, id="trusted-ca-directory"),
+        pytest.param("localhost", None, "issuer", id="default-trust-rejects-unknown-issuer"),
+        pytest.param("127.0.0.1", "SSL_CERT_FILE", "mismatch", id="mismatched-hostname"),
+    ],
+)
+async def test_explicit_https_bearer_uses_ca_trust_and_ignores_environment_proxies(
+    local_tls: tuple[ssl.SSLContext, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    hostname: str,
+    ca_setting: str | None,
+    failure: str | None,
+) -> None:
+    context, root = local_tls
+    received: list[bytes] = []
+    proxy_connections: list[bool] = []
+    ping = request("ping", 1)
+    body = json.dumps(ping).encode()
+    answer = result_for(ping)
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            headers = await reader.readuntil(b"\r\n\r\n")
+            received.append(headers + await reader.readexactly(len(body)))
+            writer.write(
+                f"HTTP/1.1 200 OK\r\nContent-Length: {len(answer)}\r\nConnection: close\r\n\r\n".encode()
+                + answer
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def catch_proxy(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        proxy_connections.append(True)
+        writer.close()
+        await writer.wait_closed()
+
+    tls = await asyncio.start_server(serve, "127.0.0.1", 0, ssl=context)
+    async with tls, await asyncio.start_server(catch_proxy, "127.0.0.1", 0) as interceptor:
+        target_port = tls.sockets[0].getsockname()[1]
+        proxy_url = f"http://127.0.0.1:{interceptor.sockets[0].getsockname()[1]}"
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            monkeypatch.setenv(name, proxy_url)
+            monkeypatch.setenv(name.lower(), proxy_url)
+        for name in ("NO_PROXY", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR"):
+            monkeypatch.delenv(name, raising=False)
+        if ca_setting == "SSL_CERT_FILE":
+            monkeypatch.setenv(ca_setting, str(root))
+        elif ca_setting == "SSL_CERT_DIR":
+            hashed_directory = root.parent / "cas"
+            hashed_directory.mkdir()
+            # `openssl x509 -subject_hash` for the fixture CA's stable subject name.
+            (hashed_directory / "940358ae.0").write_bytes(root.read_bytes())
+            monkeypatch.setenv(ca_setting, str(hashed_directory))
+        stdout = Output()
+        proxy = StdioProxy(
+            f"https://{hostname}:{target_port}/mcp/fixture-path?token=fixture-query",
+            bearer="fixture-bearer",
+            stdin=lines(ping),
+            stdout=stdout,
+        )
+        async with asyncio.timeout(10):
+            await proxy.run()
+
+    assert proxy_connections == []
+    [response] = stdout.messages()
+    if failure is None:
+        assert response == json.loads(answer)
+        [wire] = received
+        assert b"\r\nauthorization: bearer fixture-bearer\r\n" in wire.lower()
+        assert wire.endswith(b"\r\n\r\n" + body)
+    else:
+        message = response["error"]["message"]
+        assert "TLS certificate verification failed" in message
+        assert failure in message
+        assert received == []
+        for secret in ("fixture-bearer", "fixture-path", "fixture-query"):
+            assert secret not in message
+            assert secret not in caplog.text
+
+
+def test_an_unreadable_configured_https_ca_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "absent.pem"))
+    with pytest.raises(EndpointError, match="cannot load configured HTTPS CA trust"):
+        StdioProxy("https://localhost/mcp", bearer="fixture-bearer")
 
 
 async def test_refusals_stay_bounded_while_a_cancelled_write_is_stuck() -> None:

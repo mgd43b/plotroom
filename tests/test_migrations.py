@@ -35,6 +35,7 @@ from plotroom.core.github_projection import (
 from plotroom.core.lanes import Lane
 from plotroom.core.ledger import Ledger
 from plotroom.core.operator_goals import FIRST_GOAL
+from plotroom.core.search import pack_vector
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.ports.search import EmbeddingModel, EmbeddingRevision
 from test_daemon import bearer, make_config, run_daemon, stop
@@ -61,6 +62,45 @@ def test_history_is_linear() -> None:
     for revision in script.walk_revisions():
         parents = revision.down_revision
         assert parents is None or isinstance(parents, str), f"{revision.revision} is a merge"
+
+
+async def test_embedding_rejection_upgrade_keeps_populated_0023_index(tmp_path: Path) -> None:
+    model = EmbeddingModel("migration-fixture", 2)
+    vector = pack_vector((1, 0), model.dimension)
+    prior = alembic_config(_migrations_at(tmp_path / "before-rejections", "0023"))
+    revision = ScriptDirectory.from_config(alembic_config()).get_revision("0024")
+    assert revision is not None
+    assert revision.down_revision == "0023"
+    store = SqliteStore("demo", tmp_path)
+    try:
+        await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
+        assert await store.revision() == "0023"
+        body = "  retained migration fixture\n"
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.execute(
+                "INSERT INTO search_records (seq, kind, record_id, body, embeddable) "
+                "VALUES (1, 'switchboard.message', 'retained', ?, 1)",
+                (body,),
+            )
+            db.execute("INSERT INTO message_fts (rowid, body) VALUES (1, ?)", (body,))
+            db.execute(
+                "INSERT INTO search_vectors VALUES (?, ?, 1, ?)",
+                (model.name, model.dimension, vector),
+            )
+            db.execute(
+                "INSERT INTO embedding_cursors VALUES (?, ?, 1)", (model.name, model.dimension)
+            )
+        await store.migrate()
+        assert await store.revision() == head_revision()
+        index = store.embedding_index(model)
+        assert await index.cursor() == 1
+        assert await index.revisions_after(0, 10) == [EmbeddingRevision(1, None)]
+        assert (await index.query_vector("demo", (1, 0), 10)).hits[0].excerpt == body
+        assert (await store.query("demo", "migration fixture", None, 10)).hits[0].id == "retained"
+        with closing(sqlite3.connect(store.path)) as db:
+            assert db.execute("SELECT count(*) FROM embedding_rejections").fetchone() == (0,)
+    finally:
+        await store.close()
 
 
 def test_autogenerate_excludes_only_the_managed_fts_tables() -> None:
