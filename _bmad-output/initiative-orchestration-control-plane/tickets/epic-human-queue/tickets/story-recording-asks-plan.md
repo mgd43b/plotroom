@@ -64,7 +64,6 @@ Given a test comment on a configured project issue, when ask is accepted and rea
 | Finding | Verdict | Route | Evidence |
 | --- | --- | --- | --- |
 | MCP coerced non-integer references | Medium | Patch | Both ask identifiers now use strict integer validation. Local transport fixtures exercise malformed values against a matching projected comment. |
-
 | Cached comment could cite an issue absent from projection | High | Patch | The ask writer requires a complete issue projection with the cited issue and checks for retry after the issue becomes available. |
 
 ## Verification
