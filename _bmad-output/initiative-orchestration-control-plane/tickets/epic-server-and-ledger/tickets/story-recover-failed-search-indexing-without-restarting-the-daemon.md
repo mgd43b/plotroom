@@ -10,7 +10,7 @@ hitl: false
 risk: medium
 tracker_id: "172"
 remote: "https://github.com/mgd43b/plotroom/issues/172"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Recover failed search indexing without restarting the daemon
