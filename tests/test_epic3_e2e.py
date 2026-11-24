@@ -110,9 +110,13 @@ async def tools(
     ) as send:
         request_ids = count(1)
 
-        async def call(name: str, *, error: str | None = None, **arguments: Any) -> dict[str, Any]:
+        async def call(
+            tool_name: str, *, error: str | None = None, **arguments: Any
+        ) -> dict[str, Any]:
             reply = await send(
-                message("modern", next(request_ids), "tools/call", name=name, arguments=arguments)
+                message(
+                    "modern", next(request_ids), "tools/call", name=tool_name, arguments=arguments
+                )
             )
             assert "result" in reply, reply
             assert not reply["result"].get("isError"), reply

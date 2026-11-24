@@ -68,7 +68,6 @@ Given fixture asks spanning all four conditions, when projection updates and rep
 | Finding | Verdict | Route | Evidence |
 | --- | --- | --- | --- |
 | Repository-wide cursors could omit a human reply | Medium | Patch | The poller confirms complete paginated comment history for the specific closed issue version. Reconciliation consumes the source facts and coverage marker in the same writer transaction. |
-
 | Deleted human reply could suppress an orphan item | High | Patch | The closed-issue scan commits its comment IDs with its verified version. Only current, verified members count for orphan checks. |
 | Unrelated comment history scanned during writes | Medium | Patch | A partial SQLite index constrains the comments lookup by repository and issue number. The query plan uses both keys. |
 | One SQL lookup per closed issue during reconciliation | Low | Patch | The reconciliation writer reads the relevant version and membership rows in one query. |

@@ -69,7 +69,6 @@ Given an authenticated worker or a missing GitHub comment, when decide is called
 | Finding | Verdict | Route | Evidence |
 | --- | --- | --- | --- |
 | Untyped MCP citation and missing worker-token assertion | Low | Patch | Declared strict GitHub and chat citation shapes and added worker-token refusals through both transports. |
-
 | Filtered decisions loaded all quotes before filtering | Medium | Patch | SQL matches the exact governed ticket reference before returning rows. |
 
 ## Verification
