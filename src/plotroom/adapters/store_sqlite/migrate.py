@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import stat
 import tempfile
 from contextlib import closing
 from pathlib import Path
-from time import monotonic
+from time import monotonic, time_ns
 
 from alembic import command
 from alembic.config import Config
@@ -73,7 +74,10 @@ def _current_revision(source: sqlite3.Connection) -> str | None:
 
 
 def _backup(source: sqlite3.Connection, path: Path) -> None:
-    directory = path.parent / "migration-backups"
+    _copy_backup(source, path.parent / "migration-backups", f"{path.name}.pre-migration-")
+
+
+def _copy_backup(source: sqlite3.Connection, directory: Path, prefix: str) -> Path:
     directory.mkdir(mode=0o700, exist_ok=True)
     info = directory.lstat()
     if (
@@ -85,7 +89,7 @@ def _backup(source: sqlite3.Connection, path: Path) -> None:
             "migration backup directory must be private and owned by the daemon"
         )
 
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}.pre-migration-", suffix=".tmp", dir=directory)
+    fd, name = tempfile.mkstemp(prefix=f".{prefix}", suffix=".tmp", dir=directory)
     staging = Path(name)
     try:
         started = monotonic()
@@ -112,15 +116,39 @@ def _backup(source: sqlite3.Connection, path: Path) -> None:
         backup = staging.with_name(staging.name.removeprefix(".").removesuffix(".tmp") + ".bak")
         os.link(staging, backup)
         # Sync both the backup entry and the directory entry created on the first backup.
-        for parent in (directory, path.parent):
+        for parent in (directory, directory.parent):
             directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
+        return backup
     finally:
         os.close(fd)
         staging.unlink(missing_ok=True)
+
+
+_SCHEDULED_NAME = re.compile(r"scheduled-[0-9]{20}-[a-z0-9_]{8}\.bak")
+
+
+def scheduled_backup(path: Path, root: Path, project: str, retain: int) -> str:
+    """Copy one project's live database and prune its previously committed scheduled copies."""
+    directory = root / project
+    with closing(sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True)) as source:
+        current = _copy_backup(source, directory, f"scheduled-{time_ns():020d}-")
+    older = sorted(
+        (
+            candidate
+            for candidate in directory.iterdir()
+            if candidate != current
+            and _SCHEDULED_NAME.fullmatch(candidate.name)
+            and stat.S_ISREG(candidate.lstat().st_mode)
+        ),
+        reverse=True,
+    )
+    for candidate in older[retain - 1 :]:
+        candidate.unlink()
+    return current.name
 
 
 def prepare_upgrade(path: Path, cfg: Config) -> None:

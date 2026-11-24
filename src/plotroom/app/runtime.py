@@ -84,6 +84,7 @@ class ProjectRuntime:
         fixture_github_write: FixtureGitHubWrite | None = None,
         fixture_github_merge: FixtureGitHubMerge | None = None,
         usage_meter: UsageMeter | None = None,
+        switchboard_bridged: bool = False,
     ) -> None:
         self.ledger = ledger
         self.clock = clock
@@ -96,6 +97,15 @@ class ProjectRuntime:
         self.work_items = work_items
         self.usage_meter = usage_meter
         self.inputs = inputs
+        self._bridge_workers = (
+            tuple(
+                worker
+                for worker, route in self.delivery_routes.items()
+                if route.channel == "switchboard"
+            )
+            if switchboard_bridged
+            else None
+        )
         self.fixture_github_write = fixture_github_write
         self._fixture_github_merge = (
             fixture_github_merge if ledger.merge_gate_policy.controller_merges is True else None
@@ -152,6 +162,7 @@ class ProjectRuntime:
                     after=after,
                     skip_branch_updates=self.fixture_github_write is None,
                     skip_controller_merges=self._fixture_github_merge is None,
+                    skip_bridge_workers=self._bridge_workers,
                 )
                 if not page:
                     return False

@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "plotroom.labels" . | nindent 4 }}
+data:
+  plotroom.toml: |
+    data_dir = "/data"
+    host = "0.0.0.0"
+    port = 8765
+    {{- if .Values.backup.enabled }}
+    backup_dir = "/backups"
+    backup_retain = {{ .Values.backup.retain | int }}
+    {{- end }}
+    allowed_hosts = ["127.0.0.1:*", "localhost:*", {{ printf "%s:8765" .Release.Name | quote }}]
+    {{- range .Values.projects }}
+    [projects.{{ . | quote }}]
+    {{- end }}

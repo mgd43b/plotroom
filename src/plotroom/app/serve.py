@@ -61,7 +61,8 @@ from plotroom.app.sqlite_floor import floor_problem
 from plotroom.app.tokens import TokenRegistry
 from plotroom.core.actions import SWITCHBOARD_SEND
 from plotroom.core.ask_checks import DEFAULT_ASK_STALE_DAYS
-from plotroom.core.catalog import build_catalog
+from plotroom.core.catalog import build_catalog, register_bridge
+from plotroom.core.events import LedgerError
 from plotroom.core.ledger import Ledger
 from plotroom.core.routing import seed_routes
 from plotroom.core.search import SemanticSearch, backfill_search, follow_search_embeddings
@@ -281,6 +282,10 @@ class Daemon:
     async def run(self) -> None:
         """Serve until stopped. Raises ``LockError`` when another server owns the directory."""
         config = self._config
+        if config.backup_dir is not None and not (
+            config.backup_dir.is_dir() and os.access(config.backup_dir, os.W_OK | os.X_OK)
+        ):
+            raise ConfigError("backup_dir must be an existing writable directory")
         if self._started is None:
             self._started = asyncio.get_running_loop().create_future()
         with pin_directory(config.data_dir) as directory_fd:
@@ -322,6 +327,8 @@ class Daemon:
                     if project.work_items is not None
                 },
                 authenticate=TokenRegistry(config.data_dir).authenticate,
+                backup=self._backup_project if config.backup_dir is not None else None,
+                bridge_enabled=any(relay.via_bridge for relay in config.switchboards.values()),
                 unavailable=problem,
                 snapshot_budget=config.snapshot_budget,
                 next_budget=config.next_budget,
@@ -415,6 +422,8 @@ class Daemon:
         repository = github.repository if github is not None else None
         remote_tree = self._config.github_ticket_trees.get(project_id)
         routes = self._config.delivery_routes.get(project_id)
+        relay = self._config.switchboards.get(project_id)
+        bridged = relay is not None and relay.via_bridge
         fixture_write = self._fixture_github_writes.get(project_id)
         policy = github.merge_gate_policy if github is not None else None
         live_merge = policy is not None and policy.ci_workflow is not None
@@ -426,16 +435,21 @@ class Daemon:
                 project.store.embedding_index(embedder.model),
                 HttpEmbedder(project.embedding_client, embedder.url, embedder.model),
             )
+        catalog = build_catalog(
+            workers,
+            github_repository=repository,
+            delivery_routes=routes,
+            image_jobs=github.image_jobs if github is not None else (),
+            lane_idle_minutes=self._config.lane_idle_minutes,
+            human_login=human_login,
+        )
+        if relay is not None and bridged:
+            register_bridge(
+                catalog, relay.board, relay.senders, routes or {}, self._config.action_attempts
+            )
         project.ledger = Ledger(
             project.store,
-            build_catalog(
-                workers,
-                github_repository=repository,
-                delivery_routes=routes,
-                image_jobs=github.image_jobs if github is not None else (),
-                lane_idle_minutes=self._config.lane_idle_minutes,
-                human_login=human_login,
-            ),
+            catalog,
             self._clock,
             watcher_roles=self._config.watchers.get(project_id, ()),
             wait_cap=self._config.wait_cap,
@@ -444,6 +458,11 @@ class Daemon:
             github_tree_path=remote_tree[0] if remote_tree is not None else None,
             session_workers=desktop.sessions if desktop is not None else None,
             drain_enabled=project_id in self._config.drain_sessions,
+            bridge_workers=tuple(
+                worker for worker, route in (routes or {}).items() if route.channel == "switchboard"
+            )
+            if bridged
+            else None,
             brief_settings=self._config.briefs.get(project_id),
             live_merge_controller=live_merge,
             merge_clerk=partial(tokens.has_role, project_id, "clerk") if live_merge else None,
@@ -461,10 +480,9 @@ class Daemon:
         await project.ledger.clean_disabled_merge_items()
         # A valid SQLite file can still be missing required application records.
         await project.ledger.snapshot_summary("orchestrator")
-        relay = self._config.switchboards.get(project_id)
         switchboard = (
             Switchboard(project.ledger, relay.board, relay.command, relay.senders)
-            if relay is not None
+            if relay is not None and not bridged
             else None
         )
         inputs = [switchboard.run] if switchboard is not None else []
@@ -552,8 +570,19 @@ class Daemon:
             fixture_github_write=fixture_write,
             fixture_github_merge=fixture_write,
             usage_meter=self._usage_meters.get(project_id),
+            switchboard_bridged=bridged,
         )
         project.runtime.start()
+
+    async def _backup_project(self, project_id: str) -> str:
+        root = self._config.backup_dir
+        if root is None:
+            raise LedgerError("unavailable", "backups are disabled")
+        try:
+            return await self._projects[project_id].store.backup(root, self._config.backup_retain)
+        except (OSError, sqlite3.Error, ProjectMigrationError) as exc:
+            log.error("scheduled backup failed", extra={"project": project_id})
+            raise LedgerError("unavailable", "cannot complete the project backup") from exc
 
     def _stop_waiting(self) -> None:
         for ledger in self.ledgers.values():

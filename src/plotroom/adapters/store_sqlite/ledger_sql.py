@@ -428,6 +428,11 @@ class SqliteTransaction:
     async def insert_action(self, action: Action) -> None:
         await actions_sql.insert_action(self._live(), action)
 
+    async def bridge_action(
+        self, workers: tuple[str, ...], now: str, act_id: str | None
+    ) -> Action | None:
+        return await actions_sql.bridge_action(self._live(), workers, now, act_id)
+
     async def update_action(self, action: Action) -> None:
         await actions_sql.update_action(self._live(), action)
 

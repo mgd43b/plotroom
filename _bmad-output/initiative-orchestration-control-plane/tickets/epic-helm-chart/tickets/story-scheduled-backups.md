@@ -10,6 +10,7 @@ risk: low
 tracker_id: "124"
 remote: "https://github.com/mgd43b/plotroom/issues/124"
 tracker_status: backlog
+status: built
 ---
 
 # Scheduled backups
@@ -29,3 +30,5 @@ Verify: On kind, the CronJob run produces one consistent backup per project file
 ## Notes
 
 - Decision: 2026-11-22, backups go through a server command into their own volume, since a second pod cannot share the ReadWriteOnce data volume across nodes and backups should not live on the volume they protect.
+
+- Built: https://github.com/mgd43b/plotroom/pull/185

@@ -33,7 +33,7 @@ from plotroom.adapters.store_sqlite import (
     outbox_sql,
     triggers_sql,
 )
-from plotroom.adapters.store_sqlite.actions_sql import pending_actions
+from plotroom.adapters.store_sqlite.actions_sql import bridge_action, bridge_expiry, pending_actions
 from plotroom.adapters.store_sqlite.claims_sql import count_claims, read_claims
 from plotroom.adapters.store_sqlite.items_sql import (
     first_change,
@@ -52,6 +52,7 @@ from plotroom.adapters.store_sqlite.migrate import (
     ProjectMigrationError,
     alembic_config,
     prepare_upgrade,
+    scheduled_backup,
     upgrade_to_head,
 )
 from plotroom.adapters.store_sqlite.search_sql import search_records
@@ -70,6 +71,7 @@ from plotroom.core.goal_projection import (
 )
 from plotroom.core.merge_gate import GateSnapshot, load_gate_snapshot
 from plotroom.core.next_items import Item
+from plotroom.core.outbox import OutboxReadiness
 from plotroom.core.search import pack_vector
 from plotroom.core.search_sources import EVENT_KINDS
 from plotroom.ports.search import (
@@ -91,7 +93,6 @@ from plotroom.ports.work_items import WorkItem
 if TYPE_CHECKING:
     from plotroom.core.budgets import Budget
     from plotroom.core.human_queue import Decision
-    from plotroom.core.outbox import OutboxReadiness
     from plotroom.core.triggers import Trigger
 
 BEGIN_OPTION = "plotroom_begin"
@@ -237,6 +238,7 @@ class SqliteStore:
         event.listen(self._engine.sync_engine, "begin", _on_begin)
         self._writer: AsyncConnection | None = None
         self._writing = False
+        self._backup_lock = asyncio.Lock()
 
     @property
     def project_id(self) -> str:
@@ -249,6 +251,12 @@ class SqliteStore:
             await upgrade_to_head(self._engine, cfg)
         except (AlembicError, OSError, SQLAlchemyError, sqlite3.Error) as exc:
             raise ProjectMigrationError("cannot migrate the SQLite project database") from exc
+
+    async def backup(self, root: Path, retain: int) -> str:
+        async with self._backup_lock:
+            return await _uninterrupted(
+                asyncio.to_thread(scheduled_backup, self.path, root, self.project_id, retain)
+            )
 
     async def revision(self) -> str | None:
         def read(connection: Any) -> str | None:
@@ -549,6 +557,7 @@ class SqliteStore:
         limit: int,
         skip_branch_updates: bool = False,
         skip_controller_merges: bool = False,
+        skip_bridge_workers: tuple[str, ...] | None = None,
     ) -> tuple[QueuedAction, ...]:
         async with self._engine.connect() as connection:
             return await pending_actions(
@@ -557,7 +566,15 @@ class SqliteStore:
                 limit=limit,
                 skip_branch_updates=skip_branch_updates,
                 skip_controller_merges=skip_controller_merges,
+                skip_bridge_workers=skip_bridge_workers,
             )
+
+    async def bridge_readiness(self, workers: tuple[str, ...], now: str) -> OutboxReadiness:
+        async with self._engine.begin() as connection:
+            head = (await connection.execute(HEAD_SEQ)).scalar_one()
+            available = await bridge_action(connection, workers, now, None)
+            expires = await bridge_expiry(connection, workers, now)
+            return OutboxReadiness(head, head if available is not None else None, expires)
 
     async def outbox_readiness(self, now: str) -> OutboxReadiness:
         async with self._engine.connect() as connection:
@@ -565,9 +582,10 @@ class SqliteStore:
             return await outbox_sql.readiness(connection, head, now)
 
     async def close(self) -> None:
-        writer, self._writer = self._writer, None
-        try:
-            if writer is not None:
-                await writer.close()
-        finally:
-            await self._engine.dispose()
+        async with self._backup_lock:
+            writer, self._writer = self._writer, None
+            try:
+                if writer is not None:
+                    await writer.close()
+            finally:
+                await self._engine.dispose()

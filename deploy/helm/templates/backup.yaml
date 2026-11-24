@@ -1,0 +1,84 @@
+{{- if .Values.backup.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-backups
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "plotroom.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.backup.storage.className }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.storage.size | quote }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "plotroom.backupJobName" . }}
+  labels:
+    {{- include "plotroom.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  suspend: {{ .Values.backup.suspend }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          restartPolicy: Never
+          securityContext:
+            {{- include "plotroom.podSecurity" . | nindent 12 }}
+          containers:
+            - name: backup
+              image: {{ include "plotroom.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "-c"]
+              args:
+                - |
+                  import json
+                  import sys
+                  from pathlib import Path
+                  from urllib.parse import urlencode
+                  from urllib.request import ProxyHandler, Request, build_opener
+
+                  endpoint, *projects = sys.argv[1:]
+                  direct = build_opener(ProxyHandler({}))
+                  failures = []
+                  for project in projects:
+                      try:
+                          token = (Path("/tokens") / project).read_text().strip()
+                          scoped = endpoint + "?" + urlencode({"project": project})
+                          request = Request(scoped, method="POST", headers={
+                              "Authorization": "Bearer " + token,
+                          })
+                          with direct.open(request, timeout=90) as response:
+                              if response.status != 201 or json.load(response).get("project") != project:
+                                  failures.append(project)
+                      except (OSError, ValueError):
+                          failures.append(project)
+                  if failures:
+                      raise SystemExit("Backup failed for: " + ", ".join(failures))
+                - {{ printf "http://%s:8765/backup" .Release.Name | quote }}
+                {{- range .Values.projects }}
+                - {{ . | quote }}
+                {{- end }}
+              securityContext:
+                {{- include "plotroom.containerSecurity" . | nindent 16 }}
+              volumeMounts:
+                - name: tokens
+                  mountPath: /tokens
+                  readOnly: true
+          volumes:
+            - name: tokens
+              secret:
+                secretName: {{ required "backup.tokenSecret is required when backups are enabled" .Values.backup.tokenSecret | quote }}
+                defaultMode: 0440
+{{- end }}

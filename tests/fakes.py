@@ -374,6 +374,24 @@ class _MemoryTransaction:
         self._live()
         self.actions.setdefault(action.key, copy.deepcopy(action))
 
+    async def bridge_action(
+        self, workers: tuple[str, ...], now: str, act_id: str | None
+    ) -> Action | None:
+        self._live()
+        for action in self.actions.values():
+            if action.state != "pending" or not (
+                action.kind == "switchboard.send"
+                or (action.kind == "send" and action.payload.get("worker") in workers)
+            ):
+                continue
+            lease = action.payload.get("_bridge_lease", {})
+            expires = lease.get("expires", "")
+            if (act_id is None and expires <= now) or (
+                act_id is not None and act_id == lease.get("id") and expires > now
+            ):
+                return copy.deepcopy(action)
+        return None
+
     async def update_action(self, action: Action) -> None:
         self._live()
         self.actions[action.key] = copy.deepcopy(action)
@@ -707,6 +725,22 @@ class MemoryStore:
     async def read_budgets(self, run: str | None) -> list[Budget]:
         return [budget for key, budget in sorted(self._budgets.items()) if run in (None, key)]
 
+    async def bridge_readiness(self, workers: tuple[str, ...], now: str) -> OutboxReadiness:
+        eligible = [
+            action.payload.get("_bridge_lease", {}).get("expires", "")
+            for action in self._actions.values()
+            if action.state == "pending"
+            and (
+                action.kind == "switchboard.send"
+                or (action.kind == "send" and action.payload.get("worker") in workers)
+            )
+        ]
+        return OutboxReadiness(
+            self._seq,
+            self._seq if any(expiry <= now for expiry in eligible) else None,
+            min((expiry for expiry in eligible if expiry > now), default=None),
+        )
+
     async def outbox_readiness(self, now: str) -> OutboxReadiness:
         ready: list[int] = []
         expiries: list[str] = []
@@ -926,6 +960,7 @@ class MemoryStore:
         limit: int,
         skip_branch_updates: bool = False,
         skip_controller_merges: bool = False,
+        skip_bridge_workers: tuple[str, ...] | None = None,
     ) -> tuple[QueuedAction, ...]:
         candidates = (
             QueuedAction(position, action)
@@ -934,6 +969,16 @@ class MemoryStore:
             and action.state == "pending"
             and (not skip_branch_updates or action.kind != BRANCH_UPDATE)
             and (not skip_controller_merges or action.kind != CONTROLLER_MERGE)
+            and (
+                skip_bridge_workers is None
+                or (
+                    action.kind != "switchboard.send"
+                    and (
+                        action.kind != "send"
+                        or action.payload.get("worker") not in skip_bridge_workers
+                    )
+                )
+            )
         )
         return copy.deepcopy(tuple(islice(candidates, limit)))
 

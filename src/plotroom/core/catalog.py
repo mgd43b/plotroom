@@ -16,6 +16,7 @@ from plotroom.core.branch_updates import (
     BRANCH_UPDATED,
     BRANCH_UPDATED_FIELDS,
 )
+from plotroom.core.bridge import complete_bridge, lease_bridge, receive_bridge
 from plotroom.core.briefs import BRIEF
 from plotroom.core.budgets import (
     BUDGET_ARGS,
@@ -379,3 +380,48 @@ def build_catalog(
         Command("outbox_done", (FieldSpec("act_id", "str"),), complete_outbox), rules=drain
     )
     return catalog
+
+
+def register_bridge(
+    catalog: Catalog,
+    board: str,
+    senders: Mapping[str, str],
+    routes: Mapping[str, DeliveryRoute],
+    action_attempts: int = 3,
+) -> None:
+    bridge = (WriterRule("bridge"),)
+    relay_routes = {
+        worker: route for worker, route in routes.items() if route.channel == "switchboard"
+    }
+    catalog.commands.register(
+        Command(
+            "bridge_receive",
+            (
+                FieldSpec("board", "str"),
+                FieldSpec("message_id", "int"),
+                FieldSpec("sender", "str"),
+                FieldSpec("body", "str"),
+            ),
+            partial(receive_bridge, board=board, senders=senders),
+        ),
+        rules=bridge,
+    )
+    catalog.commands.register(
+        Command(
+            "bridge_lease",
+            (FieldSpec("board", "str"),),
+            partial(
+                lease_bridge, routes=relay_routes, board=board, action_attempts=action_attempts
+            ),
+            record_if=lambda result: result["lease"] is not None,
+        ),
+        rules=bridge,
+    )
+    catalog.commands.register(
+        Command(
+            "bridge_done",
+            (FieldSpec("act_id", "str"),),
+            partial(complete_bridge, workers=tuple(relay_routes)),
+        ),
+        rules=bridge,
+    )

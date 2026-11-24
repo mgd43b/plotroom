@@ -167,6 +167,80 @@ project's `/readyz` endpoint returns 503. To restore a backup, stop the daemon
 first and preserve the current database and its SQLite sidecars before replacing
 it. Use a Plotroom version that supports the backup's schema.
 
+## Run the Helm chart in local kind
+
+Use a disposable cluster and an explicit kubeconfig. Build and load the image
+locally before installing. From the checkout, the smoke helper installs the
+chart, issues a fixture token, verifies the Service and project readiness, and
+deletes the server pod. It checks that the replacement serves the same decision
+with the same token.
+
+```sh
+cfg=$(mktemp -d)
+cluster="plotroom-local-$(basename "$cfg" | tr '[:upper:].' '[:lower:]-')"
+export KUBECONFIG="$cfg/config"
+docker build --tag "plotroom:$cluster" .
+kind create cluster --name "$cluster" --kubeconfig "$KUBECONFIG" --wait 120s
+kind load docker-image "plotroom:$cluster" --name "$cluster"
+helm lint deploy/helm --set tokenJob.enabled=true
+helm template plotroom deploy/helm --set tokenJob.enabled=true
+python3 deploy/helm/smoke.py --kubeconfig "$KUBECONFIG" --context "kind-$cluster" \
+  --namespace plotroom-fixture --release plotroom --image-tag "$cluster"
+```
+
+The chart keeps the SQLite databases and instance token hashes in one
+ReadWriteOnce claim. A replacement waits for the previous daemon to release
+the data-directory lock before starting. Run the optional token Job against the same claim for
+local verification. The Job leaves its bearer in a temporary 0600 file on
+the claim. The smoke helper consumes the file without logging it and removes
+the completed Job. To remove the entire disposable cluster, run
+`kind delete cluster --name "$cluster" --kubeconfig "$KUBECONFIG"`.
+
+### Verify scheduled backups locally
+
+On the same disposable cluster, run the backup smoke helper in a fresh
+namespace. It configures two projects and a separate backup claim, issues
+fixture orchestrator tokens, and starts three Jobs from the suspended
+CronJob's spec. It verifies the configured retention and opens each retained
+copy through the SQLite migration entry point.
+
+```sh
+helm lint deploy/helm --set backup.enabled=true,backup.tokenSecret=fixture-token
+python3 deploy/helm/backup_smoke.py --kubeconfig "$KUBECONFIG" --context "kind-$cluster" \
+  --namespace backup-fixture --release backups --image-tag "$cluster"
+```
+
+With `backup.enabled` set, the server mounts the backup volume at `/backups`.
+The server requires the configured backup directory to exist and be writable.
+The scheduler mounts an existing Secret whose keys are the configured project
+names and whose values are their orchestrator bearers. Each request backs up
+the project identified by that bearer. The scheduler does not mount either
+database or backup volume. Disabling it leaves the backup claim in place.
+Delete the disposable cluster when finished.
+
+## Verify the Switchboard bridge locally
+
+Build a fixture image and pass the smoke helper a fresh Compose project name.
+It creates a local HTTP instance and a scripted relay, commits a claimed message
+before acknowledging it, kills and restarts the bridge, and checks that the
+redelivered message is stored once. It verifies an outbound delivery and removes
+the fixture Compose volume on exit.
+
+```sh
+docker build --tag plotroom:bridge-local .
+uv run --locked python deploy/bridge_smoke.py --image-tag bridge-local \
+  --project "plotroom-bridge-$(date +%s)-$$"
+```
+
+For an explicit local fixture, set `via_bridge = true` in the server project's
+`switchboard` table and give it an explicit `board`. The bridge runs on the
+relay machine. Configure `PLOTROOM_TOKEN` with that project's bridge bearer and
+run `plotroom bridge --url http://127.0.0.1:8765/mcp --board fixture-board`.
+The daemon retains outgoing Switchboard actions until the bridge completes a
+lease. The relay receives the same action key on each delivery attempt.
+Lane-pinned budget stops require a local lane fence. A bridged project reports
+these as failed actions for operator attention.
+
 ## Local search
 
 Search uses the project's full-text index by default. A project can also configure an

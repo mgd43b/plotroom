@@ -77,6 +77,11 @@ def _parser() -> argparse.ArgumentParser:
     watch.add_argument("--token-id", help="local token ID (default: PLOTROOM_TOKEN_ID)")
     watch.add_argument("--url", help="MCP endpoint (default: the local daemon)")
     watch.add_argument("--cursor", type=int, help="resume after this board sequence")
+    bridge = commands.add_parser("bridge", help="relay local Switchboard mail to an MCP server")
+    bridge.add_argument("--url", required=True, help="server MCP endpoint")
+    bridge.add_argument("--board", required=True, help="the configured Switchboard board")
+    bridge.add_argument("--mode", choices=("auto", "legacy"), default="auto")
+    bridge.add_argument("--relay-command", nargs=argparse.REMAINDER, default=("switchboard-relay",))
     token = commands.add_parser("token", help="manage credentials without a running daemon")
     token_commands = token.add_subparsers(dest="action", required=True)
     issue = token_commands.add_parser("issue", help="issue a token and print it once as JSON")
@@ -105,6 +110,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _token(args)
     if args.command == "watch":
         return _watch(args.url, args.config, args.token_id, args.cursor)
+    if args.command == "bridge":
+        from plotroom.app.bridge import run_bridge
+
+        return run_bridge(args.url, args.board, args.mode, args.relay_command)
     if args.command == "import":
         return run_import(args.config, args.token_id, args.triggers, args.ledger)
     return _connect(

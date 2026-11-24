@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "plotroom.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "plotroom.labels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "plotroom.labels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "plotroom.podSecurity" . | nindent 8 }}
+      initContainers:
+        - name: wait-for-data-owner
+          image: {{ include "plotroom.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-c"]
+          args:
+            - |
+              import time
+              from pathlib import Path
+              from plotroom.app.lock import DataDirLock, LockError
+              from plotroom.app.portfile import pin_directory
+
+              with pin_directory(Path("/data")) as fd:
+                  while True:
+                      try:
+                          with DataDirLock(Path("/data"), directory_fd=fd):
+                              break
+                      except LockError:
+                          time.sleep(0.25)
+              print("The previous data-directory owner has stopped.")
+          securityContext:
+            {{- include "plotroom.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: plotroom
+          image: {{ include "plotroom.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve", "--config", "/etc/plotroom/plotroom.toml"]
+          securityContext:
+            {{- include "plotroom.containerSecurity" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8765
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: "localhost:8765"
+          volumeMounts:
+            {{- include "plotroom.mounts" . | nindent 12 }}
+            {{- if .Values.backup.enabled }}
+            - name: backups
+              mountPath: /backups
+            {{- end }}
+      volumes:
+        {{- include "plotroom.volumes" . | nindent 8 }}
+        {{- if .Values.backup.enabled }}
+        - name: backups
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-backups
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "plotroom.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "plotroom.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+  ports:
+    - name: http
+      port: 8765
+      targetPort: http

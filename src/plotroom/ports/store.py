@@ -99,6 +99,10 @@ class Transaction(Protocol):
 
     async def update_action(self, action: Action) -> None: ...
 
+    async def bridge_action(
+        self, workers: tuple[str, ...], now: str, act_id: str | None
+    ) -> Action | None: ...
+
     async def insert_outbox(self, message: OutboxMessage) -> None: ...
 
     async def lease_outbox(
@@ -292,9 +296,12 @@ class Store(Protocol):
         limit: int,
         skip_branch_updates: bool = False,
         skip_controller_merges: bool = False,
+        skip_bridge_workers: tuple[str, ...] | None = None,
     ) -> tuple[QueuedAction, ...]: ...
 
     async def outbox_readiness(self, now: str) -> OutboxReadiness: ...
+
+    async def bridge_readiness(self, workers: tuple[str, ...], now: str) -> OutboxReadiness: ...
 
     async def ready_work_items(self) -> tuple[WorkItem, ...]: ...
 

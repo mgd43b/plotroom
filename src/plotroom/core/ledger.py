@@ -76,6 +76,7 @@ class Ledger:
         github_tree_path: str | None = None,
         session_workers: Mapping[str, str] | None = None,
         drain_enabled: bool = False,
+        bridge_workers: tuple[str, ...] | None = None,
         brief_settings: BriefSettings | None = None,
         live_merge_controller: bool = False,
         merge_clerk: Callable[[], Awaitable[bool]] | None = None,
@@ -98,6 +99,7 @@ class Ledger:
         self._writer = ProjectWriter(store)
         self.watchers = Watchers(watcher_roles)
         self._wait_cap = wait_cap
+        self._bridge_workers = bridge_workers
         self.github_repository = github_repository
         self._merge_gate_policy = merge_gate_policy or GatePolicy()
         self._github_tree_path = github_tree_path
@@ -128,13 +130,19 @@ class Ledger:
         return await self._store.pending_action()
 
     async def pending_actions(
-        self, *, after: int, skip_branch_updates: bool, skip_controller_merges: bool = False
+        self,
+        *,
+        after: int,
+        skip_branch_updates: bool,
+        skip_controller_merges: bool = False,
+        skip_bridge_workers: tuple[str, ...] | None = None,
     ) -> tuple[QueuedAction, ...]:
         return await self._store.pending_actions(
             after=after,
             limit=ACTION_PAGE_SIZE,
             skip_branch_updates=skip_branch_updates,
             skip_controller_merges=skip_controller_merges,
+            skip_bridge_workers=skip_bridge_workers,
         )
 
     @property
@@ -419,16 +427,24 @@ class Ledger:
                     raise LedgerError("unavailable", "the project is stopping")
                 committed = self.commit_signal
                 wake_at = until
-                if role == "drain":
+                is_bridge = role == "bridge" and self._bridge_workers is not None
+                if role == "drain" or is_bridge:
                     check_started = now()
                     moment = self._clock.now()
-                    readiness = await self._store.outbox_readiness(format_time(moment))
+                    if is_bridge:
+                        assert self._bridge_workers is not None
+                        readiness = await self._store.bridge_readiness(
+                            self._bridge_workers, format_time(moment)
+                        )
+                    else:
+                        readiness = await self._store.outbox_readiness(format_time(moment))
                     head = readiness.head
                     change = None
                     # Pending work remains actionable when resuming from a saved cursor or
                     # after a lease expires. The wake contains no lease or delivery payload.
                     if readiness.ready_seq is not None:
-                        change = {"kind": "outbox_ready", "seq": readiness.ready_seq}
+                        kind = "bridge_ready" if is_bridge else "outbox_ready"
+                        change = {"kind": kind, "seq": readiness.ready_seq}
                     if readiness.next_expiry is not None:
                         delay = datetime.fromisoformat(readiness.next_expiry) - moment
                         wake_at = min(until, check_started + delay.total_seconds())

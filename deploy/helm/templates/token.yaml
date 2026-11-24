@@ -1,0 +1,55 @@
+{{- if .Values.tokenJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-token
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-delete-policy: before-hook-creation
+  labels:
+    {{- include "plotroom.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      restartPolicy: Never
+      securityContext:
+        {{- include "plotroom.podSecurity" . | nindent 8 }}
+      containers:
+        - name: token
+          image: {{ include "plotroom.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-c"]
+          args:
+            - |
+              import os
+              import subprocess
+              import sys
+              from pathlib import Path
+
+              handoff = Path("/data/.helm-bootstrap-token.json")
+              fd = os.open(
+                  handoff, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+              )
+              try:
+                  with os.fdopen(fd, "wb") as output:
+                      subprocess.run(
+                          ["plotroom", "token", "issue", "--config", "/etc/plotroom/plotroom.toml",
+                           "--no-local", "--project", sys.argv[1], "--role", "orchestrator"],
+                          stdout=output, check=True,
+                      )
+                      output.flush()
+                      os.fsync(output.fileno())
+              except BaseException:
+                  handoff.unlink(missing_ok=True)
+                  raise
+            - {{ .Values.tokenJob.project | quote }}
+          securityContext:
+            {{- include "plotroom.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            {{- include "plotroom.mounts" . | nindent 12 }}
+      volumes:
+        {{- include "plotroom.volumes" . | nindent 8 }}
+{{- end }}

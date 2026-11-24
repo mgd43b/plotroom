@@ -46,7 +46,9 @@ async def record_attempt(uow: UnitOfWork, action: Action) -> Action:
     return attempted
 
 
-async def finish_action(uow: UnitOfWork, action: Action, state: str) -> None:
+async def finish_action(
+    uow: UnitOfWork, action: Action, state: str, *, failure_reason: str | None = None
+) -> None:
     if state not in {"done", "failed"}:
         raise LedgerError("invalid", "invalid action result")
     await uow.append(
@@ -59,9 +61,7 @@ async def finish_action(uow: UnitOfWork, action: Action, state: str) -> None:
     )
     await uow.update_action(replace(action, state=state))
     if state == "failed":
-        await uow.raise_item(
-            FAILED_ACTION,
-            action.key,
-            "orchestrator",
-            {"action_key": action.key, "kind": action.kind, "attempts": action.attempts},
-        )
+        context = {"action_key": action.key, "kind": action.kind, "attempts": action.attempts}
+        if failure_reason is not None:
+            context["reason"] = failure_reason
+        await uow.raise_item(FAILED_ACTION, action.key, "orchestrator", context)

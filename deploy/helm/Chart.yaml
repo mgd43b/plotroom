@@ -1,0 +1,5 @@
+apiVersion: v2
+name: plotroom
+description: Single-replica Plotroom for a local Kubernetes test cluster
+type: application
+version: 0.1.0
