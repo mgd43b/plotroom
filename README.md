@@ -106,6 +106,67 @@ Hosted container and Kubernetes setup are tracked in the project plan.
 See the [local server and ledger design](_bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md)
 and the [architecture notes](_bmad-output/initiative-orchestration-control-plane/architecture-orchestration-control-plane/architecture-orchestration-control-plane.md).
 
+## Run locally with Docker Compose
+
+From the checkout, choose a Compose project name for this instance. Compose
+builds the image and mounts a named volume at `/data` for the project databases
+and the hashed instance token registry. The HTTP port is published on loopback.
+
+```sh
+export PLOTROOM_PROJECTS=compose-demo
+docker compose -p plotroom-local up --build --detach --wait
+curl --fail http://127.0.0.1:8765/healthz
+curl --fail http://127.0.0.1:8765/readyz/compose-demo
+docker compose -p plotroom-local run --rm --no-deps -T plotroom \
+  token issue --no-local --project compose-demo --role orchestrator
+```
+
+Store the returned token privately. Configure an MCP HTTP client with
+`http://127.0.0.1:8765/mcp` and send the token as a bearer. Call `snapshot` to
+check the project. In a disposable instance, call `decide` with these arguments.
+
+```json
+{
+  "who": "Fixture operator",
+  "exact_words": "Compose restart fixture",
+  "where_ref": {"kind": "chat", "ref": "compose-fixture"},
+  "governs": [],
+  "settles": [],
+  "request_id": "compose-fixture-one"
+}
+```
+
+Restart the service, then use the same bearer to call `snapshot` and `decisions`.
+The project and decision should still be present. The event is stored in the volume.
+
+```sh
+docker compose -p plotroom-local restart plotroom
+docker compose -p plotroom-local up --detach --wait --no-build
+curl --fail http://127.0.0.1:8765/readyz/compose-demo
+```
+
+Keep the project name and configuration consistent between commands. Set
+`PLOTROOM_HTTP_PORT` before the first `up` to use a different host port, or set it
+to `0` and use `docker compose -p plotroom-local port plotroom 8765` to look up the assigned port.
+`GET /healthz` shows whether HTTP is running. `GET /readyz` checks all configured
+projects, and `GET /readyz/<project>` checks one. A project that cannot serve its
+ledger returns HTTP 503 on its readiness endpoint. Both probes apply the Host
+allowlist. MCP calls use a project-scoped bearer.
+
+An existing project is backed up with SQLite's online backup API before its
+schema changes. Backups are private files under `migration-backups` in the data
+directory, alongside the project databases. A restart at the current revision
+creates no new backup.
+
+If a backup fails or exceeds its 60-second deadline, or if a project file is
+corrupt or stamped with a newer schema,
+that project's readiness reports unavailable. Healthy projects remain usable.
+Inspect `docker compose -p plotroom-local logs plotroom` for the project and reason. Compose's
+container health check uses `/healthz`, so it can stay healthy while an individual
+project's `/readyz` endpoint returns 503. To restore a backup, stop the daemon
+first and preserve the current database and its SQLite sidecars before replacing
+it. Use a Plotroom version that supports the backup's schema.
+
 ## Local search
 
 Search uses the project's full-text index by default. A project can also configure an

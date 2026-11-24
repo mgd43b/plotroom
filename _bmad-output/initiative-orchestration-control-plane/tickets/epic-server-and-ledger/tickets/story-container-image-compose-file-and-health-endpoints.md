@@ -10,6 +10,7 @@ risk: medium
 tracker_id: "22"
 remote: "https://github.com/mgd43b/plotroom/issues/22"
 tracker_status: backlog
+status: built
 ---
 
 # Container image, compose file and health endpoints
@@ -25,3 +26,7 @@ Verify: docker compose up serves snapshot() to an HTTP client holding an issued 
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md
+
+## Notes
+
+- Built: https://github.com/mgd43b/plotroom/pull/183

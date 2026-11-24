@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import uvicorn
+from sqlalchemy.exc import SQLAlchemyError
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from plotroom.adapters.claude_desktop import ClaudeDesktopReader
@@ -34,6 +35,7 @@ from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.github.ticket_tree import GitHubTicketTree
 from plotroom.adapters.mcp import build_app
 from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.adapters.store_sqlite.migrate import ProjectMigrationError
 from plotroom.adapters.store_sqlite.store import retryable_search_write_error
 from plotroom.adapters.switchboard import Switchboard
 from plotroom.adapters.work_items_bmad import BmadTicketTree, read_ticket_body, read_ticket_tree
@@ -379,158 +381,179 @@ class Daemon:
         for project_id in self._config.projects:
             project = _Project(SqliteStore(project_id, self._config.data_dir))
             self._projects[project_id] = project  # registered first so a failure closes it
-            await project.store.migrate()
-            log.info(
-                "migrated",
-                extra={"project": project_id, "revision": await project.store.revision()},
-            )
-            workers = self._config.workers.get(project_id, frozenset())
-            source = self._config.ticket_trees.get(project_id)
-            work_items: WorkItemSource | None = (
-                BmadTicketTree(*source) if source is not None else None
-            )
-            github = self._config.github.get(project_id)
-            desktop = self._config.session_readers.get(project_id)
-            repository = github.repository if github is not None else None
-            remote_tree = self._config.github_ticket_trees.get(project_id)
-            routes = self._config.delivery_routes.get(project_id)
-            fixture_write = self._fixture_github_writes.get(project_id)
-            policy = github.merge_gate_policy if github is not None else None
-            live_merge = policy is not None and policy.ci_workflow is not None
-            human_login = self._config.human_logins.get(project_id)
-            semantic_search = None
-            if (embedder := self._config.embedders.get(project_id)) is not None:
-                project.embedding_client = httpx.AsyncClient(trust_env=False)
-                semantic_search = SemanticSearch(
-                    project.store.embedding_index(embedder.model),
-                    HttpEmbedder(project.embedding_client, embedder.url, embedder.model),
+            try:
+                await self._open_project(project_id, project, tokens)
+            except (
+                ProjectMigrationError,
+                SQLAlchemyError,
+                sqlite3.Error,
+                OSError,
+                ValueError,
+            ) as exc:
+                reason = (
+                    str(exc)
+                    if isinstance(exc, ProjectMigrationError)
+                    else "cannot initialize the SQLite project ledger"
                 )
-            project.ledger = Ledger(
-                project.store,
-                build_catalog(
-                    workers,
-                    github_repository=repository,
-                    delivery_routes=routes,
-                    image_jobs=github.image_jobs if github is not None else (),
-                    lane_idle_minutes=self._config.lane_idle_minutes,
-                    human_login=human_login,
-                ),
-                self._clock,
-                watcher_roles=self._config.watchers.get(project_id, ()),
-                wait_cap=self._config.wait_cap,
+                log.error("project not ready", extra={"project": project_id, "reason": reason})
+                await self._close_project_resources([project])
+                del self._projects[project_id]
+
+    async def _open_project(
+        self, project_id: str, project: _Project, tokens: TokenRegistry
+    ) -> None:
+        await project.store.migrate()
+        log.info(
+            "migrated",
+            extra={"project": project_id, "revision": await project.store.revision()},
+        )
+        workers = self._config.workers.get(project_id, frozenset())
+        source = self._config.ticket_trees.get(project_id)
+        work_items: WorkItemSource | None = BmadTicketTree(*source) if source is not None else None
+        github = self._config.github.get(project_id)
+        desktop = self._config.session_readers.get(project_id)
+        repository = github.repository if github is not None else None
+        remote_tree = self._config.github_ticket_trees.get(project_id)
+        routes = self._config.delivery_routes.get(project_id)
+        fixture_write = self._fixture_github_writes.get(project_id)
+        policy = github.merge_gate_policy if github is not None else None
+        live_merge = policy is not None and policy.ci_workflow is not None
+        human_login = self._config.human_logins.get(project_id)
+        semantic_search = None
+        if (embedder := self._config.embedders.get(project_id)) is not None:
+            project.embedding_client = httpx.AsyncClient(trust_env=False)
+            semantic_search = SemanticSearch(
+                project.store.embedding_index(embedder.model),
+                HttpEmbedder(project.embedding_client, embedder.url, embedder.model),
+            )
+        project.ledger = Ledger(
+            project.store,
+            build_catalog(
+                workers,
                 github_repository=repository,
-                merge_gate_policy=github.merge_gate_policy if github is not None else None,
-                github_tree_path=remote_tree[0] if remote_tree is not None else None,
-                session_workers=desktop.sessions if desktop is not None else None,
-                drain_enabled=project_id in self._config.drain_sessions,
-                brief_settings=self._config.briefs.get(project_id),
-                live_merge_controller=live_merge,
-                merge_clerk=partial(tokens.has_role, project_id, "clerk") if live_merge else None,
-                fixture_merge_enabled=fixture_write is not None,
-                fixture_branch_updates=fixture_write is not None,
+                delivery_routes=routes,
+                image_jobs=github.image_jobs if github is not None else (),
+                lane_idle_minutes=self._config.lane_idle_minutes,
                 human_login=human_login,
-                ask_stale_days=self._config.ask_stale_days.get(project_id, DEFAULT_ASK_STALE_DAYS),
-                search=project.store,
-                semantic_search=semantic_search,
+            ),
+            self._clock,
+            watcher_roles=self._config.watchers.get(project_id, ()),
+            wait_cap=self._config.wait_cap,
+            github_repository=repository,
+            merge_gate_policy=github.merge_gate_policy if github is not None else None,
+            github_tree_path=remote_tree[0] if remote_tree is not None else None,
+            session_workers=desktop.sessions if desktop is not None else None,
+            drain_enabled=project_id in self._config.drain_sessions,
+            brief_settings=self._config.briefs.get(project_id),
+            live_merge_controller=live_merge,
+            merge_clerk=partial(tokens.has_role, project_id, "clerk") if live_merge else None,
+            fixture_merge_enabled=fixture_write is not None,
+            fixture_branch_updates=fixture_write is not None,
+            human_login=human_login,
+            ask_stale_days=self._config.ask_stale_days.get(project_id, DEFAULT_ASK_STALE_DAYS),
+            search=project.store,
+            semantic_search=semantic_search,
+        )
+        project.ledger.start()
+        if route_seeds := self._config.routes.get(project_id):
+            await project.ledger.run("system", partial(seed_routes, routes=route_seeds))
+        await project.ledger.initialize_overlaps()
+        await project.ledger.clean_disabled_merge_items()
+        # A valid SQLite file can still be missing required application records.
+        await project.ledger.snapshot_summary("orchestrator")
+        relay = self._config.switchboards.get(project_id)
+        switchboard = (
+            Switchboard(project.ledger, relay.board, relay.command, relay.senders)
+            if relay is not None
+            else None
+        )
+        inputs = [switchboard.run] if switchboard is not None else []
+        inputs.append(
+            partial(
+                backfill_search,
+                project.ledger,
+                project.store,
+                retryable_write_error=retryable_search_write_error,
             )
-            project.ledger.start()
-            if route_seeds := self._config.routes.get(project_id):
-                await project.ledger.run("system", partial(seed_routes, routes=route_seeds))
-            await project.ledger.initialize_overlaps()
-            await project.ledger.clean_disabled_merge_items()
-            relay = self._config.switchboards.get(project_id)
-            switchboard = (
-                Switchboard(project.ledger, relay.board, relay.command, relay.senders)
-                if relay is not None
-                else None
-            )
-            inputs = [switchboard.run] if switchboard is not None else []
+        )
+        if semantic_search is not None:
             inputs.append(
                 partial(
-                    backfill_search,
+                    follow_search_embeddings,
                     project.ledger,
-                    project.store,
+                    semantic_search.index,
+                    semantic_search.embedder,
                     retryable_write_error=retryable_search_write_error,
                 )
             )
-            if semantic_search is not None:
-                inputs.append(
-                    partial(
-                        follow_search_embeddings,
-                        project.ledger,
-                        semantic_search.index,
-                        semantic_search.embedder,
-                        retryable_write_error=retryable_search_write_error,
-                    )
-                )
-            if desktop is not None:
-                intake = SessionIntake(
-                    project.ledger,
-                    ClaudeDesktopReader(desktop.claude_home, desktop.app_support),
-                    desktop.sessions,
-                    desktop.poll_seconds,
-                )
-                inputs.append(intake.run)
-            if github is not None:
-                credential = LocalGitHubCredential(
-                    github_secret_name(project_id), os.environ, github.token_file
-                )
-                api = GitHubReadClient(github.api_url, github.repository)
-                poller = GitHubPoller(
-                    project.ledger,
-                    self._clock,
-                    github.repository,
-                    credential,
-                    PullRequestFetcher(github.api_url, github.repository),
-                    github.poll_seconds,
-                )
-                issue_source = self._config.github_issue_sources.get(project_id)
-                details = GitHubDetailPoller(
-                    project.ledger,
-                    self._clock,
-                    api,
-                    credential,
-                    github.image_jobs,
-                    include_issue_tree=issue_source is not None,
-                    ci_workflow=github.merge_gate_policy.ci_workflow,
-                )
-                project.ledger.confirm_merge_gate = details.confirm_gate
-                inputs.append(partial(poller.run, details.poll))
-                if remote_tree is not None:
-                    tree, installation = remote_tree
-                    work_items = GitHubTicketTree(
-                        api,
-                        credential,
-                        tree,
-                        partial(read_ticket_tree, installation),
-                        read_body=partial(read_ticket_body, installation),
-                        cooling_down=details.cooling_down,
-                        report_rate_limit=details.record_rate_limit,
-                    )
-                if issue_source is not None:
-                    work_items = GitHubIssuesWorkItems(
-                        details.issue_tree,
-                        issue_source.starter,
-                        issue_source.store_config,
-                        github.repository,
-                        issue_source.milestone,
-                    )
-            project.work_items = work_items
-            project.runtime = ProjectRuntime(
+        if desktop is not None:
+            intake = SessionIntake(
+                project.ledger,
+                ClaudeDesktopReader(desktop.claude_home, desktop.app_support),
+                desktop.sessions,
+                desktop.poll_seconds,
+            )
+            inputs.append(intake.run)
+        if github is not None:
+            credential = LocalGitHubCredential(
+                github_secret_name(project_id), os.environ, github.token_file
+            )
+            api = GitHubReadClient(github.api_url, github.repository)
+            poller = GitHubPoller(
                 project.ledger,
                 self._clock,
-                tick_seconds=self._config.tick_seconds,
-                action_attempts=self._config.action_attempts,
-                handlers={SWITCHBOARD_SEND: switchboard.send} if switchboard is not None else {},
-                delivery_routes=routes,
-                workers=workers,
-                work_items=work_items,
-                inputs=tuple(inputs),
-                fixture_github_write=fixture_write,
-                fixture_github_merge=fixture_write,
-                usage_meter=self._usage_meters.get(project_id),
+                github.repository,
+                credential,
+                PullRequestFetcher(github.api_url, github.repository),
+                github.poll_seconds,
             )
-            project.runtime.start()
+            issue_source = self._config.github_issue_sources.get(project_id)
+            details = GitHubDetailPoller(
+                project.ledger,
+                self._clock,
+                api,
+                credential,
+                github.image_jobs,
+                include_issue_tree=issue_source is not None,
+                ci_workflow=github.merge_gate_policy.ci_workflow,
+            )
+            project.ledger.confirm_merge_gate = details.confirm_gate
+            inputs.append(partial(poller.run, details.poll))
+            if remote_tree is not None:
+                tree, installation = remote_tree
+                work_items = GitHubTicketTree(
+                    api,
+                    credential,
+                    tree,
+                    partial(read_ticket_tree, installation),
+                    read_body=partial(read_ticket_body, installation),
+                    cooling_down=details.cooling_down,
+                    report_rate_limit=details.record_rate_limit,
+                )
+            if issue_source is not None:
+                work_items = GitHubIssuesWorkItems(
+                    details.issue_tree,
+                    issue_source.starter,
+                    issue_source.store_config,
+                    github.repository,
+                    issue_source.milestone,
+                )
+        project.work_items = work_items
+        project.runtime = ProjectRuntime(
+            project.ledger,
+            self._clock,
+            tick_seconds=self._config.tick_seconds,
+            action_attempts=self._config.action_attempts,
+            handlers={SWITCHBOARD_SEND: switchboard.send} if switchboard is not None else {},
+            delivery_routes=routes,
+            workers=workers,
+            work_items=work_items,
+            inputs=tuple(inputs),
+            fixture_github_write=fixture_write,
+            fixture_github_merge=fixture_write,
+            usage_meter=self._usage_meters.get(project_id),
+        )
+        project.runtime.start()
 
     def _stop_waiting(self) -> None:
         for ledger in self.ledgers.values():
@@ -538,7 +561,10 @@ class Daemon:
 
     async def _close_projects(self) -> None:
         """Stop every writer (draining queued inputs), then close every store. Never raises."""
-        projects = list(self._projects.values())
+        await self._close_project_resources(list(self._projects.values()))
+        self._projects.clear()
+
+    async def _close_project_resources(self, projects: list[_Project]) -> None:
         for project in projects:
             if project.runtime is not None:
                 await project.runtime.stop()
@@ -559,4 +585,3 @@ class Daemon:
                 await project.store.close()
             except Exception:
                 log.exception("store close failed", extra={"project": project.store.project_id})
-        self._projects.clear()

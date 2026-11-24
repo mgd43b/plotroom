@@ -1,0 +1,24 @@
+services:
+  plotroom:
+    build: .
+    image: "plotroom:${PLOTROOM_IMAGE_TAG:-local}"
+    init: true
+    environment:
+      PLOTROOM_DATA_DIR: /data
+      PLOTROOM_HOST: 0.0.0.0
+      PLOTROOM_PORT: "8765"
+      PLOTROOM_PROJECTS: "${PLOTROOM_PROJECTS:-compose-demo}"
+      PLOTROOM_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,plotroom:8765"
+    ports:
+      - "127.0.0.1:${PLOTROOM_HTTP_PORT:-8765}:8765"
+    volumes:
+      - data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8765/healthz', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  data:

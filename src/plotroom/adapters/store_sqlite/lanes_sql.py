@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import asdict
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -32,7 +32,12 @@ _COUNTS = text(
 
 def _lane(row: Row[Any]) -> Lane:
     fields = dict(row._mapping)  # pyright: ignore[reportPrivateUsage]
-    fields["work_items"] = tuple(json.loads(row.work_items))
+    items: Any = json.loads(row.work_items)
+    if not isinstance(items, list) or not all(
+        isinstance(item, str) for item in cast("list[Any]", items)
+    ):
+        raise ValueError("invalid work items in stored lane")
+    fields["work_items"] = tuple(cast("list[str]", items))
     return Lane(**fields)
 
 

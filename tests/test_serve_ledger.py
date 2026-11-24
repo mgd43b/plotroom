@@ -190,7 +190,7 @@ async def test_the_lock_is_held_while_a_writer_is_still_draining(
     await stop(again, task2)
 
 
-async def test_a_project_that_fails_to_migrate_does_not_leave_the_others_open(
+async def test_a_failed_migration_closes_its_store_and_leaves_other_projects_serving(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     order = spy_on_teardown(monkeypatch)
@@ -199,12 +199,20 @@ async def test_a_project_that_fails_to_migrate_does_not_leave_the_others_open(
     with sqlite3.connect(config.data_dir / "beta.db") as db:
         db.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
         db.execute("INSERT INTO alembic_version VALUES ('from-the-future')")
-    with pytest.raises(Exception, match="from-the-future"):
-        await Daemon(config).run()
-    assert order[-1] == "lock released"
-    assert "ledger stopped: alpha" in order
-    assert {"store closed: alpha", "store closed: beta"} <= set(order)
-    assert "ledger stopped: beta" not in order  # it never started
+    daemon = Daemon(config)
+    task, _ = await run_daemon(daemon)
+    try:
+        assert order == ["store closed: beta"]
+        assert list(daemon.ledgers) == ["alpha"]
+        assert (await daemon.ledgers["alpha"].append("system", note("served"))).created
+    finally:
+        await stop(daemon, task)
+    assert order == [
+        "store closed: beta",
+        "ledger stopped: alpha",
+        "store closed: alpha",
+        "lock released",
+    ]
     again = DataDirLock(config.data_dir)
     again.acquire()  # the lock was released
     again.release()

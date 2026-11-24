@@ -42,3 +42,11 @@ jobs:
         run: uv run python tests/depcheck.py
       - name: Tests
         run: uv run pytest
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build local container image
+        run: docker build --tag plotroom:ci .

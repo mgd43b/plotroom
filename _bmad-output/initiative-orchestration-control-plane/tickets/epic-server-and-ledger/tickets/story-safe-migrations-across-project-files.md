@@ -10,6 +10,7 @@ risk: medium
 tracker_id: "23"
 remote: "https://github.com/mgd43b/plotroom/issues/23"
 tracker_status: backlog
+status: built
 ---
 
 # Safe migrations across project files
@@ -29,3 +30,5 @@ Verify: In CI, migrating three fixture files where one is corrupt leaves the oth
 ## Notes
 
 - Hands on: the online backup to epic 11's scheduled backups (entry 11.4).
+
+- Built: https://github.com/mgd43b/plotroom/pull/183
