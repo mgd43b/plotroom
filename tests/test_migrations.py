@@ -26,6 +26,7 @@ from plotroom.core.events import NewEvent
 from plotroom.core.github import PR_MERGED, PR_OPENED, ObservedPull, apply_comments
 from plotroom.core.github_projection import (
     FILES,
+    ISSUE_PAGINATION_VERIFIED,
     ISSUES,
     GitHubRecord,
     GitHubResource,
@@ -33,6 +34,7 @@ from plotroom.core.github_projection import (
 )
 from plotroom.core.lanes import Lane
 from plotroom.core.ledger import Ledger
+from plotroom.core.operator_goals import FIRST_GOAL
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.ports.search import EmbeddingModel, EmbeddingRevision
 from test_daemon import bearer, make_config, run_daemon, stop
@@ -464,6 +466,96 @@ async def test_a_file_with_an_unknown_revision_is_not_migrated(tmp_path: Path) -
         with pytest.raises(Exception, match="from-the-future"):
             await store.migrate()
     finally:
+        await store.close()
+
+
+async def test_populated_0022_upgrade_preserves_search_and_governing_decisions(
+    tmp_path: Path,
+) -> None:
+    repo = "fixture/repo"
+    legacy = _migrations_at(tmp_path / "legacy", "0022")
+    store = SqliteStore("demo", tmp_path)
+    ledger = Ledger(
+        store,
+        build_catalog(),
+        FixedClock(),
+        github_repository=repo,
+        human_login="operator",
+        search=store,
+    )
+    try:
+        await upgrade_to_head(store._engine, alembic_config(legacy))  # pyright: ignore[reportPrivateUsage]
+        assert await store.revision() == "0022"
+        ledger.start()
+        indexed = await ledger.append(
+            "system",
+            NewEvent(
+                "switchboard",
+                "switchboard.message",
+                "fixture",
+                {"sender": "fixture"},
+                "Existing searchable body.",
+            ),
+        )
+        recorded = await ledger.execute(
+            "orchestrator",
+            "decide",
+            "decision-proof",
+            {
+                "who": "operator",
+                "exact_words": "  sì\r\nProceed.  ",
+                "where_ref": {"kind": "chat", "ref": "fixture/evidence"},
+                "governs": [f"{repo}#1"],
+                "settles": [],
+            },
+        )
+        past = await ledger.events_after(0)
+        await ledger.stop()
+        await store.migrate()
+        assert await store.revision() == head_revision()
+        assert await ledger.events_after(0) == past
+        [decision] = await ledger.list_decisions("orchestrator", f"{repo}#1")
+        assert decision["decision_id"] == recorded.result["decision_id"]
+        assert decision["exact_words"] == "  sì\r\nProceed.  "
+        with closing(sqlite3.connect(store.path)) as db:
+            assert db.execute(
+                "SELECT body FROM search_records WHERE record_id = ?", (indexed.event.id,)
+            ).fetchone() == ("Existing searchable body.",)
+
+        issue = GitHubRecord(
+            "issue/1",
+            "issue_opened",
+            {"number": 1, "state": "open"},
+            details={"resource": "issue", "title": "Fixture", "milestone": 1, "labels": []},
+        )
+        assigned = GitHubRecord(
+            "assignees/1", "issue_assignees", {"number": 1, "assignees": ["operator"]}
+        )
+        async with store.transaction() as tx:
+            await tx.save_github_resource(
+                repo,
+                ISSUES,
+                "",
+                GitHubResource((issue, assigned), attributes={ISSUE_PAGINATION_VERIFIED: True}),
+            )
+        ledger.start()
+        ledger.github_error = None
+        await ledger.execute(
+            "orchestrator", "goal_set", "new-goal", {"name": "first", "text": FIRST_GOAL}
+        )
+        assert (await ledger.goal("orchestrator", "first"))["done"] is True
+        decision_goal = (
+            f'every issue where state = open satisfies decision "{decision["decision_id"]}"'
+        )
+        await ledger.execute(
+            "orchestrator",
+            "goal_set",
+            "decision-goal",
+            {"name": "decided", "text": decision_goal},
+        )
+        assert (await ledger.goal("orchestrator", "decided"))["done"] is True
+    finally:
+        await ledger.stop()
         await store.close()
 
 

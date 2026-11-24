@@ -20,6 +20,7 @@ from plotroom.adapters.github.ci import (
 )
 from plotroom.adapters.github.deployments import poll_deployments
 from plotroom.adapters.github.issue_details import (
+    IssueRelationshipReadError,
     fetch_comment_backfill,
     fetch_comments,
     fetch_issue_comments,
@@ -50,6 +51,8 @@ from plotroom.core.github_projection import (
     COMMENT_BACKFILL,
     COMMENTS,
     FILES,
+    ISSUE_PAGINATION_VERIFIED,
+    ISSUE_RELATION_RETRY,
     ISSUE_TREE,
     ISSUES,
     LABELS,
@@ -353,7 +356,7 @@ class GitHubDetailPoller:
             for pull in pulls:
                 await self.on_merge_evidence(pull.number)
 
-        if self.include_issue_tree:
+        if self.include_issue_tree or await self.ledger.goals_use_blockers():
             if issues is not None:
                 await self._refresh(
                     ISSUE_TREE,
@@ -494,20 +497,35 @@ class GitHubDetailPoller:
             )
 
     async def _mark_incomplete(
-        self, resource: str, scope: str, pulls: tuple[int, ...] = ()
+        self,
+        resource: str,
+        scope: str,
+        pulls: tuple[int, ...] = (),
+        *,
+        retry_issues: tuple[int, ...] = (),
     ) -> None:
-        await self.ledger.run(
-            "system",
-            lambda uow: apply_resource(
+        async def write(uow: UnitOfWork) -> None:
+            repository = self.api.repository
+            attributes: dict[str, Any] = (
+                {ISSUE_PAGINATION_VERIFIED: False} if resource == ISSUE_TREE else {}
+            )
+            if retry_issues:
+                previous = await uow.github_resource(repository, resource, scope)
+                pending: set[int] = (
+                    set(previous.attributes.get(ISSUE_RELATION_RETRY, [])) if previous else set()
+                )
+                attributes[ISSUE_RELATION_RETRY] = sorted(pending.union(retry_issues))
+            await apply_resource(
                 uow,
-                self.api.repository,
+                repository,
                 resource,
                 scope,
-                GitHubResource((), complete=False),
+                GitHubResource((), complete=False, attributes=attributes),
                 format_time(self.clock.now()),
                 pulls=pulls,
-            ),
-        )
+            )
+
+        await self.ledger.run("system", write)
 
     async def _refresh(
         self,
@@ -522,6 +540,15 @@ class GitHubDetailPoller:
         previous = await self.ledger.github_resource(repository, resource, scope)
         try:
             result = await read(previous)
+        except IssueRelationshipReadError as exc:
+            await self._mark_incomplete(resource, scope, pulls, retry_issues=exc.numbers)
+            if isinstance(exc.cause, GitHubRateLimited):
+                raise exc.cause from exc
+            log.warning(
+                "GitHub issue relationship refresh failed",
+                extra={"project": self.ledger.project_id},
+            )
+            return None
         except GitHubRateLimited:
             await self._mark_incomplete(resource, scope, pulls)
             raise
@@ -531,10 +558,16 @@ class GitHubDetailPoller:
                     "GitHub projection refresh failed",
                     extra={"project": self.ledger.project_id, "resource": resource},
                 )
+            if resource == ISSUE_TREE or previous is None or previous.complete:
                 await self._mark_incomplete(resource, scope, pulls)
             return None
 
         async def write(uow: UnitOfWork) -> None:
+            if (
+                resource == ISSUE_TREE
+                and await uow.github_resource(repository, resource, scope) != previous
+            ):
+                return
             if pull is not None:
                 current = await uow.pull_request(repository, pull.number)
                 if current is None or (pull.head_sha, pull.version, pull.updated_at) != (

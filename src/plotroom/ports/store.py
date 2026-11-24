@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from plotroom.core.ask_checks import Ask, IssueComment
     from plotroom.core.budgets import Budget
     from plotroom.core.checklists import Checklist
+    from plotroom.core.goal_projection import GoalFacts, StoredGoal
     from plotroom.core.human_queue import Decision
     from plotroom.core.merge_gate import GateSnapshot
     from plotroom.core.outbox import OutboxLease, OutboxMessage, OutboxReadiness
@@ -69,6 +70,10 @@ class Transaction(Protocol):
     async def find_ask(self, ask_id: str) -> Ask | None: ...
 
     async def save_ask(self, ask: Ask) -> None: ...
+
+    async def save_goal(self, goal: StoredGoal) -> None: ...
+
+    async def goals_use_blockers(self) -> bool: ...
 
     async def unsettled_asks(self, repository: str) -> list[Ask]: ...
 
@@ -248,6 +253,15 @@ class Store(Protocol):
     async def list_decisions(self, governs: str | None) -> list[Decision]: ...
 
     async def list_asks(self, stale_only: bool) -> list[Ask]: ...
+
+    async def goals_use_blockers(self) -> bool: ...
+
+    async def read_goals(
+        self,
+        name: str | None,
+        repository: str | None,
+        human_login: str | None,
+    ) -> tuple[list[StoredGoal], GoalFacts | None]: ...
 
     async def pending_ask_issues(self, repository: str) -> set[int]: ...
 

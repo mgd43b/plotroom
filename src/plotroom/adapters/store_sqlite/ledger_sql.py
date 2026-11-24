@@ -19,6 +19,7 @@ from plotroom.adapters.store_sqlite import (
     claims_sql,
     embedding_sql,
     github_sql,
+    goals_sql,
     human_queue_sql,
     items_sql,
     lanes_sql,
@@ -34,6 +35,7 @@ from plotroom.core.claims import Claim
 from plotroom.core.events import Event
 from plotroom.core.github import FetchCursor, FetchRetry, PullRequest
 from plotroom.core.github_projection import GitHubResource
+from plotroom.core.goal_projection import StoredGoal
 from plotroom.core.lanes import Lane
 from plotroom.core.next_items import Item
 from plotroom.core.search_sources import event_record
@@ -452,6 +454,12 @@ class SqliteTransaction:
 
     async def find_ask(self, ask_id: str) -> Ask | None:
         return await asks_sql.find_ask(self._live(), ask_id)
+
+    async def goals_use_blockers(self) -> bool:
+        return await goals_sql.goals_use_blockers(self._live())
+
+    async def save_goal(self, goal: StoredGoal) -> None:
+        await goals_sql.save_goal(self._live(), goal)
 
     async def save_ask(self, ask: Ask) -> None:
         await asks_sql.save_ask(self._live(), ask)

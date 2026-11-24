@@ -69,6 +69,7 @@ from plotroom.ports.work_items import WorkItem
 if TYPE_CHECKING:
     from plotroom.core.ask_checks import Ask, IssueComment
     from plotroom.core.checklists import Checklist
+    from plotroom.core.goal_projection import StoredGoal
     from plotroom.core.human_queue import Decision
     from plotroom.core.outbox import OutboxLease, OutboxMessage
     from plotroom.core.triggers import Trigger
@@ -320,6 +321,12 @@ class UnitOfWork:
 
     async def find_ask(self, ask_id: str) -> Ask | None:
         return await self._tx.find_ask(ask_id)
+
+    async def goals_use_blockers(self) -> bool:
+        return await self._tx.goals_use_blockers()
+
+    async def save_goal(self, goal: StoredGoal) -> None:
+        await self._tx.save_goal(goal)
 
     async def save_ask(self, ask: Ask) -> None:
         await self._tx.save_ask(ask)

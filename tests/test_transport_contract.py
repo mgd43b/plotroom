@@ -26,11 +26,14 @@ from plotroom.core.events import NewEvent
 from plotroom.core.github import ObservedPull, apply_comments, apply_pull_poll
 from plotroom.core.github_projection import (
     CHECKS,
+    ISSUE_PAGINATION_VERIFIED,
+    ISSUE_TREE,
     ISSUES,
     GitHubRecord,
     GitHubResource,
     apply_resource,
 )
+from plotroom.core.operator_goals import FIRST_GOAL
 from plotroom.core.snapshot import estimate_tokens
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.core.watchers import Watchers
@@ -77,6 +80,8 @@ TOOL_NAMES = {
     "decisions",
     "ask",
     "asks",
+    "goal_set",
+    "goal",
 }
 WRITER_TOOLS = {
     "ack",
@@ -101,6 +106,7 @@ WRITER_TOOLS = {
     "outbox_done",
     "decide",
     "ask",
+    "goal_set",
 }
 REPORT_ARGUMENTS = {
     "deploy_report": {
@@ -259,9 +265,38 @@ async def endpoint(
 
         trap_issue = replace(issue, key="issue/1", fields={"number": 1, "state": "open"})
 
+        assignment = GitHubRecord(
+            "assignees/1", "issue_assignees", {"number": 1, "assignees": ["fixture-human"]}
+        )
+        second_assignment = replace(
+            assignment, key="assignees/3", fields={**assignment.fields, "number": 3}
+        )
+        dependency = GitHubRecord(
+            "metadata/3",
+            "issue_metadata",
+            {"number": 3, "labels": [], "sub_issues": [], "blocked_by": [1]},
+            details={"updated_at": FIXTURE_TIME},
+        )
+
         async def fixture_facts(uow: UnitOfWork) -> None:
             await apply_resource(
-                uow, FIXTURE_REPO, ISSUES, "", GitHubResource((issue, trap_issue)), FIXTURE_TIME
+                uow,
+                FIXTURE_REPO,
+                ISSUES,
+                "",
+                GitHubResource(
+                    (issue, trap_issue, assignment, second_assignment),
+                    attributes={ISSUE_PAGINATION_VERIFIED: True},
+                ),
+                FIXTURE_TIME,
+            )
+            await apply_resource(
+                uow,
+                FIXTURE_REPO,
+                ISSUE_TREE,
+                "",
+                GitHubResource((dependency,), attributes={ISSUE_PAGINATION_VERIFIED: True}),
+                FIXTURE_TIME,
             )
             await apply_comments(
                 uow, FIXTURE_REPO, None, (comment, coercion_trap), FIXTURE_TIME, FIXTURE_TIME
@@ -432,16 +467,16 @@ async def test_every_registered_tool(endpoint: SearchEndpoint, transport: str, e
         called: set[str] = set()
         request_ids = count(21)
 
-        async def call(name: str, *, error: str | None = None, **args: Any) -> dict[str, Any]:
-            called.add(name)
+        async def call(tool_name: str, *, error: str | None = None, **args: Any) -> dict[str, Any]:
+            called.add(tool_name)
             number = next(request_ids)
-            if name in WRITER_TOOLS:
-                args["request_id"] = f"{name}-{number}"
-            reply = await send(message(era, number, "tools/call", name=name, arguments=args))
+            if tool_name in WRITER_TOOLS:
+                args["request_id"] = f"{tool_name}-{number}"
+            reply = await send(message(era, number, "tools/call", name=tool_name, arguments=args))
             assert "result" in reply, reply
             assert not reply["result"].get("isError", False), reply
             content = reply["result"]["content"][0]["text"]
-            if name == "search":
+            if tool_name == "search":
                 assert estimate_tokens(content) <= 256
             payload = json.loads(content)
             if error is not None:
@@ -624,6 +659,13 @@ async def test_every_registered_tool(endpoint: SearchEndpoint, transport: str, e
                 )
                 assert rejected["result"]["isError"]
         assert (await call("asks"))["asks"] == []
+        goal_text = "  " + FIRST_GOAL.replace(" satisfies ", "\r\nsatisfies ") + "  "
+        assert (await call("goal_set", name="coverage", text=goal_text))["name"] == "coverage"
+        goal_report = await call("goal", name="coverage")
+        assert goal_report["done"]
+        [coverage] = goal_report["goals"]
+        assert coverage["text"] == goal_text
+        assert coverage["remaining"] == []
         ask_id = (
             await call(
                 "ask", issue=3, text="  Choose option A?\r\n", options=["A", "B"], comment_id=345
@@ -752,6 +794,7 @@ async def test_every_registered_tool(endpoint: SearchEndpoint, transport: str, e
             "outbox_lease": {"consumer_id": stand_in.consumer_id},
             "outbox_done": {"act_id": "fixture"},
             "ask": {"issue": 3, "text": "fixture", "options": [], "comment_id": 345},
+            "goal_set": {"name": "fixture", "text": FIRST_GOAL},
             "decide": {
                 "who": "fixture-human",
                 "exact_words": "fixture",
@@ -803,6 +846,8 @@ async def test_every_registered_tool(endpoint: SearchEndpoint, transport: str, e
                 ),
                 ("decide", {**arguments["decide"], "request_id": "worker-decide"}),
                 ("ask", {**arguments["ask"], "request_id": "worker-ask"}),
+                ("goal_set", {**arguments["goal_set"], "request_id": "worker-goal"}),
+                ("goal", {"name": "coverage"}),
             ),
             start=3,
         ):

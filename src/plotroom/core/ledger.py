@@ -30,6 +30,7 @@ from plotroom.core.github_projection import GitHubResource
 from plotroom.core.merge_controller import ACTIVE_MERGE_ITEMS, reconcile_merge_controller
 from plotroom.core.merge_gate import GatePolicy, GateSnapshot, GateVerdict, evaluate_gate
 from plotroom.core.next_items import Item
+from plotroom.core.operator_goals import report_goals, validate_goal_name
 from plotroom.core.roles import OwnershipView, role_family
 from plotroom.core.run_reports import validate_identity
 from plotroom.core.search import SemanticSearch
@@ -590,6 +591,29 @@ class Ledger:
         if self._human_login is None or repository != self.github_repository:
             return set()
         return await self._store.pending_ask_issues(repository)
+
+    async def goals_use_blockers(self) -> bool:
+        return await self._store.goals_use_blockers()
+
+    async def goal(self, role: str, name: str | None) -> dict[str, Any]:
+        if _check_role(role) != "orchestrator":
+            raise LedgerError("forbidden", "only the orchestrator may read operator goals")
+        if name is not None:
+            validate_goal_name(name)
+        goals, facts = await self._store.read_goals(
+            name,
+            self.github_repository,
+            self._human_login,
+        )
+        if not goals:
+            if name is not None:
+                raise LedgerError("not_found", "goal not found")
+            return {"done": False, "goals": []}
+        if facts is None or self.github_error is not None:
+            raise LedgerError(
+                "unavailable", "goal evaluation needs an available GitHub issue projection"
+            )
+        return report_goals(goals, facts)
 
     async def list_asks(self, role: str, stale_only: bool) -> list[dict[str, Any]]:
         if role != "orchestrator":

@@ -25,6 +25,8 @@ COMMENTS = "issue_comments"
 COMMENT_BACKFILL = "issue_comments_backfill"
 ASK_COMMENT_HISTORY = "ask_comment_history"
 ISSUE_TREE = "issue_tree"
+ISSUE_PAGINATION_VERIFIED = "pagination_verified"
+ISSUE_RELATION_RETRY = "relationship_retry"
 
 REPOSITORY = FieldSpec("repository", "str")
 NUMBER = FieldSpec("number", "int")

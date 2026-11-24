@@ -5,12 +5,26 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from plotroom.adapters.github import GitHubUnavailable
+from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable
 from plotroom.adapters.github.read import GitHubReadClient, Row, number, obj, rows, string
 from plotroom.core.events import format_time
-from plotroom.core.github_projection import GitHubRecord, GitHubResource
+from plotroom.core.github_projection import (
+    ISSUE_PAGINATION_VERIFIED,
+    ISSUE_RELATION_RETRY,
+    GitHubRecord,
+    GitHubResource,
+)
 
 MAX_RELATION_REFRESHES = 24
+
+
+class IssueRelationshipReadError(GitHubUnavailable):
+    """A failed relationship batch whose discarded results need to be refreshed."""
+
+    def __init__(self, cause: Exception, numbers: tuple[int, ...]) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.numbers = numbers
 
 
 def _state(row: Row) -> str:
@@ -72,16 +86,27 @@ async def fetch_issues(
         if previous
         else set()
     )
-    async for row in api.pages(client, token, "/issues", params={"state": "all"}):
+    seen: set[int] = set()
+    async for row in api.pages(
+        client,
+        token,
+        "/issues",
+        params={"state": "all"},
+        verify_terminal=True,
+        verify_boundaries=True,
+    ):
+        n = number(row["number"])
+        if n in seen:
+            raise GitHubUnavailable("GitHub repeated an issue number across pages")
+        seen.add(n)
         if "pull_request" in row:
             continue
         issue = _issue(row)
         records.extend(issue)
-        n = issue[0].fields["number"]
         key = f"assignees/{n}"
         if len(issue) == 1 and key in assigned:
             records.append(GitHubRecord(key, "issue_assignees", {"number": n, "assignees": []}))
-    return GitHubResource(tuple(records))
+    return GitHubResource(tuple(records), attributes={ISSUE_PAGINATION_VERIFIED: True})
 
 
 def _issue_number(url: str) -> int:
@@ -208,11 +233,21 @@ async def _relations(
     for key, endpoint in (("sub_issues", "sub_issues"), ("blocked_by", "dependencies/blocked_by")):
         references = [
             _related(row, api.repository)
-            async for row in api.pages(client, token, f"/issues/{n}/{endpoint}")
+            async for row in api.pages(
+                client,
+                token,
+                f"/issues/{n}/{endpoint}",
+                verify_terminal=True,
+                verify_boundaries=True,
+            )
         ]
-        if key == "sub_issues":
-            references = [reference for reference in references if isinstance(reference, int)]
-        related[key] = list(dict.fromkeys(references))
+        if len(set(references)) != len(references):
+            raise GitHubUnavailable("GitHub repeated an issue relationship across pages")
+        related[key] = [
+            reference
+            for reference in references
+            if key != "sub_issues" or isinstance(reference, int)
+        ]
     return _issue_metadata(issue, related)
 
 
@@ -225,7 +260,7 @@ def _issue_metadata(issue: Row, related: dict[str, list[int | str]]) -> GitHubRe
         f"metadata/{n}",
         "issue_metadata",
         fields,
-        details={**issue, **related},
+        details={**issue, **related, ISSUE_PAGINATION_VERIFIED: True},
     )
 
 
@@ -236,7 +271,19 @@ async def fetch_issue_tree(
     issues: GitHubResource,
     previous: GitHubResource | None,
 ) -> GitHubResource:
-    old = {row.key: row for row in previous.records} if previous is not None else {}
+    retries: set[int] = (
+        set(previous.attributes.get(ISSUE_RELATION_RETRY, [])) if previous else set()
+    )
+    old = (
+        {
+            row.key: row
+            for row in previous.records
+            if row.details.get(ISSUE_PAGINATION_VERIFIED) is True
+            and row.fields["number"] not in retries
+        }
+        if previous
+        else {}
+    )
     records: list[GitHubRecord] = []
     async for row in api.pages(client, token, "/milestones", params={"state": "all"}):
         n = number(row["number"])
@@ -280,8 +327,42 @@ async def fetch_issue_tree(
         offset = (previous.generation // 8 * reconcile_count) % len(reconcile)
         reconcile = reconcile[offset:] + reconcile[:offset]
     pending_count = MAX_RELATION_REFRESHES - reconcile_count
-    refresh = pending[:pending_count] + reconcile[:reconcile_count]
+    fresh = [issue for issue in pending if issue["number"] not in retries]
+    retry_pending = [issue for issue in pending if issue["number"] in retries]
+    if previous is not None and retry_pending:
+        offset = previous.generation % len(retry_pending)
+        retry_pending = retry_pending[offset:] + retry_pending[:offset]
+    refresh = (fresh + retry_pending)[:pending_count] + reconcile[:reconcile_count]
+    refreshed: set[int] = set()
+    failed: set[int] = set()
     for issue in refresh:
-        records.append(await _relations(api, client, token, issue))
-    complete = len(pending) <= pending_count
-    return GitHubResource(tuple(records), complete=complete)
+        issue_id: int = issue["number"]
+        try:
+            records.append(await _relations(api, client, token, issue))
+        except GitHubRateLimited as exc:
+            raise IssueRelationshipReadError(
+                exc, tuple(candidate["number"] for candidate in refresh)
+            ) from exc
+        except (
+            GitHubUnavailable,
+            httpx.RequestError,
+            KeyError,
+            ValueError,
+            TypeError,
+            OverflowError,
+        ):
+            failed.add(issue_id)
+        else:
+            refreshed.add(issue_id)
+    return GitHubResource(
+        tuple(
+            row
+            for row in records
+            if row.fields["number"] not in failed or row.kind != "issue_metadata"
+        ),
+        complete=len(pending) <= pending_count and not failed,
+        attributes={
+            ISSUE_RELATION_RETRY: sorted(retries.difference(refreshed) | failed),
+            ISSUE_PAGINATION_VERIFIED: True,
+        },
+    )
