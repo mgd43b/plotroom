@@ -3,7 +3,7 @@ title: Container image, Compose file, and health endpoints
 type: feature
 ticket: 10
 created: '2026-11-24'
-status: in-review
+status: built
 baseline_revision: '7409917d0d93c76eab1d7f00ac3fb3aebf886de7'
 route: full
 route_source: auto
@@ -53,3 +53,8 @@ low-SQLite probes also passed. Independent review will cover the combined batch.
 ## Verification
 
 - Run targeted HTTP tests and a real Compose fixture with build, token issuance, authenticated MCP, readiness, and restart.
+
+The complete local suites passed 1,079 tests each on locked Python 3.14 and 3.15.
+Ruff, Pyright for both targets, and the dependency check passed. The branch was
+rebased on verified main 4460dc2f after confirming that the six unrelated plan
+status changes left the implementation patch byte-for-byte identical.

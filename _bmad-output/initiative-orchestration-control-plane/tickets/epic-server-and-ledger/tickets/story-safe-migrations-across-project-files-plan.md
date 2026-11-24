@@ -3,7 +3,7 @@ title: Safe migrations across project files
 type: feature
 ticket: 14
 created: '2026-11-24'
-status: in-review
+status: built
 baseline_revision: '38240710aa088a49d1bf9510fb51e34b9c4bba37'
 route: full
 route_source: auto
@@ -61,3 +61,8 @@ continues for other projects. The schema stays at revision 0024.
 ## Verification
 
 - Run migration and HTTP fixtures plus both locked Python suites. Rebuild and check local Compose.
+
+The complete local suites passed 1,079 tests each on locked Python 3.14 and 3.15.
+Ruff, Pyright for both targets, and the dependency check passed. The branch was
+rebased on verified main 4460dc2f after confirming that the six unrelated plan
+status changes left the implementation patch byte-for-byte identical.
