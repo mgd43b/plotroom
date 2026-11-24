@@ -123,3 +123,14 @@ Quick lens, one pass, 15 findings. Verdicts: medium patched = 6, low patched = 7
 - `uv run pyright --pythonversion 3.14` -- expected: 0 errors
 - `uv run python tests/depcheck.py` -- expected: exit 0
 - `uv run pytest tests/test_proxy.py tests/test_proxy_server.py tests/test_daemon_start.py tests/test_serve_http.py -n 4` -- expected: all pass (drop `-n 4` if xdist is absent)
+
+### Interactive real-client acceptance, 2026-11-24
+
+On main at `6990eeea`, each interactive client started an isolated daemon on demand through `plotroom connect --stdio`. Each called `snapshot()` and received project `demo` and cursor `0`, then started a `wait` with that cursor and a 120-second timeout.
+
+| Client | Server observation after Esc |
+|---|---|
+| Codex CLI 0.169.0 | The same wait was canceled after 4 ms. |
+| Claude Code 2.1.325 | The same wait was canceled after 65 ms. |
+
+Esc was pressed while each wait was active. Both daemons remained running until cleanup.
