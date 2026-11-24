@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from plotroom.adapters import embedding_http
 from plotroom.adapters.embedding_http import HttpEmbedder
 from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.adapters.store_sqlite.store import retryable_search_write_error
 from plotroom.app.config import ConfigError, EmbedderConfig, load_config
 from plotroom.app.serve import Daemon
 from plotroom.core import search
@@ -51,6 +52,7 @@ from plotroom.ports.search import (
 )
 from test_daemon import run_daemon, stop
 from test_search import message, opened_search
+from test_search_backfill import contend_after_checkpoint
 from test_search_sources import COMMENT_ID, LATER, START, comment, project_comment
 
 MODEL = EmbeddingModel("fixture-model", 2)
@@ -588,6 +590,83 @@ async def test_vector_writes_rollback_together_and_reject_stale_or_foreign_attem
         assert await other.embedding_index(MODEL).query_vector("other", (1, 0), 20) == SearchPage(
             (), 0
         )
+
+
+@pytest.mark.parametrize("exhaust", [False, True])
+async def test_embedding_write_contention_replays_only_the_writer_submission(
+    tmp_path: Path,
+    endpoint: Endpoint,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    exhaust: bool,
+) -> None:
+    caplog.set_level("INFO", logger="plotroom.search")
+    monkeypatch.setattr(search, "_WRITE_RETRY_DELAYS", (0.0,) * 3)
+    async with (
+        opened_search(tmp_path, "demo") as (store, ledger),
+        httpx.AsyncClient(trust_env=False) as client,
+    ):
+        index = store.embedding_index(MODEL)
+        await ledger.append("system", message("a", "first"))
+        embedder = HttpEmbedder(client, endpoint.url, MODEL)
+        task = asyncio.create_task(
+            follow_search_embeddings(
+                ledger, index, embedder, retryable_write_error=retryable_search_write_error
+            )
+        )
+        try:
+            (await endpoint.next_request(MODEL, "first")).vectors([1, 0])
+            await await_cursor(ledger, index, 1)
+
+            async def append_batch(uow: UnitOfWork) -> None:
+                await uow.append(message("b", "second"))
+                await uow.append(message("c", "third"))
+
+            durable: list[tuple[int, list[int]]] = []
+
+            def observe() -> bool:
+                with closing(sqlite3.connect(store.path)) as db:
+                    (position,) = db.execute("SELECT index_seq FROM embedding_cursors").fetchone()
+                    vectors = [
+                        seq
+                        for (seq,) in db.execute(
+                            "SELECT record_seq FROM search_vectors ORDER BY record_seq"
+                        )
+                    ]
+                durable.append((position, vectors))
+                return exhaust or len(durable) == 1
+
+            with contend_after_checkpoint(
+                store,
+                tmp_path / "contended.db",
+                lambda sql, _: "INSERT INTO embedding_cursors (model, dimension, index_seq)" in sql,
+                observe,
+                at_commit=True,
+            ):
+                await ledger.run("system", append_batch)
+                (await endpoint.next_request(MODEL, "second", "third")).vectors([0, 1], [1, 1])
+                if exhaust:
+                    await asyncio.wait_for(task, 5)
+                else:
+                    await await_cursor(ledger, index, 3)
+            assert endpoint.requests.empty()
+            assert durable == [(1, [1])] * (4 if exhaust else 2)
+            assert await index.cursor() == (1 if exhaust else 3)
+            assert (await index.query_vector("demo", (1, 0), 20)).total == (1 if exhaust else 3)
+            assert (await ledger.search("second", None, 20)).total == 1
+            logs = [record for record in caplog.records if record.name == "plotroom.search"]
+            assert logs[-1].__dict__["project"] == "demo"
+            assert logs[-1].__dict__["source"] == "embeddings"
+            assert logs[-1].__dict__["attempt"] == (4 if exhaust else 2)
+            assert logs[-1].__dict__["failure_code"] == "sqlite_busy"
+            assert logs[-1].getMessage() == (
+                "search write stopped" if exhaust else "search write recovered"
+            )
+        finally:
+            if not task.done():
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
 
 
 async def test_vector_excerpt_keeps_nul_and_caps_unicode_characters(tmp_path: Path) -> None:

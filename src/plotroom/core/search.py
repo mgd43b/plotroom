@@ -38,6 +38,41 @@ if TYPE_CHECKING:
 log = logging.getLogger("plotroom.search")
 EMBEDDING_BATCH_SIZE = 32
 BACKFILL_BATCH_SIZE = 32
+_WRITE_RETRY_DELAYS = (0.1, 0.5, 1.0)
+type WriteErrorClassifier = Callable[[Exception], str | None]
+
+
+async def _commit_search_write(
+    ledger: Ledger,
+    source: str,
+    work: Callable[[UnitOfWork], Awaitable[bool]],
+    retryable_write_error: WriteErrorClassifier | None,
+) -> bool:
+    """Retry a whole cursor-checked write outside the writer task."""
+    if retryable_write_error is None:
+        await ledger.run("system", work)
+        return True
+
+    failure_code = None
+    for attempt, delay in enumerate((*_WRITE_RETRY_DELAYS, None), start=1):
+        fields = {"project": ledger.project_id, "source": source, "attempt": attempt}
+        try:
+            await ledger.run("system", work)
+        except Exception as error:
+            failure_code = retryable_write_error(error)
+            if failure_code is None or delay is None:
+                log.error(
+                    "search write stopped",
+                    extra={**fields, "failure_code": failure_code or "search_write_failed"},
+                )
+                return False
+            log.warning("search write will retry", extra={**fields, "failure_code": failure_code})
+            await asyncio.sleep(delay)
+        else:
+            if failure_code is not None:
+                log.info("search write recovered", extra={**fields, "failure_code": failure_code})
+            return True
+    raise AssertionError("search write retry schedule must terminate")
 
 
 class _Sequenced(Protocol):
@@ -72,7 +107,11 @@ async def committed_batches[T: _Sequenced](
 
 
 async def backfill_search(
-    ledger: Ledger, index: SearchBackfill, *, limit: int = BACKFILL_BATCH_SIZE
+    ledger: Ledger,
+    index: SearchBackfill,
+    *,
+    limit: int = BACKFILL_BATCH_SIZE,
+    retryable_write_error: WriteErrorClassifier | None = None,
 ) -> None:
     """Backfill one project's retained sources in small, independently committed pages."""
     if index.project_id != ledger.project_id:
@@ -82,9 +121,10 @@ async def backfill_search(
 
     async def commit(
         source: BackfillSource, expected: BackfillPosition, page: BackfillPage
-    ) -> None:
-        await ledger.run(
-            "system",
+    ) -> bool:
+        return await _commit_search_write(
+            ledger,
+            f"backfill.{source}",
             partial(
                 UnitOfWork.save_search_backfill,
                 index=index,
@@ -92,6 +132,7 @@ async def backfill_search(
                 expected=expected,
                 page=page,
             ),
+            retryable_write_error,
         )
 
     async def event_cursor() -> int | None:
@@ -110,7 +151,8 @@ async def backfill_search(
                 (events[-1].seq,) if events else None,
                 tuple(event_record(event) for event in events if event.kind in EVENT_KINDS),
             )
-            await commit(BackfillSource.EVENTS, position, page)
+            if not await commit(BackfillSource.EVENTS, position, page):
+                return
 
     for source in (
         BackfillSource.DECISIONS,
@@ -120,7 +162,8 @@ async def backfill_search(
     ):
         while (position := await index.backfill_position(source)) is not None:
             page = await index.backfill_page(source, position, limit)
-            await commit(source, position, page)
+            if not await commit(source, position, page):
+                return
 
 
 def pack_vector(vector: tuple[float, ...], dimension: int) -> bytes:
@@ -133,7 +176,12 @@ def pack_vector(vector: tuple[float, ...], dimension: int) -> bytes:
 
 
 async def follow_search_embeddings(
-    ledger: Ledger, index: EmbeddingIndex, embedder: Embedder, *, retry_seconds: float = 5
+    ledger: Ledger,
+    index: EmbeddingIndex,
+    embedder: Embedder,
+    *,
+    retry_seconds: float = 5,
+    retryable_write_error: WriteErrorClassifier | None = None,
 ) -> None:
     if index.project_id != ledger.project_id:
         raise ValueError("embedding index must belong to the current project")
@@ -163,8 +211,9 @@ async def follow_search_embeddings(
                 await asyncio.sleep(retry_seconds)
                 continue
 
-        await ledger.run(
-            "system",
+        if not await _commit_search_write(
+            ledger,
+            "embeddings",
             partial(
                 UnitOfWork.save_embedding_batch,
                 index=index,
@@ -172,7 +221,9 @@ async def follow_search_embeddings(
                 through=revisions[-1].seq,
                 records=records,
             ),
-        )
+            retryable_write_error,
+        ):
+            return
 
 
 @dataclass(frozen=True)

@@ -115,6 +115,13 @@ continues indexing later records. The original text stays searchable. A literal 
 against a rejected record returns lexical results with `fallback_reason: embedding_rejected`.
 Temporary provider failures retry from the last committed checkpoint.
 
+If SQLite reports write contention during full-text backfill or embedding indexing,
+Plotroom retries the same checkpointed batch after 100 milliseconds, 500 milliseconds,
+and one second. The daemon log reports the project, source, attempt, and failure code
+when a write will retry, recovers, or stops. If the retries are exhausted or the write
+fails permanently, the affected background input stops. Its next start resumes from
+the last committed checkpoint.
+
 ## Local GitHub reads
 
 The daemon polls one GitHub repository per configured project. Use the existing

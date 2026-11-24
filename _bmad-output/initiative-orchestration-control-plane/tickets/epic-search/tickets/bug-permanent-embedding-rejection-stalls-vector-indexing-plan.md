@@ -3,7 +3,7 @@ title: 'Continue vector indexing after permanent input rejection'
 type: bugfix
 ticket: 8
 created: '2026-11-24'
-status: in-progress
+status: in-review
 baseline_revision: '995b3198aa75d74bada58c908f31c8cf22922897'
 route: full
 route_source: pinned

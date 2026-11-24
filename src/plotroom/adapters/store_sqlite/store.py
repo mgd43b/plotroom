@@ -16,6 +16,7 @@ import sqlite_vec  # pyright: ignore[reportMissingTypeStubs]
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import URL, Connection, event
 from sqlalchemy.engine.interfaces import DBAPIConnection
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import ConnectionPoolEntry
 
@@ -88,6 +89,20 @@ if TYPE_CHECKING:
     from plotroom.core.triggers import Trigger
 
 BEGIN_OPTION = "plotroom_begin"
+
+
+def retryable_search_write_error(error: Exception) -> str | None:
+    """Recognize SQLite write contention without inspecting SQL or exception messages."""
+    if isinstance(error, DBAPIError) and isinstance(error.orig, sqlite3.OperationalError):
+        # Extended result codes have the primary code in the low byte.
+        match getattr(error.orig, "sqlite_errorcode", 0) & 0xFF:
+            case sqlite3.SQLITE_BUSY:
+                return "sqlite_busy"
+            case sqlite3.SQLITE_LOCKED:
+                return "sqlite_locked"
+            case _:
+                pass
+    return None
 
 
 def _on_connect(dbapi_connection: DBAPIConnection, _record: ConnectionPoolEntry) -> None:
@@ -262,10 +277,9 @@ class SqliteStore:
             try:
                 await _uninterrupted(transaction.commit())
             except BaseException:
-                try:
-                    await _uninterrupted(transaction.rollback())
-                except Exception:
-                    await self._discard_writer()
+                # SQLAlchemy deactivates its transaction even if SQLite's COMMIT fails.
+                # Discard the connection to release any transaction still open in SQLite.
+                await self._discard_writer()
                 raise
         finally:
             self._writing = False

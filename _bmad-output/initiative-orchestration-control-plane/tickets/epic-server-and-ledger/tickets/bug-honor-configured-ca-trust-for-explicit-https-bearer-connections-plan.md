@@ -3,7 +3,7 @@ title: 'Honor configured HTTPS trust for explicit bearer connections'
 type: bugfix
 ticket: 22
 created: '2026-11-24'
-status: in-progress
+status: in-review
 baseline_revision: 'bfe548f37742f95c95bb2b57806f1bd20a555a54'
 route: full
 route_source: pinned
