@@ -16,6 +16,8 @@ def upgrade() -> None:
         sa.Column("text", sa.Text(), nullable=False),
         sa.Column("updated_at", sa.Text(), nullable=False),
         sa.Column("uses_blockers", sa.Boolean(), nullable=False),
+        sa.Column("uses_lanes", sa.Boolean(), nullable=False),
+        sa.Column("uses_decisions", sa.Boolean(), nullable=False),
     )
 
 

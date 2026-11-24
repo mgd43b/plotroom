@@ -895,13 +895,13 @@ async def test_goal_provider_rejects_duplicate_offset_pages(resource: str) -> No
         details={"resource": "issue", "number": 1, "updated_at": NOW},
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        fetch = (
-            fetch_issues(api, client, "fixture", None)
-            if resource == "issues"
-            else fetch_issue_tree(api, client, "fixture", GitHubResource((row,)), None)
-        )
-        with pytest.raises(GitHubUnavailable, match="repeated an issue"):
-            await fetch
+        if resource == "issues":
+            with pytest.raises(GitHubUnavailable, match="repeated an issue"):
+                await fetch_issues(api, client, "fixture", None)
+        else:
+            tree = await fetch_issue_tree(api, client, "fixture", GitHubResource((row,)), None)
+            assert not tree.complete
+            assert tree.attributes["relationship_retry"] == [1]
 
 
 async def test_issue_verification_rejects_a_shifted_nonduplicate_page() -> None:
@@ -922,20 +922,71 @@ async def test_issue_verification_rejects_a_shifted_nonduplicate_page() -> None:
     assert calls == [1, 2, 1]
 
 
+@pytest.mark.parametrize("conditional", [True, False])
 async def test_issue_verification_accepts_full_last_page_with_bounded_probe(
     monkeypatch: pytest.MonkeyPatch,
+    conditional: bool,
 ) -> None:
     monkeypatch.setattr("plotroom.adapters.github.read.MAX_PAGES", 1)
     calls: list[int] = []
+    rechecks: list[int] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         page = int(request.url.params["page"])
         calls.append(page)
+        if conditional and request.headers.get("If-None-Match") == '"fixture"':
+            rechecks.append(page)
+            return httpx.Response(304)
+        headers = {"ETag": '"fixture"'} if conditional and page == 1 else {}
         rows = [Fixture.issue(number) for number in range(1, 101)] if page == 1 else []
-        return httpx.Response(200, json=rows)
+        return httpx.Response(200, headers=headers, json=rows)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         result = await fetch_issues(GitHubReadClient(API, REPO), client, "fixture", None)
     assert result.complete
     assert len(result.records) == 100
     assert calls == [1, 2, 1]
+    assert rechecks == ([1] if conditional else [])
+
+
+async def test_relationship_failure_does_not_starve_fresh_issues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("plotroom.adapters.github.issue_details.MAX_RELATION_REFRESHES", 1)
+    reads: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix(f"/repos/{REPO}")
+        if path == "/milestones" or path.endswith("/sub_issues"):
+            return httpx.Response(200, json=[])
+        reads.append(path)
+        return (
+            httpx.Response(503)
+            if path == "/issues/1/dependencies/blocked_by"
+            else httpx.Response(200, json=[])
+        )
+
+    api = GitHubReadClient(API, REPO)
+    issues = GitHubResource(
+        tuple(
+            GitHubRecord(
+                f"issue/{number}",
+                "issue_opened",
+                {"number": number, "state": "open"},
+                details={
+                    "resource": "issue",
+                    "number": number,
+                    "updated_at": NOW,
+                    "labels": [],
+                    "milestone": 1,
+                },
+            )
+            for number in (1, 2)
+        )
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        first = await fetch_issue_tree(api, client, "fixture", issues, None)
+        second = await fetch_issue_tree(api, client, "fixture", issues, first)
+    assert reads == ["/issues/1/dependencies/blocked_by", "/issues/2/dependencies/blocked_by"]
+    assert not second.complete
+    assert any(row.key == "metadata/2" for row in second.records)

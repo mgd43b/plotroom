@@ -3,7 +3,7 @@ title: 'Parse and evaluate goals'
 type: feature
 ticket: '5'
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '78471ab1fd992a3a1ea209ecdadff0eb5a622b06'
 route: full
 route_source: auto
@@ -70,3 +70,4 @@ every issue where state = open and milestone = 1 satisfies assigned_to human or 
 - `uv run --python 3.14 python -m pytest -q tests/test_goal_language.py tests/test_goal_projection.py` and the corresponding Python 3.15 command each passed 39 cases. Fixtures cover the canonical rule, exact positioned clauses, typed predicates and precedence, direct open blockers, unavailable evidence, bounds, and read-only facts.
 - Ruff formatting and lint and strict Pyright passed for the parser, evaluator, and language fixtures.
 - [GitHub story](https://github.com/mgd43b/plotroom/issues/83)
+- Built: https://github.com/mgd43b/plotroom/pull/175

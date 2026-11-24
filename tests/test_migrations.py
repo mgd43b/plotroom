@@ -544,6 +544,16 @@ async def test_populated_0022_upgrade_preserves_search_and_governing_decisions(
             "orchestrator", "goal_set", "new-goal", {"name": "first", "text": FIRST_GOAL}
         )
         assert (await ledger.goal("orchestrator", "first"))["done"] is True
+        decision_goal = (
+            f'every issue where state = open satisfies decision "{decision["decision_id"]}"'
+        )
+        await ledger.execute(
+            "orchestrator",
+            "goal_set",
+            "decision-goal",
+            {"name": "decided", "text": decision_goal},
+        )
+        assert (await ledger.goal("orchestrator", "decided"))["done"] is True
     finally:
         await ledger.stop()
         await store.close()

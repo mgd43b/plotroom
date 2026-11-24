@@ -3,7 +3,7 @@ title: 'Store and evaluate operator goals'
 type: feature
 ticket: '6'
 created: '2026-11-23'
-status: in-review
+status: built
 baseline_revision: '78471ab1fd992a3a1ea209ecdadff0eb5a622b06'
 route: full
 route_source: auto
@@ -63,6 +63,8 @@ Given a persisted first goal and fixture issues across milestones, when assignme
 - Goal results include the issue observation time, and a known GitHub poll failure returns unavailable. Only blocker predicates activate goal-driven relationship polling. Re-enabling it advances the relationship generation in the goal writer transaction. The provider fixture verifies that a poll started before reactivation cannot publish its result afterward.
 - Explicit GitHub references establish lane ownership. Numeric or dotted lane refs with no durable GitHub identity remain unavailable, including after a work-item source change.
 
+- Opening Kodus feedback prompted isolated relationship retries, conditional boundary checks, and loading only the evidence requested by each goal.
+
 ## Verification
 
 - Local checkpoint: `uv run python -m pytest -q tests/test_goal_projection.py` passed all three projection and storage fixtures.
@@ -71,3 +73,4 @@ Given a persisted first goal and fixture issues across milestones, when assignme
 
 - `uv run python -m pytest -q tests/test_human_queue.py tests/test_goal_language.py tests/test_transport_contract.py`
 - [GitHub story](https://github.com/mgd43b/plotroom/issues/87)
+- Built: https://github.com/mgd43b/plotroom/pull/175

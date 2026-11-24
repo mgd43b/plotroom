@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from plotroom.adapters.github import GitHubUnavailable
+from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable
 from plotroom.adapters.github.read import GitHubReadClient, Row, number, obj, rows, string
 from plotroom.core.events import format_time
 from plotroom.core.github_projection import (
@@ -327,25 +327,42 @@ async def fetch_issue_tree(
         offset = (previous.generation // 8 * reconcile_count) % len(reconcile)
         reconcile = reconcile[offset:] + reconcile[:offset]
     pending_count = MAX_RELATION_REFRESHES - reconcile_count
-    refresh = pending[:pending_count] + reconcile[:reconcile_count]
-    refreshed: tuple[int, ...] = tuple(issue["number"] for issue in refresh)
-    try:
-        for issue in refresh:
+    fresh = [issue for issue in pending if issue["number"] not in retries]
+    retry_pending = [issue for issue in pending if issue["number"] in retries]
+    if previous is not None and retry_pending:
+        offset = previous.generation % len(retry_pending)
+        retry_pending = retry_pending[offset:] + retry_pending[:offset]
+    refresh = (fresh + retry_pending)[:pending_count] + reconcile[:reconcile_count]
+    refreshed: set[int] = set()
+    failed: set[int] = set()
+    for issue in refresh:
+        issue_id: int = issue["number"]
+        try:
             records.append(await _relations(api, client, token, issue))
-    except (
-        GitHubUnavailable,
-        httpx.RequestError,
-        KeyError,
-        ValueError,
-        TypeError,
-        OverflowError,
-    ) as exc:
-        raise IssueRelationshipReadError(exc, refreshed) from exc
+        except GitHubRateLimited as exc:
+            raise IssueRelationshipReadError(
+                exc, tuple(candidate["number"] for candidate in refresh)
+            ) from exc
+        except (
+            GitHubUnavailable,
+            httpx.RequestError,
+            KeyError,
+            ValueError,
+            TypeError,
+            OverflowError,
+        ):
+            failed.add(issue_id)
+        else:
+            refreshed.add(issue_id)
     return GitHubResource(
-        tuple(records),
-        complete=len(pending) <= pending_count,
+        tuple(
+            row
+            for row in records
+            if row.fields["number"] not in failed or row.kind != "issue_metadata"
+        ),
+        complete=len(pending) <= pending_count and not failed,
         attributes={
-            ISSUE_RELATION_RETRY: sorted(retries.difference(refreshed)),
+            ISSUE_RELATION_RETRY: sorted(retries.difference(refreshed) | failed),
             ISSUE_PAGINATION_VERIFIED: True,
         },
     )

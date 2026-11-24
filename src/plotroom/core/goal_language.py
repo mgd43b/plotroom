@@ -214,15 +214,18 @@ def parse_goal(text: str) -> Goal:
     return _Parser(text).parse()
 
 
-def uses_blockers(goal: Goal) -> bool:
-    def contains_blocker(predicate: _Predicate) -> bool:
-        if isinstance(predicate, _Unary):
-            return predicate.operator == "blocked_by" or contains_blocker(predicate.child)
-        if isinstance(predicate, _Boolean):
-            return any(contains_blocker(child) for child in predicate.children)
-        return False
+def goal_predicates(goal: Goal) -> frozenset[str]:
+    def collect(predicate: _Predicate) -> Iterator[str]:
+        if isinstance(predicate, _Atom):
+            yield predicate.field
+        elif isinstance(predicate, _Unary):
+            yield predicate.operator
+            yield from collect(predicate.child)
+        else:
+            for child in predicate.children:
+                yield from collect(child)
 
-    return contains_blocker(goal.selector) or contains_blocker(goal.requirement)
+    return frozenset((*collect(goal.selector), *collect(goal.requirement)))
 
 
 class _Truth(Enum):

@@ -5,7 +5,12 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TypeGuard
 
-from plotroom.core.github_projection import ISSUE_PAGINATION_VERIFIED, GitHubResource
+from plotroom.core.github_projection import (
+    ISSUE_PAGINATION_VERIFIED,
+    ISSUE_RELATION_RETRY,
+    GitHubRecord,
+    GitHubResource,
+)
 from plotroom.core.lanes import Lane
 
 
@@ -39,6 +44,8 @@ class StoredGoal:
     text: str
     updated_at: str
     uses_blockers: bool = False
+    uses_lanes: bool = False
+    uses_decisions: bool = False
 
 
 def verified_issue_projection(resource: GitHubResource | None) -> TypeGuard[GitHubResource]:
@@ -84,15 +91,16 @@ def project_goal_facts(
         for record in issues.records
         if record.kind == "issue_assignees"
     }
-    metadata = (
-        {
+    metadata: dict[int, GitHubRecord] = {}
+    if tree is not None and tree.attributes.get(ISSUE_PAGINATION_VERIFIED) is True:
+        retry = set(tree.attributes.get(ISSUE_RELATION_RETRY, []))
+        metadata = {
             record.fields["number"]: record
             for record in tree.records
             if record.kind == "issue_metadata"
+            and record.fields["number"] not in retry
+            and (tree.complete or record.details.get(ISSUE_PAGINATION_VERIFIED) is True)
         }
-        if verified_issue_projection(tree)
-        else {}
-    )
     lane_refs: list[tuple[str, list[str]]] = []
     unresolved_lanes: set[str] = set()
     for lane in lanes:

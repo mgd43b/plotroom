@@ -59,12 +59,15 @@ class GitHubReadClient:
         *,
         params: Mapping[str, Any] | None = None,
         query: Row | None = None,
+        etag: str | None = None,
     ) -> tuple[Any, httpx.Response]:
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2026-03-10",
         }
+        if etag is not None:
+            headers["If-None-Match"] = etag
         async with client.stream(
             "GET" if query is None else "POST",
             url,
@@ -73,6 +76,8 @@ class GitHubReadClient:
             headers=headers,
             follow_redirects=False,
         ) as response:
+            if response.status_code == 304 and etag is not None:
+                return None, response
             body = bytearray()
             async for chunk in response.aiter_bytes():
                 body.extend(chunk)
@@ -145,12 +150,43 @@ class GitHubReadClient:
         verify_terminal: bool = False,
     ) -> tuple[list[Any], bool]:
         """Read a validated page with its members available for individual decoding."""
+        result = await self._observe_page(
+            client,
+            token,
+            path,
+            page,
+            params=params,
+            key=key,
+            verify_total=verify_total,
+            verify_terminal=verify_terminal,
+        )
+        assert result is not None
+        records, more, _ = result
+        return records, more
+
+    async def _observe_page(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+        path: str,
+        page: int,
+        *,
+        params: Mapping[str, Any] | None,
+        key: str | None,
+        verify_total: bool,
+        verify_terminal: bool,
+        etag: str | None = None,
+    ) -> tuple[list[Any], bool, str | None] | None:
         value, response = await self._read(
             client,
             token,
             self.endpoint + path,
             params={**(params or {}), "per_page": 100, "page": page},
+            etag=etag,
         )
+        if response.status_code == 304:
+            return None
+        current_etag = response.headers.get("ETag")
         records = _array(obj(value)[key] if key is not None else value)
         if len(records) > 100:
             raise GitHubUnavailable("GitHub returned an oversized page")
@@ -173,14 +209,14 @@ class GitHubReadClient:
                     raise GitHubUnavailable("GitHub returned invalid pagination") from None
                 if last_page != page:
                     raise GitHubUnavailable("GitHub returned incomplete pagination")
-            return records, verify_terminal and len(records) == 100
+            return records, verify_terminal and len(records) == 100, current_etag
         try:
             next_page = int(httpx.URL(link["url"]).params["page"])
         except KeyError, ValueError, httpx.InvalidURL:
             raise GitHubUnavailable("GitHub returned invalid pagination") from None
         if next_page != page + 1:
             raise GitHubUnavailable("GitHub returned invalid pagination")
-        return records, True
+        return records, True, current_etag
 
     async def pages(
         self,
@@ -195,8 +231,10 @@ class GitHubReadClient:
         verify_terminal: bool = False,
         verify_boundaries: bool = False,
     ) -> AsyncIterator[Row]:
-        async def read(index: int) -> tuple[list[Row], bool]:
-            return await self.page(
+        async def read(
+            index: int, etag: str | None = None
+        ) -> tuple[list[Any], bool, str | None] | None:
+            return await self._observe_page(
                 client,
                 token,
                 path,
@@ -205,20 +243,25 @@ class GitHubReadClient:
                 key=key,
                 verify_total=verify_total,
                 verify_terminal=verify_terminal,
+                etag=etag,
             )
 
-        prior: tuple[list[Row], bool] | None = None
+        prior: tuple[list[Any], bool, str | None] | None = None
         for page in range(1, MAX_PAGES + 1 + verify_terminal):
-            records, more = await read(page)
+            observed = await read(page)
+            assert observed is not None
+            records, more, _ = observed
             if page > MAX_PAGES and (records or more):
                 break
-            if verify_boundaries and prior is not None and await read(page - 1) != prior:
-                raise GitHubUnavailable("GitHub pages shifted during the read")
-            for row in records:
+            if verify_boundaries and prior is not None:
+                confirmed = await read(page - 1, prior[2])
+                if confirmed is not None and confirmed[:2] != prior[:2]:
+                    raise GitHubUnavailable("GitHub pages shifted during the read")
+            for row in rows(records):
                 yield row
             if recent or not more:
                 return
-            prior = (records, more) if verify_boundaries else None
+            prior = observed if verify_boundaries else None
         raise GitHubUnavailable("GitHub read exceeded the page limit")
 
     async def review_threads(

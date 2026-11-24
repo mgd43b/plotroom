@@ -10,6 +10,7 @@ from plotroom.core.catalog import build_catalog
 from plotroom.core.events import LedgerError
 from plotroom.core.github_projection import (
     ISSUE_PAGINATION_VERIFIED,
+    ISSUE_RELATION_RETRY,
     ISSUE_TREE,
     ISSUES,
     GitHubRecord,
@@ -59,6 +60,21 @@ def test_goal_facts_keep_project_scope_and_detect_stale_relationship_evidence() 
     assert second.blockers is None
     partial = GitHubResource(tree.records, complete=False)
     assert project_goal_facts(repo, "Human", issues, partial, [], []).issues[1].blockers is None
+
+    verified_rows = tuple(
+        replace(
+            row, details={**row.details, ISSUE_PAGINATION_VERIFIED: True, "updated_at": "latest"}
+        )
+        for row in tree.records
+    )
+    retrying = GitHubResource(
+        verified_rows,
+        complete=False,
+        attributes={ISSUE_PAGINATION_VERIFIED: True, ISSUE_RELATION_RETRY: [2]},
+    )
+    partial_facts = project_goal_facts(repo, "Human", issues, retrying, [], [])
+    assert partial_facts.issues[1].blockers == (2, "foreign/repo#4")
+    assert partial_facts.issues[2].blockers is None
     assert second.decisions == {"dec_two"}
     assert not second.lanes
 
@@ -91,7 +107,7 @@ async def test_goal_storage_reads_only_committed_projection_facts(tmp_path: Path
     try:
         await store.migrate()
         original = StoredGoal("first", "fixture original text", "before")
-        updated = StoredGoal("first", "fixture revised text", "after")
+        updated = StoredGoal("first", "fixture revised text", "after", uses_blockers=True)
         async with store.transaction() as tx:
             await tx.save_goal(original)
         assert await store.read_goals("first", repo, "human") == ([original], None)

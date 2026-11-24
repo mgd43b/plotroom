@@ -6,8 +6,13 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from plotroom.core.events import LedgerError, format_time
-from plotroom.core.github_projection import ISSUE_RELATION_RETRY, ISSUE_TREE, GitHubResource
-from plotroom.core.goal_language import GoalSyntaxError, evaluate_goal, parse_goal, uses_blockers
+from plotroom.core.github_projection import (
+    ISSUE_PAGINATION_VERIFIED,
+    ISSUE_RELATION_RETRY,
+    ISSUE_TREE,
+    GitHubResource,
+)
+from plotroom.core.goal_language import GoalSyntaxError, evaluate_goal, goal_predicates, parse_goal
 from plotroom.core.goal_projection import GoalFacts, StoredGoal
 
 if TYPE_CHECKING:
@@ -42,7 +47,8 @@ async def set_goal(
         text.encode("utf-8")
     except UnicodeEncodeError:
         raise LedgerError("invalid", "goal text must be valid UTF-8") from None
-    needs_blockers = uses_blockers(goal)
+    predicates = goal_predicates(goal)
+    needs_blockers = "blocked_by" in predicates
     if repository is not None and needs_blockers and not await uow.goals_use_blockers():
         previous = await uow.github_resource(repository, ISSUE_TREE)
         tree = previous if previous is not None else GitHubResource(())
@@ -57,10 +63,23 @@ async def set_goal(
                 tree,
                 complete=False,
                 generation=tree.generation + 1 if previous is not None else 0,
-                attributes={**tree.attributes, ISSUE_RELATION_RETRY: retry},
+                attributes={
+                    **tree.attributes,
+                    ISSUE_RELATION_RETRY: retry,
+                    ISSUE_PAGINATION_VERIFIED: False,
+                },
             ),
         )
-    await uow.save_goal(StoredGoal(name, text, format_time(uow.now()), needs_blockers))
+    await uow.save_goal(
+        StoredGoal(
+            name,
+            text,
+            format_time(uow.now()),
+            needs_blockers,
+            uses_lanes="lane" in predicates,
+            uses_decisions="decision" in predicates,
+        )
+    )
     return {"name": name}
 
 

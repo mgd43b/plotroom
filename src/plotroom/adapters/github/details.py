@@ -51,6 +51,7 @@ from plotroom.core.github_projection import (
     COMMENT_BACKFILL,
     COMMENTS,
     FILES,
+    ISSUE_PAGINATION_VERIFIED,
     ISSUE_RELATION_RETRY,
     ISSUE_TREE,
     ISSUES,
@@ -505,7 +506,9 @@ class GitHubDetailPoller:
     ) -> None:
         async def write(uow: UnitOfWork) -> None:
             repository = self.api.repository
-            attributes: dict[str, Any] = {}
+            attributes: dict[str, Any] = (
+                {ISSUE_PAGINATION_VERIFIED: False} if resource == ISSUE_TREE else {}
+            )
             if retry_issues:
                 previous = await uow.github_resource(repository, resource, scope)
                 pending: set[int] = (

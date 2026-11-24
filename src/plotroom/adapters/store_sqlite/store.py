@@ -438,9 +438,21 @@ class SqliteStore:
             issues = await github_sql.github_resource(connection, repository, ISSUES, "")
             if not verified_issue_projection(issues):
                 return goals, None
-            tree = await github_sql.github_resource(connection, repository, ISSUE_TREE, "")
-            lanes = await board_lanes(connection, "orchestrator")
-            decisions = await human_queue_sql.decision_refs(connection)
+            tree = (
+                await github_sql.github_resource(connection, repository, ISSUE_TREE, "")
+                if any(goal.uses_blockers for goal in goals)
+                else None
+            )
+            lanes = (
+                await board_lanes(connection, "orchestrator")
+                if any(goal.uses_lanes for goal in goals)
+                else []
+            )
+            decisions = (
+                await human_queue_sql.decision_refs(connection)
+                if any(goal.uses_decisions for goal in goals)
+                else []
+            )
             return goals, project_goal_facts(
                 repository,
                 human_login,
