@@ -98,6 +98,10 @@ to verify the local daemon before sending credentials or MCP requests. Restart a
 process that was already running before upgrading so it can publish this socket. Explicit URLs
 continue to use HTTP or HTTPS as configured.
 
+For an explicit HTTPS URL with a bearer token, Plotroom verifies the certificate chain and hostname.
+Set `SSL_CERT_FILE` to a PEM CA bundle or `SSL_CERT_DIR` to an OpenSSL hashed CA directory to
+configure trust. These bearer connections go directly to the endpoint and bypass environment proxies.
+
 Hosted container and Kubernetes setup are tracked in the project plan.
 See the [local server and ledger design](_bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md)
 and the [architecture notes](_bmad-output/initiative-orchestration-control-plane/architecture-orchestration-control-plane/architecture-orchestration-control-plane.md).
