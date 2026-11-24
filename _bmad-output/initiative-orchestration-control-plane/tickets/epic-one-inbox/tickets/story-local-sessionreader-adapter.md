@@ -9,7 +9,8 @@ hitl: true
 risk: medium
 tracker_id: "44"
 remote: "https://github.com/mgd43b/plotroom/issues/44"
-tracker_status: backlog
+tracker_status: done
+status: built
 ---
 
 # Local SessionReader adapter
@@ -30,3 +31,11 @@ Verify: On a machine running the Claude desktop app, a lane's turn end appears o
 ## Notes
 
 - Entry 1 found a mechanism (#31, PR #48): the three sources, the turn key (cliSessionId, turnIndex) and the reader's limits are in the epic's Notes.
+
+- Real Claude Desktop acceptance (2026-11-24, Claude Desktop 5.11492.5, verified Plotroom main). An independent run captured one fresh Desktop-origin turn.
+  Isolated daemons received its unmodified records through the reader and an
+  authenticated ingest call in both arrival orders, with an explicit turn index
+  and with the index omitted. Each of the four cases retained exactly one
+  `claude.turn_report` in the committed ledger after another poll. The existing
+  SessionReader, intake, and configuration fixture suites passed 77 tests.
+- The tracker mirror is provisional until the acceptance note is verified on main.
