@@ -34,6 +34,14 @@ Poll for a new Ready pod after deletion. Issue the fixture token through a post-
 
 A Deployment can create a replacement Pod object while the old one terminates. The init container acquires the same data-directory lock before the daemon starts, so serving owners cannot overlap. The smoke checks init completion and allows the cursor to advance across restart.
 
-Two full native Codex passes informed the review dispositions. Both locked Python versions
+Both locked Python versions
 passed all 1,086 tests. Ruff, strict typing for both versions, and the dependency check passed.
 The final locally built image passed all three fixture workflows before cleanup.
+
+The opening Helm CI timeout occurred before a Ready server was observed. The next revision
+preserved diagnostics and proved the root cause: with release and Service named plotroom,
+Kubernetes injected PLOTROOM_PORT as a service URL. Plotroom expected an integer override and
+exited. The chart disables service links on its pods; the CI-style local fixture uses the exact
+plotroom release name and verifies authenticated replacement with that setting.
+
+The Service-first smoke precreates and adopts the very same plotroom Service before any server or token pod exists. It checks the server has no PLOTROOM_PORT service override. The token Job uses a private one-off handoff file and the smoke verifies its logs are empty.

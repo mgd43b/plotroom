@@ -192,6 +192,7 @@ def smoke(root: Path, name: str, tag: str) -> None:
                     mode,
                     "--relay-command",
                     sys.executable,
+                    "-u",
                     str(ROOT / "tests" / "switchboard_child.py"),
                     str(state),
                 ],

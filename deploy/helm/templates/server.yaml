@@ -21,6 +21,7 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
     spec:
       automountServiceAccountToken: false
+      enableServiceLinks: false
       securityContext:
         {{- include "plotroom.podSecurity" . | nindent 8 }}
       initContainers:

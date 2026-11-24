@@ -13,6 +13,7 @@ spec:
   template:
     spec:
       automountServiceAccountToken: false
+      enableServiceLinks: false
       restartPolicy: Never
       securityContext:
         {{- include "plotroom.podSecurity" . | nindent 8 }}
@@ -20,16 +21,31 @@ spec:
         - name: token
           image: {{ include "plotroom.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-c"]
           args:
-            - token
-            - issue
-            - --config
-            - /etc/plotroom/plotroom.toml
-            - --no-local
-            - --project
+            - |
+              import os
+              import subprocess
+              import sys
+              from pathlib import Path
+
+              handoff = Path("/data/.helm-bootstrap-token.json")
+              fd = os.open(
+                  handoff, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+              )
+              try:
+                  with os.fdopen(fd, "wb") as output:
+                      subprocess.run(
+                          ["plotroom", "token", "issue", "--config", "/etc/plotroom/plotroom.toml",
+                           "--no-local", "--project", sys.argv[1], "--role", "orchestrator"],
+                          stdout=output, check=True,
+                      )
+                      output.flush()
+                      os.fsync(output.fileno())
+              except BaseException:
+                  handoff.unlink(missing_ok=True)
+                  raise
             - {{ .Values.tokenJob.project | quote }}
-            - --role
-            - orchestrator
           securityContext:
             {{- include "plotroom.containerSecurity" . | nindent 12 }}
           volumeMounts:

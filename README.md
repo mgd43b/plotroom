@@ -191,8 +191,9 @@ python3 deploy/helm/smoke.py --kubeconfig "$KUBECONFIG" --context "kind-$cluster
 The chart keeps the SQLite databases and instance token hashes in one
 ReadWriteOnce claim. A replacement waits for the previous daemon to release
 the data-directory lock before starting. Run the optional token Job against the same claim for
-local verification and protect its logs while the Job exists. To remove the
-entire disposable cluster after the checks, run
+local verification. The Job leaves its bearer in a temporary 0600 file on
+the claim. The smoke helper consumes the file without logging it and removes
+the completed Job. To remove the entire disposable cluster, run
 `kind delete cluster --name "$cluster" --kubeconfig "$KUBECONFIG"`.
 
 ### Verify scheduled backups locally

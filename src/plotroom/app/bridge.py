@@ -150,6 +150,8 @@ def run_bridge(
     token = os.environ.get("PLOTROOM_TOKEN")
     try:
         check_endpoint(url, credentialed=True)
+        if not command:
+            raise EndpointError("a relay command may not be empty")
         if not token or not board:
             raise EndpointError("a board and PLOTROOM_TOKEN are required")
     except EndpointError as exc:

@@ -582,9 +582,10 @@ class SqliteStore:
             return await outbox_sql.readiness(connection, head, now)
 
     async def close(self) -> None:
-        writer, self._writer = self._writer, None
-        try:
-            if writer is not None:
-                await writer.close()
-        finally:
-            await self._engine.dispose()
+        async with self._backup_lock:
+            writer, self._writer = self._writer, None
+            try:
+                if writer is not None:
+                    await writer.close()
+            finally:
+                await self._engine.dispose()

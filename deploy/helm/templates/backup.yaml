@@ -32,6 +32,7 @@ spec:
       template:
         spec:
           automountServiceAccountToken: false
+          enableServiceLinks: false
           restartPolicy: Never
           securityContext:
             {{- include "plotroom.podSecurity" . | nindent 12 }}

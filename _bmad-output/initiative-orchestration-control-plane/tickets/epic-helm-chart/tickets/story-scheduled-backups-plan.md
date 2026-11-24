@@ -34,8 +34,10 @@ Retain the backup PVC when disabling the scheduler. A Job supplies its expected 
 
 Bound long CronJob names with a deterministic hash suffix. The smoke resolves the rendered name through the release label.
 
-Two full native Codex passes informed the review dispositions. Both locked Python versions
+Both locked Python versions
 passed all 1,086 tests. Ruff, strict typing for both versions, and the dependency check passed.
 The final locally built image passed all three fixture workflows before cleanup.
 
-Opening Kodus review fixed a missing mounted backup directory. The daemon validates it before taking the data lock.
+Opening review fixed a missing mounted backup directory. The daemon validates it before taking the data lock.
+
+Closing the store waits for active backup workers before the daemon releases its data-directory lock. The controlled worker test verifies shutdown blocks until the copy finishes.

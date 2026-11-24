@@ -83,6 +83,33 @@ def main() -> None:
     job = f"job/{release}-token"
     selector = f"app.kubernetes.io/instance={release},app.kubernetes.io/component=server"
     chart = str(Path(__file__).resolve().parent)
+
+    # Reproduce the CI ordering deliberately. Adopt only the Service created
+    # in this fresh fixture namespace, with the release's ownership metadata.
+    run([*kube, "create", "namespace", args.namespace])
+    service = {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": release,
+            "labels": {"app.kubernetes.io/managed-by": "Helm"},
+            "annotations": {
+                "meta.helm.sh/release-name": release,
+                "meta.helm.sh/release-namespace": args.namespace,
+            },
+        },
+        "spec": {
+            "selector": {
+                "app.kubernetes.io/name": "plotroom",
+                "app.kubernetes.io/instance": release,
+                "app.kubernetes.io/component": "server",
+            },
+            "ports": [{"name": "http", "port": 8765, "targetPort": "http"}],
+        },
+    }
+    run([*kube, "create", "-f", "-"], json.dumps(service))
+    original_service = json.loads(run([*kube, "get", "service", release, "-o", "json"]))
+    service_uid = original_service["metadata"]["uid"]
     run(
         [
             "helm",
@@ -108,12 +135,38 @@ def main() -> None:
     )
     spec = json.loads(run([*kube, "get", deployment, "-o", "json"]))["spec"]
     assert spec["replicas"] == 1 and spec["strategy"]["type"] == "Recreate"
+    assert spec["template"]["spec"]["enableServiceLinks"] is False
+    installed_service = json.loads(run([*kube, "get", "service", release, "-o", "json"]))
+    assert installed_service["metadata"]["uid"] == service_uid
     pvc = json.loads(run([*kube, "get", "pvc", f"{release}-data", "-o", "json"]))
     assert pvc["spec"]["accessModes"] == ["ReadWriteOnce"]
     assert pvc["status"]["phase"] == "Bound"
     run([*kube, "wait", "--for=condition=complete", job, "--timeout=90s"])
-    token = json.loads(run([*kube, "logs", job]))["token"]
-    # A completed fixture token Job no longer needs to retain the log containing its bearer.
+    assert not run([*kube, "logs", job]).strip()
+    handoff = """
+from pathlib import Path
+import stat
+path = Path("/data/.helm-bootstrap-token.json")
+assert stat.S_IMODE(path.stat().st_mode) == 0o600
+value = path.read_text()
+path.unlink()
+print(value)
+"""
+    token = json.loads(
+        run(
+            [
+                *kube,
+                "exec",
+                deployment,
+                "--container",
+                "plotroom",
+                "--",
+                "python",
+                "-c",
+                handoff,
+            ]
+        )
+    )["token"]
     run([*kube, "delete", job, "--wait=true"])
 
     def running_pod(previous_uid: str | None = None) -> tuple[str, str]:
@@ -121,9 +174,13 @@ def main() -> None:
         while time.monotonic() < deadline:
             pods = json.loads(run([*kube, "get", "pods", "-l", selector, "-o", "json"]))["items"]
             ready = [
-                pod for pod in pods if not pod["metadata"].get("deletionTimestamp")
-                and any(c["type"] == "Ready" and c["status"] == "True"
-                        for c in pod["status"].get("conditions", []))
+                pod
+                for pod in pods
+                if not pod["metadata"].get("deletionTimestamp")
+                and any(
+                    c["type"] == "Ready" and c["status"] == "True"
+                    for c in pod["status"].get("conditions", [])
+                )
             ]
             assert len(ready) <= 1, "more than one server pod is ready"
             if ready and ready[0]["metadata"]["uid"] != previous_uid:
@@ -144,6 +201,17 @@ def main() -> None:
         )
 
     old_name, old_uid = running_pod()
+    run(
+        [
+            *kube,
+            "exec",
+            old_name,
+            "--",
+            "python",
+            "-c",
+            'import os; assert "PLOTROOM_PORT" not in os.environ',
+        ]
+    )
     first = check(old_name, create=True)
     run([*kube, "delete", "pod", old_name, "--wait=true", "--timeout=90s"])
     new_name, new_uid = running_pod(old_uid)

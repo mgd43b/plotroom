@@ -81,7 +81,7 @@ def _parser() -> argparse.ArgumentParser:
     bridge.add_argument("--url", required=True, help="server MCP endpoint")
     bridge.add_argument("--board", required=True, help="the configured Switchboard board")
     bridge.add_argument("--mode", choices=("auto", "legacy"), default="auto")
-    bridge.add_argument("--relay-command", nargs="+", default=("switchboard-relay",))
+    bridge.add_argument("--relay-command", nargs=argparse.REMAINDER, default=("switchboard-relay",))
     token = commands.add_parser("token", help="manage credentials without a running daemon")
     token_commands = token.add_subparsers(dest="action", required=True)
     issue = token_commands.add_parser("issue", help="issue a token and print it once as JSON")

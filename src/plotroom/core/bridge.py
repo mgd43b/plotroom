@@ -79,7 +79,7 @@ async def lease_bridge(
                 continue
             address, body = routes[worker].destination, action.payload["text"]
         act_id = f"bridge_{uuid4()}"
-        expires = format_time(now + LEASE_DURATION)
+        expires = format_time(uow.now() + LEASE_DURATION)
         # Lease metadata travels with the existing action row, under the project's writer lock.
         await record_attempt(
             uow,

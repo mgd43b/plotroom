@@ -1,11 +1,14 @@
+import asyncio
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 
 import httpx
 import pytest
 
+from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.app.config import ConfigError
 from plotroom.app.serve import Daemon
 from test_daemon import bearer, make_config, run_daemon, stop
@@ -67,3 +70,27 @@ async def test_server_rejects_a_missing_backup_mount(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="existing writable directory"):
         await Daemon(config).run()
     assert not config.data_dir.exists()
+
+
+async def test_store_close_waits_for_its_backup_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered, release = Event(), Event()
+
+    def copy(_path: Path, _root: Path, _project: str, _retain: int) -> str:
+        entered.set()
+        assert release.wait(timeout=10)
+        return "fixture.bak"
+
+    monkeypatch.setattr("plotroom.adapters.store_sqlite.store.scheduled_backup", copy)
+    store = SqliteStore("test", tmp_path)
+    backup = asyncio.create_task(store.backup(tmp_path, 1))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        closing_store = asyncio.create_task(store.close())
+        await asyncio.sleep(0)
+        assert not closing_store.done()
+    finally:
+        release.set()
+    assert await backup == "fixture.bak"
+    await closing_store
