@@ -3,7 +3,7 @@ title: 'Honor configured HTTPS trust for explicit bearer connections'
 type: bugfix
 ticket: 22
 created: '2026-11-24'
-status: in-review
+status: built
 baseline_revision: 'bfe548f37742f95c95bb2b57806f1bd20a555a54'
 route: full
 route_source: pinned
@@ -60,3 +60,4 @@ Adapted the read-only stash without applying it. Explicit HTTPS bearer transport
 
 - `uv run --locked python -m pytest -q tests/test_proxy.py tests/test_daemon_start.py tests/test_transport_contract.py`
 - `uv run --locked ruff check src tests` and `uv run --locked pyright`
+- Combined independent review and rechecks completed. Full final suites passed 1,069 tests each on managed Python 3.14 and 3.15. Ruff, Pyright, core dependency and whitespace checks passed.

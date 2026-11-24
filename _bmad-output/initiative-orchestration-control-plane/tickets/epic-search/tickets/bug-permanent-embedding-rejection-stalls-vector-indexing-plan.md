@@ -3,7 +3,7 @@ title: 'Continue vector indexing after permanent input rejection'
 type: bugfix
 ticket: 8
 created: '2026-11-24'
-status: in-review
+status: built
 baseline_revision: '995b3198aa75d74bada58c908f31c8cf22922897'
 route: full
 route_source: pinned
@@ -64,3 +64,4 @@ Authorized literal matches against a rejected revision use `embedding_rejected` 
 - The embedding, authenticated MCP search, and migration suites passed on Python 3.14.10 and 3.15.2, with 63 tests on each.
 - Ruff lint and format checks, Pyright, and `git diff --check` passed.
 - After the protocol review, 44 focused tests passed across embedding behavior, authenticated MCP rejection fallback, and the populated upgrade.
+- Combined independent review and rechecks completed. Full final suites passed 1,069 tests each on managed Python 3.14 and 3.15. Ruff, Pyright, core dependency and whitespace checks passed.

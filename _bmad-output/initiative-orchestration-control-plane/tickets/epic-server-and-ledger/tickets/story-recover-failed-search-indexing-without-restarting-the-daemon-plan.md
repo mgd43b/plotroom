@@ -3,7 +3,7 @@ title: 'Recover failed local search writes within a bounded policy'
 type: feature
 ticket: 24
 created: '2026-11-24'
-status: in-review
+status: built
 baseline_revision: '976bc2958e57ebbdb4b693968cd6478ddc4cf889'
 route: full
 route_source: pinned
@@ -68,3 +68,4 @@ Approved choice implemented: “Surface the failure and retry within limits from
 - `uv run --locked ruff check src tests` and `uv run --locked pyright`
 
 The focused suite passed all 72 tests on Python 3.14.10 and 3.15.2. Real fixture SQLite contention was injected after checkpoint SQL and at commit. Tests verified durable rollback, same-run recovery, exhausted retries, cancellation during backoff, and a redacted terminal error for a permanent constraint failure. Ruff lint and formatting checks and Pyright passed.
+- Combined independent review and rechecks completed. Full final suites passed 1,069 tests each on managed Python 3.14 and 3.15. Ruff, Pyright, core dependency and whitespace checks passed.
