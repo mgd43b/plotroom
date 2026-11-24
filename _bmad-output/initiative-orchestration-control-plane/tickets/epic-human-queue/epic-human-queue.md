@@ -11,6 +11,7 @@ companions:
 after: []
 refined: true
 risk: low
+status: done
 ---
 
 # The human's queue
