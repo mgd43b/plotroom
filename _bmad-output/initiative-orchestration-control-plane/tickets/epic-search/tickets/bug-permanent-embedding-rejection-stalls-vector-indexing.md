@@ -10,7 +10,7 @@ hitl: false
 risk: medium
 tracker_id: "171"
 remote: "https://github.com/mgd43b/plotroom/issues/171"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Permanent embedding rejection stalls vector indexing

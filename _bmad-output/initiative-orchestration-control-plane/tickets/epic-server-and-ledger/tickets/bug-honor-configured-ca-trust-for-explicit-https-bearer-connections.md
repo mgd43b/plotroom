@@ -10,7 +10,7 @@ hitl: false
 risk: medium
 tracker_id: "139"
 remote: "https://github.com/mgd43b/plotroom/issues/139"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Honor configured CA trust for explicit HTTPS bearer connections
