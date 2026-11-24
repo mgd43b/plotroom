@@ -117,7 +117,7 @@ export PLOTROOM_PROJECTS=compose-demo
 docker compose -p plotroom-local up --build --detach --wait
 curl --fail http://127.0.0.1:8765/healthz
 curl --fail http://127.0.0.1:8765/readyz/compose-demo
-docker compose -p plotroom-local run --rm --no-deps -T plotroom \\
+docker compose -p plotroom-local run --rm --no-deps -T plotroom \
   token issue --no-local --project compose-demo --role orchestrator
 ```
 

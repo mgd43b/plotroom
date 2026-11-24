@@ -519,12 +519,20 @@ async def test_a_file_with_an_unknown_revision_is_not_migrated(tmp_path: Path) -
 async def test_daemon_upgrades_and_backs_up_two_projects_while_isolating_a_corrupt_file(
     tmp_path: Path,
 ) -> None:
-    config = make_config(tmp_path, "alpha", "corrupt", "beta")
+    config = make_config(tmp_path, "alpha", "corrupt", "incomplete", "beta")
     config.data_dir.mkdir()
     corrupt = config.data_dir / "corrupt.db"
     garbage = b"not a SQLite database"
     corrupt.write_bytes(garbage)
     revisions = {"alpha": "0013", "beta": "0023"}
+
+    incomplete = SqliteStore("incomplete", config.data_dir)
+    try:
+        await incomplete.migrate()
+    finally:
+        await incomplete.close()
+    with closing(sqlite3.connect(incomplete.path)) as db, db:
+        db.execute("DROP TABLE next_items")
 
     with ExitStack() as opened:
         for name, revision in revisions.items():
@@ -558,9 +566,11 @@ async def test_daemon_upgrades_and_backs_up_two_projects_while_isolating_a_corru
                     assert readiness.json()["projects"] == {
                         "alpha": "ready",
                         "corrupt": "unavailable",
+                        "incomplete": "unavailable",
                         "beta": "ready",
                     }
                     assert (await http.get(f"{base}/readyz/corrupt")).status_code == 503
+                    assert (await http.get(f"{base}/readyz/incomplete")).status_code == 503
                     assert (await http.get(f"{base}/readyz/alpha")).status_code == 200
                 for name in revisions:
                     async with authenticated_client(f"{base}/mcp", bearer(config, name)) as client:

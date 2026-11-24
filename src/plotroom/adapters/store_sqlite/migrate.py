@@ -83,7 +83,7 @@ def _backup(source: sqlite3.Connection, path: Path) -> None:
             "migration backup directory must be private and owned by the daemon"
         )
 
-    fd, name = tempfile.mkstemp(prefix=f"{path.name}.pre-migration-", dir=directory)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.pre-migration-", suffix=".tmp", dir=directory)
     staging = Path(name)
     try:
         # Bound a backup blocked by another SQLite connection. Successful page copies can continue.
@@ -105,12 +105,15 @@ def _backup(source: sqlite3.Connection, path: Path) -> None:
             if target.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
                 raise ProjectMigrationError("SQLite backup could not leave WAL mode")
         os.fsync(fd)
-        os.link(staging, staging.with_suffix(".bak"))
-        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        backup = staging.with_name(staging.name.removeprefix(".").removesuffix(".tmp") + ".bak")
+        os.link(staging, backup)
+        # Sync both the backup entry and the directory entry created on the first backup.
+        for parent in (directory, path.parent):
+            directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     finally:
         os.close(fd)
         staging.unlink(missing_ok=True)

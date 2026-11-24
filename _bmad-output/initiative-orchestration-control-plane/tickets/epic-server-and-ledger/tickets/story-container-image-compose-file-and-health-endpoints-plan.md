@@ -48,6 +48,8 @@ low-SQLite probes also passed. Independent review will cover the combined batch.
 
 ## Review Triage Log
 
+- Medium, fixed. Corrected the shell continuation in the offline Compose token command.
+
 ## Verification
 
 - Run targeted HTTP tests and a real Compose fixture with build, token issuance, authenticated MCP, readiness, and restart.

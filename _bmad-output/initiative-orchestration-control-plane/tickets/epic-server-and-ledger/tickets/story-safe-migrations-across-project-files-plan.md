@@ -48,6 +48,13 @@ continues for other projects. The schema stays at revision 0024.
 
 ## Review Triage Log
 
+- High, fixed. Publish the whole unique filename so later migrations can keep earlier backups.
+- Medium, fixed. Sync the data directory as well as the backup directory before upgrading.
+- Medium, fixed. Handle project-specific database failures during ledger initialization and
+  close partial project resources. The fixture includes an intact SQLite file stamped at head
+  whose application schema is incomplete.
+- Eight focused probe, migration, backup, and shutdown tests passed after these changes.
+
 ## Verification
 
 - Run migration and HTTP fixtures plus both locked Python suites. Rebuild and check local Compose.
