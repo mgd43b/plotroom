@@ -10,7 +10,7 @@ route_source: pinned
 risk: high
 review: thorough
 review_source: pinned
-lenses_ran: []
+lenses_ran: [blind-hunter, edge-case-hunter, verification-gap, intent-alignment]
 context: ['{project-root}/AGENTS.md']
 ---
 
@@ -37,7 +37,7 @@ Use fixture-only SQLite and loopback HTTP. Scope is local search. Preserve the w
 
 ## Code Map
 
-- `adapters/embedding_http.py` already bisects oversized batches. Classify only definite per-record evidence. HTTP 413 after isolating a single input without Retry-After is a defined payload rejection. Client response-size limits, ambiguous 4xx, auth, bad JSON, 429, 5xx and temporary 413 are not individual permanent rejections. Keep ordered mixed outcomes and the existing transactional behavior when any split fails transiently.
+- `adapters/embedding_http.py` bisects bare HTTP 413 batches. A singleton 413 is a confirmed payload rejection only if it has no `Retry-After` and a JSON body of at most 4 KiB with `error.code == "input_too_large"`. Ambiguous 413 responses, malformed or oversized error payloads, client response-size limits, auth, ambiguous 4xx, 429, and 5xx remain batch failures. Keep ordered mixed outcomes and the existing transactional behavior when any split fails transiently.
 - `ports/search.py`, `core/search.py`, `core/unit_of_work.py` and SQLite `embedding_sql.py`/store own the ordered outcomes and serialized expected-cursor commit. Use typed rejection, persist safe reason and model/dimension plus current record revision in migration 0024 after 0023, and remove stale dispositions when the revision is replaced. Preserve foreign-project and stale-revision guards.
 - Keep rejected text in FTS and make rejection observable. Preflight and final query use the model and authorized kinds: known rejects do not hold readiness for unrelated records. If the literal query matches a rejected record, use observable lexical fallback so normal MCP search returns it. Recheck this in the final snapshot after HTTP, and count only ranked vector hits when serving semantic results. Never send provider error bodies or source text to logs.
 - `tests/test_search_embeddings.py` has the loopback provider and restart/race fakes. `tests/test_migrations.py` covers populated upgrades. Explain confirmed rejection, lexical availability and transient retry in README.
@@ -50,13 +50,17 @@ Use fixture-only SQLite and loopback HTTP. Scope is local search. Preserve the w
 
 ## Implementation Notes
 
-Implemented the approved choice “Record the rejection, keep the text searchable, and index later records (Recommended)”. A singleton HTTP 413 without `Retry-After` records the typed `input_too_large` disposition for the exact revision and configured model and dimension. The writer stores rejections and vectors with the expected cursor in one transaction. Superseding the source removes its prior disposition.
+Implemented the approved choice “Record the rejection, keep the text searchable, and index later records (Recommended)”. A singleton HTTP 413 without `Retry-After` and with a bounded JSON `error.code` of `input_too_large` records the typed disposition for the exact revision and configured model and dimension. The writer stores rejections and vectors with the expected cursor in one transaction. Superseding the source removes its prior disposition. A different model can index the original text without changing the original model's disposition.
 
-Authorized literal matches against a rejected revision use `embedding_rejected` lexical fallback. The final vector query rechecks the match in its SQLite snapshot. Semantic counts include only records with vectors. Fixture coverage confirms the split request remains atomic on HTTP 400, 401, 413 with `Retry-After`, 429, and 500, as well as malformed and oversized responses.
+Authorized literal matches against a rejected revision use `embedding_rejected` lexical fallback. The final vector query rechecks the match in its SQLite snapshot. An explicit rejection of the query input uses `query_rejected` lexical fallback and leaves the index unchanged. Semantic counts include only records with vectors. Bare 413 responses split and retry through gateway recovery. Fixture coverage confirms the split request remains atomic on HTTP 400, 401, 413 with `Retry-After`, 429, and 500, as well as ambiguous, malformed, or oversized singleton 413 responses.
 
 ## Review Triage Log
+
+- A bare HTTP 413 is ambiguous. Require a bounded typed input rejection and preserve the durable cursor during gateway-wide 413 failures.
+- Add end-to-end query fallback and same-dimension replacement-model coverage. Keep the populated migration test valid when later migrations extend the chain.
 
 ## Verification
 
 - The embedding, authenticated MCP search, and migration suites passed on Python 3.14.10 and 3.15.2, with 63 tests on each.
 - Ruff lint and format checks, Pyright, and `git diff --check` passed.
+- After the protocol review, 44 focused tests passed across embedding behavior, authenticated MCP rejection fallback, and the populated upgrade.

@@ -109,18 +109,19 @@ and the [architecture notes](_bmad-output/initiative-orchestration-control-plane
 ## Local search
 
 Search uses the project's full-text index by default. A project can also configure an
-embedding endpoint for semantic search. If the endpoint confirms that one source record
-is too large, Plotroom records the rejection for that revision, model, and dimension and
-continues indexing later records. The original text stays searchable. A literal match
+embedding endpoint for semantic search. To confirm that one input is too large, the endpoint must
+return HTTP 413 for a single input, with no `Retry-After` header and `error.code` set to
+`input_too_large` in a JSON response of at most 4 KiB. Plotroom records the rejection for
+that revision, model, and dimension and continues indexing later records. A literal match
 against a rejected record returns lexical results with `fallback_reason: embedding_rejected`.
-Temporary provider failures retry from the last committed checkpoint.
+Unconfirmed rejections and temporary provider failures retry from the last committed checkpoint.
 
-If SQLite reports write contention during full-text backfill or embedding indexing,
-Plotroom retries the same checkpointed batch after 100 milliseconds, 500 milliseconds,
-and one second. The daemon log reports the project, source, attempt, and failure code
-when a write will retry, recovers, or stops. If the retries are exhausted or the write
-fails permanently, the affected background input stops. Its next start resumes from
-the last committed checkpoint.
+If SQLite reports write contention or a full database during full-text backfill or
+embedding indexing, Plotroom retries the same checkpointed batch after 100 milliseconds,
+500 milliseconds, and one second. The daemon log reports the project, source, attempt,
+and failure code when a write will retry, recovers, or stops. If the retries are exhausted
+or the write fails permanently, the affected background input stops. Its next start resumes
+from the last committed checkpoint.
 
 ## Local GitHub reads
 

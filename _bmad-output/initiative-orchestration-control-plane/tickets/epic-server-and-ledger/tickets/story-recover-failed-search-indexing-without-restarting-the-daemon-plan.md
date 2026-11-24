@@ -10,7 +10,7 @@ route_source: pinned
 risk: high
 review: thorough
 review_source: pinned
-lenses_ran: []
+lenses_ran: [blind-hunter, edge-case-hunter, verification-gap, intent-alignment]
 context: ['{project-root}/AGENTS.md']
 ---
 
@@ -50,15 +50,21 @@ Use fixture-only SQLite and loopback HTTP. Scope is local search. Preserve the w
 
 Approved choice implemented: “Surface the failure and retry within limits from the last committed checkpoint (Recommended)”.
 
-- The daemon retries SQLite `BUSY` and `LOCKED` for lexical backfill and embedding writes after 100 ms, 500 ms, and 1 second. Each retry submits the same cursor-checked transaction. The embedding follower reuses the provider outcome for that batch.
+- The daemon retries SQLite `BUSY`, `LOCKED`, and `FULL` for lexical backfill and embedding writes after 100 ms, 500 ms, and 1 second. Each retry submits the same cursor-checked transaction. The embedding follower reuses the provider outcome for that batch.
 - Structured warnings, recovery notices, and terminal errors carry the project, source, attempt, and failure code. Reports omit database messages and parameters. Exhausted and permanent write faults stop the affected input.
 - The store discards its writer connection on a failed commit to release any SQLite transaction that SQLAlchemy has deactivated. The next submission uses a clean connection.
 
 ## Review Triage Log
 
+- Add SQLITE_FULL to bounded recovery and prove the real daemon wires both search inputs, preserves committed state after rollback, and serves results in the same process.
+- Forward the production keyword from the existing Epic 7 daemon fixture so unrelated acceptance still covers the real backfill setup.
+
+- Added exact SQLite `FULL` classification and an authenticated localhost test of both registered search inputs. The fixture forces `BUSY` after the lexical checkpoint write and `FULL` at embedding commit. Both inputs recover in the same daemon process.
+
 ## Verification
 
 - `uv run --locked python -m pytest -q tests/test_search_backfill.py tests/test_search_embeddings.py tests/test_search_e2e.py tests/test_migrations.py`
+- `uv run --locked python -m pytest -q tests/test_search_backfill.py tests/test_search_recovery.py`
 - `uv run --locked ruff check src tests` and `uv run --locked pyright`
 
 The focused suite passed all 72 tests on Python 3.14.10 and 3.15.2. Real fixture SQLite contention was injected after checkpoint SQL and at commit. Tests verified durable rollback, same-run recovery, exhausted retries, cancellation during backoff, and a redacted terminal error for a permanent constraint failure. Ruff lint and formatting checks and Pyright passed.

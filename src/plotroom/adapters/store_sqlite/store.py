@@ -92,7 +92,7 @@ BEGIN_OPTION = "plotroom_begin"
 
 
 def retryable_search_write_error(error: Exception) -> str | None:
-    """Recognize SQLite write contention without inspecting SQL or exception messages."""
+    """Recognize recoverable SQLite write faults from their primary result codes."""
     if isinstance(error, DBAPIError) and isinstance(error.orig, sqlite3.OperationalError):
         # Extended result codes have the primary code in the low byte.
         match getattr(error.orig, "sqlite_errorcode", 0) & 0xFF:
@@ -100,6 +100,8 @@ def retryable_search_write_error(error: Exception) -> str | None:
                 return "sqlite_busy"
             case sqlite3.SQLITE_LOCKED:
                 return "sqlite_locked"
+            case sqlite3.SQLITE_FULL:
+                return "sqlite_full"
             case _:
                 pass
     return None

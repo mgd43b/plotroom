@@ -365,19 +365,26 @@ def contend_after_checkpoint(
     on_write: Callable[[], bool],
     *,
     at_commit: bool = False,
+    full: bool = False,
 ) -> Generator[None]:
-    """Inject a real SQLite BUSY after checkpoint SQL or at commit of that transaction."""
+    """Inject a real SQLite BUSY or FULL after checkpoint SQL or at commit."""
     with closing(sqlite3.connect(fault_path, isolation_level=None)) as blocker:
-        blocker.execute("CREATE TABLE held (id INTEGER)")
-        blocker.execute("BEGIN IMMEDIATE")
+        blocker.execute("CREATE TABLE held (value BLOB)")
+        if not full:
+            blocker.execute("BEGIN IMMEDIATE")
         fault_engine = create_engine(
             URL.create("sqlite", database=str(fault_path)), connect_args={"timeout": 0}
         )
         engine = store._engine.sync_engine  # pyright: ignore[reportPrivateUsage]
         pending: Connection | None = None
 
-        def busy_write() -> None:
+        def fail_write() -> None:
             with fault_engine.connect() as connection:
+                if full:
+                    pages = connection.exec_driver_sql("PRAGMA page_count").scalar_one()
+                    connection.exec_driver_sql(f"PRAGMA max_page_count={pages}")
+                    connection.exec_driver_sql("INSERT INTO held VALUES (zeroblob(1048576))")
+                    return
                 connection.exec_driver_sql("INSERT INTO held VALUES (1)")
 
         def after_write(
@@ -393,13 +400,13 @@ def contend_after_checkpoint(
                 if at_commit:
                     pending = conn
                 else:
-                    busy_write()
+                    fail_write()
 
         def before_commit(conn: Connection) -> None:
             nonlocal pending
             if conn is pending:
                 pending = None
-                busy_write()
+                fail_write()
 
         event.listen(engine, "after_cursor_execute", after_write)
         if at_commit:

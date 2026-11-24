@@ -219,7 +219,7 @@ async def test_mcp_search_keeps_rejected_text_and_ranks_only_vectors(
         async with authenticated_client(f"http://127.0.0.1:{port}/mcp", token) as client:
             rejected_body = "oversized observatory"
             rejected = await decide(client, "fixture-rejected", rejected_body)
-            (await endpoint.next_request(MODEL, rejected_body)).send({}, status=413)
+            (await endpoint.next_request(MODEL, rejected_body)).reject_input()
             accepted_body = "seal the hatch"
             accepted = await decide(client, "fixture-accepted", accepted_body)
             (await endpoint.next_request(MODEL, accepted_body)).vectors([1, 0])

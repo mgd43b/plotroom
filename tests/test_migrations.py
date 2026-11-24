@@ -71,7 +71,6 @@ async def test_embedding_rejection_upgrade_keeps_populated_0023_index(tmp_path: 
     revision = ScriptDirectory.from_config(alembic_config()).get_revision("0024")
     assert revision is not None
     assert revision.down_revision == "0023"
-    assert script_heads() == ["0024"]
     store = SqliteStore("demo", tmp_path)
     try:
         await upgrade_to_head(store._engine, prior)  # pyright: ignore[reportPrivateUsage]
@@ -92,7 +91,7 @@ async def test_embedding_rejection_upgrade_keeps_populated_0023_index(tmp_path: 
                 "INSERT INTO embedding_cursors VALUES (?, ?, 1)", (model.name, model.dimension)
             )
         await store.migrate()
-        assert await store.revision() == "0024"
+        assert await store.revision() == head_revision()
         index = store.embedding_index(model)
         assert await index.cursor() == 1
         assert await index.revisions_after(0, 10) == [EmbeddingRevision(1, None)]

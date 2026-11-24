@@ -10,7 +10,7 @@ route_source: pinned
 risk: medium
 review: thorough
 review_source: pinned
-lenses_ran: []
+lenses_ran: [blind-hunter, edge-case-hunter, verification-gap, intent-alignment]
 context: ['{project-root}/AGENTS.md']
 ---
 
@@ -53,6 +53,8 @@ Given a loopback TLS daemon and configured trust, the bearer goes only to that v
 Adapted the read-only stash without applying it. Explicit HTTPS bearer transport reads the CA environment while the client disables proxy discovery. Both Python versions passed 160 proxy, daemon startup and transport checks, including the five loopback TLS cases.
 
 ## Review Triage Log
+
+- Independent review verified that the client disables proxy discovery while the dedicated HTTPS transport loads the configured TLS trust. The loopback tests cover certificate identity, default trust, and the existing local paths.
 
 ## Verification
 

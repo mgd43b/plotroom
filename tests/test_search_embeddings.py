@@ -66,6 +66,9 @@ class Request:
     def send(self, body: object, *, status: int = 200, retry_after: int | None = None) -> None:
         self.response.set_result((status, body, retry_after))
 
+    def reject_input(self, *, retry_after: int | None = None) -> None:
+        self.send({"error": {"code": "input_too_large"}}, status=413, retry_after=retry_after)
+
     def vectors(self, *vectors: list[float]) -> None:
         # Simulate a provider returning results out of order.
         self.send(
@@ -360,10 +363,27 @@ def saved_rejections(store: SqliteStore) -> list[tuple[str, int, int, str]]:
 
 
 @pytest.mark.parametrize(
-    ("status", "retry_after"), [(400, None), (401, None), (413, 1), (429, None), (500, None)]
+    ("status", "error", "retry_after"),
+    [
+        (400, {}, None),
+        (401, {}, None),
+        (413, {"error": {"code": "input_too_large"}}, 1),
+        (413, {"error": {"code": "gateway_capacity"}}, None),
+        (413, b'{"error":', None),
+        (
+            413,
+            {
+                "error": {"code": "input_too_large"},
+                "extra": " " * embedding_http.MAX_REJECTION_BYTES,
+            },
+            None,
+        ),
+        (429, {}, None),
+        (500, {}, None),
+    ],
 )
 async def test_split_rejection_is_saved_only_after_later_inputs_succeed(
-    tmp_path: Path, endpoint: Endpoint, status: int, retry_after: int | None
+    tmp_path: Path, endpoint: Endpoint, status: int, error: object, retry_after: int | None
 ) -> None:
     oversized, accepted, later = "  oversized needle\n", "usable fixture", "new fixture"
     kinds = (MESSAGE_KIND,)
@@ -379,9 +399,7 @@ async def test_split_rejection_is_saved_only_after_later_inputs_succeed(
         async with following(ledger, index, endpoint):
             for successful in (False, True):
                 (await endpoint.next_request(MODEL, oversized, accepted)).send({}, status=413)
-                (await endpoint.next_request(MODEL, oversized)).send(
-                    {"error": "fixture provider text"}, status=413
-                )
+                (await endpoint.next_request(MODEL, oversized)).reject_input()
                 right = await endpoint.next_request(MODEL, accepted)
                 assert await index.cursor() == 0
                 assert saved_rejections(store) == []
@@ -389,7 +407,7 @@ async def test_split_rejection_is_saved_only_after_later_inputs_succeed(
                 if successful:
                     right.vectors([1, 0])
                 else:
-                    right.send({}, status=status, retry_after=retry_after)
+                    right.send(error, status=status, retry_after=retry_after)
             await await_cursor(ledger, index, 2)
             assert saved_rejections(store) == [(MODEL.name, MODEL.dimension, 1, "input_too_large")]
             assert await index.preflight(kinds) is EmbeddingReadiness.READY
@@ -432,6 +450,62 @@ async def test_split_rejection_is_saved_only_after_later_inputs_succeed(
             assert (await index.query_vector("demo", (0, 1), 10)).total == 2
 
 
+async def test_bare_413_batch_and_singleton_retry_until_gateway_recovers(
+    tmp_path: Path, endpoint: Endpoint
+) -> None:
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        await ledger.append("system", message("a", "first"))
+        await ledger.append("system", message("b", "second"))
+        index = store.embedding_index(MODEL)
+        async with following(ledger, index, endpoint):
+            (await endpoint.next_request(MODEL, "first", "second")).send(b"", status=413)
+            (await endpoint.next_request(MODEL, "first")).send(b"", status=413)
+            retry = await endpoint.next_request(MODEL, "first", "second")
+            assert await index.cursor() == 0
+            assert saved_rejections(store) == []
+            retry.send(b"", status=413)
+            (await endpoint.next_request(MODEL, "first")).vectors([1, 0])
+            (await endpoint.next_request(MODEL, "second")).vectors([0, 1])
+            await await_cursor(ledger, index, 2)
+            assert saved_rejections(store) == []
+            assert (await index.query_vector("demo", (1, 0), 10)).total == 2
+
+
+async def test_new_model_reindexes_rejected_record_and_query_rejection_stays_lexical(
+    tmp_path: Path, endpoint: Endpoint
+) -> None:
+    alternate = EmbeddingModel("alternate-model", MODEL.dimension)
+    body = "retained observatory"
+    async with (
+        opened_search(tmp_path, "demo") as (store, ledger),
+        httpx.AsyncClient(trust_env=False) as client,
+    ):
+        event = (await ledger.append("system", message("a", body))).event
+        await backfill_search(ledger, store)
+        original = store.embedding_index(MODEL)
+        async with following(ledger, original, endpoint):
+            (await endpoint.next_request(MODEL, body)).reject_input()
+            await await_cursor(ledger, original, 1)
+        replacement = store.embedding_index(alternate)
+        async with following(ledger, replacement, endpoint):
+            (await endpoint.next_request(alternate, body)).vectors([1, 0])
+            await await_cursor(ledger, replacement, 1)
+        hit = SearchHit(event.id, event.kind, body)
+        assert await replacement.query_vector("demo", (1, 0), 10) == SearchPage((hit,), 1)
+        assert await original.query_vector("demo", (1, 0), 10) == SearchPage((), 0)
+        original_rejection = [(MODEL.name, MODEL.dimension, 1, "input_too_large")]
+        assert saved_rejections(store) == original_rejection
+
+        semantic = SemanticSearch(replacement, HttpEmbedder(client, endpoint.url, alternate))
+        result = asyncio.create_task(
+            semantic.query(store, "demo", "observatory", (MESSAGE_KIND,), 10)
+        )
+        (await endpoint.next_request(alternate, "observatory")).reject_input()
+        assert await result == SearchPage((hit,), 1, "lexical", "query_rejected")
+        assert await replacement.cursor() == 1
+        assert saved_rejections(store) == original_rejection
+
+
 async def test_rejected_revision_during_query_uses_final_lexical_snapshot(
     tmp_path: Path, endpoint: Endpoint
 ) -> None:
@@ -454,7 +528,7 @@ async def test_rejected_revision_during_query_uses_final_lexical_snapshot(
             query = asyncio.create_task(semantic.query(store, "demo", "needle", kinds, 10))
             query_request = await endpoint.next_request(MODEL, "needle")
             await save("edited needle", LATER)
-            (await endpoint.next_request(MODEL, "edited needle")).send({}, status=413)
+            (await endpoint.next_request(MODEL, "edited needle")).reject_input()
             await await_cursor(ledger, index, 2)
             assert await index.preflight(kinds, "different phrase") is EmbeddingReadiness.EMPTY
             query_request.vectors([1, 0])
