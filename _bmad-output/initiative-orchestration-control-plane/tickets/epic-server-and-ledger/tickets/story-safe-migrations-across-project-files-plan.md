@@ -58,6 +58,11 @@ continues for other projects. The schema stays at revision 0024.
   state cannot produce false readiness. Both application-data regressions passed locally.
 - Eight focused probe, migration, backup, and shutdown tests passed after these changes.
 
+Opening Kodus review on PR #183 found three issues. Backup has an overall deadline even when
+concurrent commits restart a successful copy step. A database already at head checks the revision
+table and verifies the real startup snapshot without scanning every page. Invalid stored lane
+work items now raise a project-local data error. All 16 focused tests passed.
+
 ## Verification
 
 - Run migration and HTTP fixtures plus both locked Python suites. Rebuild and check local Compose.

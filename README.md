@@ -158,7 +158,8 @@ schema changes. Backups are private files under `migration-backups` in the data
 directory, alongside the project databases. A restart at the current revision
 creates no new backup.
 
-If a backup fails or a project file is corrupt or stamped with a newer schema,
+If a backup fails or exceeds its 60-second deadline, or if a project file is
+corrupt or stamped with a newer schema,
 that project's readiness reports unavailable. Healthy projects remain usable.
 Inspect `docker compose -p plotroom-local logs plotroom` for the project and reason. Compose's
 container health check uses `/healthz`, so it can stay healthy while an individual

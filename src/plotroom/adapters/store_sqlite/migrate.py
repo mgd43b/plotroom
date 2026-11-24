@@ -6,9 +6,9 @@ import os
 import sqlite3
 import stat
 import tempfile
-import time
 from contextlib import closing
 from pathlib import Path
+from time import monotonic
 
 from alembic import command
 from alembic.config import Config
@@ -17,6 +17,8 @@ from sqlalchemy import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+_BACKUP_TIMEOUT_SECONDS = 60
+_BACKUP_LOCK_WAIT_SECONDS = 5
 
 
 def alembic_config(script_location: Path = MIGRATIONS_DIR) -> Config:
@@ -86,18 +88,20 @@ def _backup(source: sqlite3.Connection, path: Path) -> None:
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.pre-migration-", suffix=".tmp", dir=directory)
     staging = Path(name)
     try:
-        # Bound a backup blocked by another SQLite connection. Successful page copies can continue.
-        busy_until = time.monotonic() + 5
+        started = monotonic()
+        busy_until = started + _BACKUP_LOCK_WAIT_SECONDS
+        finish_by = started + _BACKUP_TIMEOUT_SECONDS
 
         def progress(status: int, _remaining: int, _total: int) -> None:
             nonlocal busy_until
-            if status == sqlite3.SQLITE_OK:
-                busy_until = time.monotonic() + 5
-            elif (
-                status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-                and time.monotonic() > busy_until
-            ):
+            now = monotonic()
+            if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) and now >= busy_until:
                 raise ProjectMigrationError("SQLite backup could not obtain a read lock")
+            # Other connections can restart the copy even when a step reports success.
+            if status != sqlite3.SQLITE_DONE and now >= finish_by:
+                raise ProjectMigrationError("SQLite backup exceeded its deadline")
+            if status == sqlite3.SQLITE_OK:
+                busy_until = now + _BACKUP_LOCK_WAIT_SECONDS
 
         with closing(sqlite3.connect(staging)) as target:
             source.backup(target, pages=256, progress=progress)
@@ -146,10 +150,12 @@ def prepare_upgrade(path: Path, cfg: Config) -> None:
                             f"than supported revision {head}"
                         )
                     raise ProjectMigrationError("unknown project schema revision")
+            if current == head:
+                if source.execute("PRAGMA quick_check('alembic_version')").fetchall() != [("ok",)]:
+                    raise ProjectMigrationError("SQLite schema revision integrity check failed")
+                return
             if source.execute("PRAGMA quick_check(1)").fetchall() != [("ok",)]:
                 raise ProjectMigrationError("SQLite project integrity check failed")
-            if current == head:
-                return
             try:
                 _backup(source, path)
             except (OSError, sqlite3.Error) as exc:

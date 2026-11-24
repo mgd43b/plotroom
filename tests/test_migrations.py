@@ -2,10 +2,12 @@ import json
 import shutil
 import sqlite3
 import stat
+from collections.abc import Callable
 from contextlib import ExitStack, closing
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -16,7 +18,7 @@ from sqlalchemy import MetaData, create_engine
 
 from conftest import authenticated_client, tool_json
 from fakes import FixedClock
-from plotroom.adapters.store_sqlite import SqliteStore, head_revision, script_heads
+from plotroom.adapters.store_sqlite import SqliteStore, head_revision, migrate, script_heads
 from plotroom.adapters.store_sqlite.migrate import (
     MIGRATIONS_DIR,
     ProjectMigrationError,
@@ -606,8 +608,10 @@ async def test_daemon_upgrades_and_backs_up_two_projects_while_isolating_a_corru
         "DELETE FROM project_seq",
         "INSERT INTO triggers (id, predicate, action_kind, action_payload, state, bindings, created_seq) "
         "VALUES ('fixture', '{', 'fixture', '{}', 'open', '{}', 1)",
+        "INSERT INTO lanes (id, worker, work_items, branch, state) "
+        "VALUES ('fixture', 'fixture', 'null', 'fixture', 'active')",
     ],
-    ids=["missing-cursor", "malformed-trigger"],
+    ids=["missing-cursor", "malformed-trigger", "null-lane-work-items"],
 )
 async def test_projects_with_invalid_stored_ledger_state_stay_unavailable(
     tmp_path: Path,
@@ -634,6 +638,29 @@ async def test_projects_with_invalid_stored_ledger_state_stay_unavailable(
             assert tool_json(await client.call_tool("snapshot", {}))["ok"]
     finally:
         await stop(daemon, task)
+
+
+def test_the_backup_deadline_applies_to_successful_steps_that_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = iter((0.0, 29.0, 61.0))
+    monkeypatch.setattr(migrate, "monotonic", lambda: next(ticks))
+    source = Mock(spec=sqlite3.Connection)
+
+    def restarting_backup(
+        _target: sqlite3.Connection,
+        *,
+        pages: int,
+        progress: Callable[[int, int, int], None],
+    ) -> None:
+        progress(sqlite3.SQLITE_OK, pages, pages * 2)
+        progress(sqlite3.SQLITE_OK, pages, pages * 2)
+
+    source.backup.side_effect = restarting_backup
+    with pytest.raises(ProjectMigrationError, match="backup exceeded its deadline"):
+        migrate._backup(cast(sqlite3.Connection, source), tmp_path / "project.db")  # pyright: ignore[reportPrivateUsage]
+    assert list((tmp_path / "migration-backups").iterdir()) == []
 
 
 async def test_backup_failure_prevents_migration(tmp_path: Path) -> None:
