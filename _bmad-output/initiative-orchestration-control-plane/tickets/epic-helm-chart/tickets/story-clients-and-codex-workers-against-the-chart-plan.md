@@ -3,7 +3,7 @@ title: Wire chart values for local clients and the outside-kind bridge
 type: feature
 ticket: 3
 created: '2026-11-24'
-status: in-review
+status: built
 baseline_revision: 'ba65727a5f9adeb2258794518c8ba25d5ceeeba7'
 route: full
 route_source: auto
@@ -26,3 +26,12 @@ private one-off token Job. Keep the existing defaults, token design, and schedul
 - Keep the ticket open for the separate actual Claude Code and Codex acceptance on merged main.
 
 ## Review dispositions
+
+- Preserve absent bridge and token role values when upgrading an older release with
+  --reuse-values. The actual kind upgrade retained the original bearer and default project.
+- Reject empty bridge maps before issuing a bridge token. Parse ports in decimal and preserve
+  literal trailing DNS dots and leading-zero ports.
+- The default restart and backup checks, rendered Host rejection, actual outside-kind bridge
+  round trip, and Compose regression passed. The full Python suites passed 1,088 tests each.
+- This plan records the fixture wiring. Actual Claude Code and Codex acceptance remains with
+  the separate verifier after merge.
