@@ -3,7 +3,7 @@ title: 'Sweep Epic 7 deferred findings'
 ticket: '7'
 type: feature
 created: '2026-11-24'
-status: in-review
+status: built
 baseline_revision: '88e2387eb23faba0743a38189f5bf6a861f68b8d'
 route: full
 risk: low
@@ -37,3 +37,4 @@ Neither PR left an unresolved thread. #165 addressed exact ticket filtering, mis
 - `git diff --check` passed.
 
 - [GitHub story](https://github.com/mgd43b/plotroom/issues/88)
+- Built: https://github.com/mgd43b/plotroom/pull/177

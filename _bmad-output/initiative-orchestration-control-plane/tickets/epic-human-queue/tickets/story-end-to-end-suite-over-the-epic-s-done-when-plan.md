@@ -3,7 +3,7 @@ title: 'Verify Epic 7 through the local daemon'
 ticket: '8'
 type: feature
 created: '2026-11-24'
-status: in-review
+status: built
 baseline_revision: '88e2387eb23faba0743a38189f5bf6a861f68b8d'
 route: full
 risk: low
@@ -33,6 +33,8 @@ The suite runs the actual daemon and authenticated HTTP or stdio entry point, wi
 
 - Native Codex review identified three gaps. The suite now rejects a quote found only in a different comment by the same human, polls a newer comment after its ask is recorded to prove burial on update, and uses a three-day configured threshold against a four-day-old ask to distinguish it from the seven-day default.
 
+- Opening Kodus review found three negative paths to strengthen. A closed issue with a later human reply stays out of the orphan queue, a newly satisfied goal leaves both SQLite data version and ledger sequence unchanged, and a denied worker write leaves the named goal absent before the authorized write.
+
 ## Verification
 
 | Epic check | Fixture evidence |
@@ -46,3 +48,4 @@ The suite runs the actual daemon and authenticated HTTP or stdio entry point, wi
 - Ruff, formatting, Pyright on both versions, the core dependency check, and the diff check passed.
 
 - [GitHub story](https://github.com/mgd43b/plotroom/issues/89)
+- Built: https://github.com/mgd43b/plotroom/pull/177

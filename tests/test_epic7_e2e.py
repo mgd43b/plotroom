@@ -223,7 +223,9 @@ async def test_next_flags_each_ask_condition_in_isolation(
         comment(number, comment_id, text, "fixture-orchestrator", posted)
         for number, comment_id, text, _, posted, _ in asks
     )
-    issues = [issue(number, comments=1) for number in (1, 2, 3, 4)]
+    answered_question = "Which heading should we use?"
+    comments = (*comments, comment(5, 501, answered_question, "fixture-orchestrator", RECENT))
+    issues = [issue(number, comments=1) for number in (1, 2, 3, 4, 5)]
     async with (
         asyncio.timeout(15),
         queue_plotroom.serve() as (endpoint, ledger),
@@ -248,6 +250,14 @@ async def test_next_flags_each_ask_condition_in_isolation(
                 "issue": number,
                 "comment_id": comment_id,
             }
+        await call(
+            "ask",
+            request_id="ask-5",
+            issue=5,
+            comment_id=501,
+            text=answered_question,
+            options=["Overview", "Summary"],
+        )
         before_burial = await ask_items(call)
         assert before_burial == {
             key: context
@@ -256,15 +266,20 @@ async def test_next_flags_each_ask_condition_in_isolation(
         }
         # Four days exceeds the configured three-day threshold, but not the seven-day default.
         issues[0] = issue(1, comments=2, updated_at=AS_OF)
+        issues[4] = issue(5, comments=2, updated_at=LATER)
         comments = (
             *comments,
             comment(1, 102, "Unrelated progress update", "fixture-worker", LATER),
+            comment(5, 502, "Use Overview.", HUMAN, LATER),
         )
         await observe_github(ledger, issues, comments)
         assert await ask_items(call) == {
             key: context for key, context in expected.items() if key[0] != "ask_orphaned"
         }
-        issues[-1] = issue(4, state="closed", comments=1, updated_at=AS_OF)
+        issues[3:] = [
+            issue(4, state="closed", comments=1, updated_at=AS_OF),
+            issue(5, state="closed", comments=2, updated_at=AS_OF),
+        ]
         await observe_github(ledger, issues, comments)
         assert await ask_items(call) == expected
 
@@ -282,8 +297,21 @@ def remaining(number: int, source: str, blocker_status: str = "failed") -> dict[
     }
 
 
+@pytest.fixture
+def backfill_complete(monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
+    complete = asyncio.Event()
+    original_backfill = serve.backfill_search
+
+    async def finish_backfill(ledger: Ledger, index: SearchBackfill) -> None:
+        await original_backfill(ledger, index)
+        complete.set()
+
+    monkeypatch.setattr(serve, "backfill_search", finish_backfill)
+    return complete
+
+
 async def test_goal_reports_exact_remaining_issues_and_all_failed_clauses(
-    queue_plotroom: LocalPlotroom, transport: str
+    queue_plotroom: LocalPlotroom, transport: str, backfill_complete: asyncio.Event
 ) -> None:
     issues = [
         issue(8, state="closed"),
@@ -301,6 +329,7 @@ async def test_goal_reports_exact_remaining_issues_and_all_failed_clauses(
         queue_plotroom.serve() as (endpoint, ledger),
         tools(endpoint, transport) as call,
     ):
+        await backfill_complete.wait()
         await call("goal_set", request_id="first-goal", name=GOAL_NAME, text=FIRST_GOAL)
         await observe_github(ledger, issues, blockers=blockers)
         result = await call("goal", name=GOAL_NAME)
@@ -315,25 +344,24 @@ async def test_goal_reports_exact_remaining_issues_and_all_failed_clauses(
             for row in issues
         ]
         await observe_github(ledger, issues, blockers=blockers)
-        passed = await call("goal", name=GOAL_NAME)
-        assert passed["done"] is True
-        assert passed["goals"][0]["remaining"] == []
+        data_dir = load_config(queue_plotroom.config, {}).data_dir
+        db_uri = (data_dir / "demo.db").as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(db_uri, uri=True)) as observer:
+            cursor = await ledger.head_seq()
+            version = observer.execute("PRAGMA data_version").fetchone()
+            assert version is not None
+            passed = await call("goal", name=GOAL_NAME)
+            assert passed["done"] is True
+            assert passed["goals"][0]["remaining"] == []
+            assert await ledger.head_seq() == cursor
+            assert observer.execute("PRAGMA data_version").fetchone() == version
 
 
 async def test_goal_survives_restart_and_reads_without_writing_with_uncertain_evidence(
-    queue_plotroom: LocalPlotroom, transport: str, monkeypatch: pytest.MonkeyPatch
+    queue_plotroom: LocalPlotroom, transport: str, backfill_complete: asyncio.Event
 ) -> None:
     source = "  " + FIRST_GOAL.replace(" satisfies", "\r\n\tsatisfies") + "  "
     data_dir = load_config(queue_plotroom.config, {}).data_dir
-    backfill_complete = asyncio.Event()
-    original_backfill = serve.backfill_search
-
-    async def finish_backfill(ledger: Ledger, index: SearchBackfill) -> None:
-        await original_backfill(ledger, index)
-        backfill_complete.set()
-
-    # Let the daemon finish unrelated startup writes before observing its database.
-    monkeypatch.setattr(serve, "backfill_search", finish_backfill)
     async with (
         asyncio.timeout(15),
         queue_plotroom.serve() as (endpoint, _),
@@ -344,6 +372,7 @@ async def test_goal_survives_restart_and_reads_without_writing_with_uncertain_ev
         await worker(
             "goal_set", request_id="unauthorized", name=GOAL_NAME, text=source, error="forbidden"
         )
+        await call("goal", name=GOAL_NAME, error="not_found")
         assert await call("goal_set", request_id="durable", name=GOAL_NAME, text=source) == {
             "name": GOAL_NAME
         }
