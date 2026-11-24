@@ -7,13 +7,22 @@ from typing import Any, cast
 
 import httpx
 
-from plotroom.ports.search import EmbeddingError, EmbeddingModel
+from plotroom.ports.search import (
+    EmbeddingError,
+    EmbeddingModel,
+    EmbeddingOutcome,
+    EmbeddingRejection,
+)
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 class _BatchTooLarge(EmbeddingError):
     """The request or its response exceeded a size limit."""
+
+
+class _InputTooLarge(_BatchTooLarge):
+    """The provider rejected the request's payload size without a retry hint."""
 
 
 class HttpEmbedder:
@@ -24,13 +33,18 @@ class HttpEmbedder:
         self._url = url
         self._model = model
 
-    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+    async def embed(self, texts: tuple[str, ...]) -> tuple[EmbeddingOutcome, ...]:
         try:
             return await self._embed_batch(texts)
+        except _InputTooLarge:
+            if len(texts) == 1:
+                return (EmbeddingRejection.INPUT_TOO_LARGE,)
+            if not texts:
+                raise
         except _BatchTooLarge:
             if len(texts) <= 1:
                 raise
-        # Keep each response in input order and return only after both halves succeed.
+        # Discard all outcomes if either half raises a batch-level failure.
         middle = len(texts) // 2
         first = await self.embed(texts[:middle])
         return first + await self.embed(texts[middle:])
@@ -49,8 +63,11 @@ class HttpEmbedder:
                         "dimensions": self._model.dimension,
                     },
                 ) as response:
-                    if response.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
-                        raise _BatchTooLarge("embedding endpoint request exceeded size limit")
+                    if (
+                        response.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                        and "Retry-After" not in response.headers
+                    ):
+                        raise _InputTooLarge("embedding endpoint request exceeded size limit")
                     response.raise_for_status()
                     # Refuse compression so one decoder call cannot inflate past the cap.
                     if response.headers.get("Content-Encoding", "identity").lower() != "identity":

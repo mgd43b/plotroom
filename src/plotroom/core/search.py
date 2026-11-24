@@ -24,6 +24,9 @@ from plotroom.ports.search import (
     EmbeddingIndex,
     EmbeddingPending,
     EmbeddingReadiness,
+    EmbeddingRejection,
+    IndexedEmbedding,
+    RejectedRecord,
     Search,
     SearchBackfill,
     SearchPage,
@@ -138,17 +141,19 @@ async def follow_search_embeddings(
         ledger, index.cursor, index.revisions_after, limit=EMBEDDING_BATCH_SIZE
     ):
         pending = [(item.seq, item.record) for item in revisions if item.record is not None]
-        records: tuple[EmbeddedRecord, ...] = ()
+        records: tuple[IndexedEmbedding, ...] = ()
         if pending:
             try:
-                vectors = await embedder.embed(tuple(record.body for _, record in pending))
-                if len(vectors) != len(pending):
-                    raise EmbeddingError("embedding batch has an invalid vector count")
+                outcomes = await embedder.embed(tuple(record.body for _, record in pending))
+                if len(outcomes) != len(pending):
+                    raise EmbeddingError("embedding batch has an invalid outcome count")
                 records = tuple(
-                    EmbeddedRecord(
-                        seq, record.kind, record.id, pack_vector(vector, index.model.dimension)
+                    RejectedRecord(seq, record.kind, record.id, outcome)
+                    if isinstance(outcome, EmbeddingRejection)
+                    else EmbeddedRecord(
+                        seq, record.kind, record.id, pack_vector(outcome, index.model.dimension)
                     )
-                    for (seq, record), vector in zip(pending, vectors, strict=True)
+                    for (seq, record), outcome in zip(pending, outcomes, strict=True)
                 )
             except EmbeddingError:
                 log.warning(
@@ -179,19 +184,25 @@ class SemanticSearch:
         self, lexical: Search, project: str, text: str, kinds: tuple[str, ...], limit: int
     ) -> SearchPage:
         try:
-            readiness = await self.index.preflight(kinds)
+            readiness = await self.index.preflight(kinds, text)
+            if readiness is EmbeddingReadiness.REJECTED_MATCH:
+                page = await lexical.query(project, text, kinds, limit)
+                return replace(page, mode="lexical", fallback_reason="embedding_rejected")
             if readiness is EmbeddingReadiness.PENDING:
                 raise EmbeddingPending
             if readiness is EmbeddingReadiness.EMPTY:
                 return SearchPage((), 0, mode="semantic")
-            vectors = await self.embedder.embed((text,))
-            if len(vectors) != 1:
+            outcomes = await self.embedder.embed((text,))
+            if len(outcomes) != 1:
                 raise EmbeddingError("search query requires exactly one embedding")
+            vector = outcomes[0]
+            if isinstance(vector, EmbeddingRejection):
+                page = await lexical.query(project, text, kinds, limit)
+                return replace(page, mode="lexical", fallback_reason="query_rejected")
             # Keep malformed provider values in the provider failure path.
-            vector = vectors[0]
             pack_vector(vector, self.index.model.dimension)
-            page = await self.index.query_vector(project, vector, limit, kinds=kinds)
-            return replace(page, mode="semantic")
+            page = await self.index.query_vector(project, vector, limit, kinds=kinds, text=text)
+            return replace(page, mode="semantic") if page.mode is None else page
         except EmbeddingPending:
             reason = "index_pending"
         except EmbeddingError:

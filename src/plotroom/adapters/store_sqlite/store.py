@@ -70,11 +70,11 @@ from plotroom.ports.search import (
     BackfillPage,
     BackfillPosition,
     BackfillSource,
-    EmbeddedRecord,
     EmbeddingError,
     EmbeddingModel,
     EmbeddingReadiness,
     EmbeddingRevision,
+    IndexedEmbedding,
     SearchPage,
     SearchRecord,
 )
@@ -158,12 +158,14 @@ class SqliteEmbeddingIndex:
         async with self._engine.connect() as connection:
             return await embedding_sql.read_page(connection, self.model, after, limit)
 
-    async def preflight(self, kinds: tuple[str, ...]) -> EmbeddingReadiness:
+    async def preflight(
+        self, kinds: tuple[str, ...], text: str | None = None
+    ) -> EmbeddingReadiness:
         async with self._engine.connect() as connection:
-            return await embedding_sql.preflight(connection, self.model, kinds)
+            return await embedding_sql.preflight(connection, self.model, kinds, text)
 
     async def commit(
-        self, tx: Transaction, expected: int, through: int, records: tuple[EmbeddedRecord, ...]
+        self, tx: Transaction, expected: int, through: int, records: tuple[IndexedEmbedding, ...]
     ) -> bool:
         if not isinstance(tx, SqliteTransaction):
             raise TypeError("the SQLite embedding index requires a SQLite writer transaction")
@@ -176,6 +178,7 @@ class SqliteEmbeddingIndex:
         limit: int,
         *,
         kinds: tuple[str, ...] | None = None,
+        text: str | None = None,
     ) -> SearchPage:
         if project != self.project_id:
             raise LedgerError("forbidden", "search is restricted to the current project")
@@ -193,7 +196,9 @@ class SqliteEmbeddingIndex:
                 raise LedgerError(
                     "unavailable", "SQLite vector search requires sqlite-vec"
                 ) from exc
-            return await embedding_sql.query_vectors(connection, self.model, query, limit, kinds)
+            return await embedding_sql.query_vectors(
+                connection, self.model, query, limit, kinds, text
+            )
 
 
 class SqliteStore:

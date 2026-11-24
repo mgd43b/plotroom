@@ -5,7 +5,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -43,6 +43,9 @@ from plotroom.ports.search import (
     EmbeddingIndex,
     EmbeddingModel,
     EmbeddingReadiness,
+    EmbeddingRejection,
+    IndexedEmbedding,
+    RejectedRecord,
     SearchHit,
     SearchPage,
 )
@@ -56,10 +59,10 @@ MODEL = EmbeddingModel("fixture-model", 2)
 @dataclass
 class Request:
     body: dict[str, Any]
-    response: asyncio.Future[tuple[int, object]]
+    response: asyncio.Future[tuple[int, object, int | None]]
 
-    def send(self, body: object, *, status: int = 200) -> None:
-        self.response.set_result((status, body))
+    def send(self, body: object, *, status: int = 200, retry_after: int | None = None) -> None:
+        self.response.set_result((status, body, retry_after))
 
     def vectors(self, *vectors: list[float]) -> None:
         # Simulate a provider returning results out of order.
@@ -105,11 +108,12 @@ async def endpoint() -> AsyncGenerator[Endpoint]:
             body = cast("dict[str, Any]", json.loads(content))
             response = asyncio.get_running_loop().create_future()
             requests.put_nowait(Request(body, response))
-            status, data = await response
+            status, data, retry_after = await response
             payload = data if isinstance(data, bytes) else json.dumps(data).encode()
+            retry_header = f"Retry-After: {retry_after}\r\n" if retry_after is not None else ""
             writer.write(
                 f"HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\n"
-                f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
+                f"{retry_header}Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
                 + payload
             )
             await writer.drain()
@@ -305,6 +309,7 @@ async def test_oversized_loopback_response_is_retried(
             request.send({"data": [{"index": 0, "embedding": [1, 0]}], "extra": " " * 200})
             retry = await endpoint.next_request(MODEL, "too much response")
             assert await index.cursor() == 0
+            assert saved_rejections(store) == []
             retry.vectors([1, 0])
             await await_cursor(ledger, index, last.event.seq)
 
@@ -341,6 +346,129 @@ async def test_oversized_loopback_batch_splits_without_partial_index_commit(
                     SearchHit(second.id, second.kind, second_body),
                 ),
                 2,
+            )
+
+
+def saved_rejections(store: SqliteStore) -> list[tuple[str, int, int, str]]:
+    with closing(sqlite3.connect(store.path)) as db:
+        return db.execute(
+            "SELECT model, dimension, record_seq, reason FROM embedding_rejections "
+            "ORDER BY model, dimension, record_seq"
+        ).fetchall()
+
+
+@pytest.mark.parametrize(
+    ("status", "retry_after"), [(400, None), (401, None), (413, 1), (429, None), (500, None)]
+)
+async def test_split_rejection_is_saved_only_after_later_inputs_succeed(
+    tmp_path: Path, endpoint: Endpoint, status: int, retry_after: int | None
+) -> None:
+    oversized, accepted, later = "  oversized needle\n", "usable fixture", "new fixture"
+    kinds = (MESSAGE_KIND,)
+    async with (
+        opened_search(tmp_path, "demo") as (store, ledger),
+        httpx.AsyncClient(trust_env=False) as client,
+    ):
+        first = (await ledger.append("system", message("a", oversized))).event
+        second = (await ledger.append("system", message("b", accepted))).event
+        await backfill_search(ledger, store)
+        index = store.embedding_index(MODEL)
+        semantic = SemanticSearch(index, HttpEmbedder(client, endpoint.url, MODEL))
+        async with following(ledger, index, endpoint):
+            for successful in (False, True):
+                (await endpoint.next_request(MODEL, oversized, accepted)).send({}, status=413)
+                (await endpoint.next_request(MODEL, oversized)).send(
+                    {"error": "fixture provider text"}, status=413
+                )
+                right = await endpoint.next_request(MODEL, accepted)
+                assert await index.cursor() == 0
+                assert saved_rejections(store) == []
+                assert (await index.query_vector("demo", (1, 0), 10)).total == 0
+                if successful:
+                    right.vectors([1, 0])
+                else:
+                    right.send({}, status=status, retry_after=retry_after)
+            await await_cursor(ledger, index, 2)
+            assert saved_rejections(store) == [(MODEL.name, MODEL.dimension, 1, "input_too_large")]
+            assert await index.preflight(kinds) is EmbeddingReadiness.READY
+            assert (
+                await index.preflight((DECISION_KIND,), "oversized needle")
+                is EmbeddingReadiness.EMPTY
+            )
+            assert (
+                await store.embedding_index(EmbeddingModel(MODEL.name, 3)).preflight(
+                    kinds, "oversized needle"
+                )
+                is EmbeddingReadiness.PENDING
+            )
+            lexical = await semantic.query(store, "demo", "oversized needle", kinds, 10)
+            assert lexical == SearchPage(
+                (SearchHit(first.id, first.kind, oversized),), 1, "lexical", "embedding_rejected"
+            )
+            assert endpoint.requests.empty()
+
+            result = asyncio.create_task(semantic.query(store, "demo", "paraphrase", kinds, 10))
+            (await endpoint.next_request(MODEL, "paraphrase")).vectors([1, 0])
+            assert await result == SearchPage(
+                (SearchHit(second.id, second.kind, accepted),), 1, "semantic"
+            )
+
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        index = store.embedding_index(MODEL)
+        assert await index.cursor() == 2
+        assert saved_rejections(store) == [(MODEL.name, MODEL.dimension, 1, "input_too_large")]
+        assert [
+            (revision.seq, revision.record) for revision in await index.revisions_after(0, 10)
+        ] == [
+            (1, None),
+            (2, None),
+        ]
+        await ledger.append("system", message("c", later))
+        async with following(ledger, index, endpoint):
+            (await endpoint.next_request(MODEL, later)).vectors([0, 1])
+            await await_cursor(ledger, index, 3)
+            assert (await index.query_vector("demo", (0, 1), 10)).total == 2
+
+
+async def test_rejected_revision_during_query_uses_final_lexical_snapshot(
+    tmp_path: Path, endpoint: Endpoint
+) -> None:
+    async with (
+        opened_search(tmp_path, "demo") as (store, ledger),
+        httpx.AsyncClient(trust_env=False) as client,
+    ):
+        index = store.embedding_index(MODEL)
+        semantic = SemanticSearch(index, HttpEmbedder(client, endpoint.url, MODEL))
+        kinds = (ISSUE_COMMENT_KIND,)
+
+        async def save(body: str, updated: str) -> None:
+            await ledger.run("system", lambda uow: project_comment(uow, comment(body, updated)))
+
+        await save("original needle", START)
+        await backfill_search(ledger, store)
+        async with following(ledger, index, endpoint):
+            (await endpoint.next_request(MODEL, "original needle")).vectors([1, 0])
+            await await_cursor(ledger, index, 1)
+            query = asyncio.create_task(semantic.query(store, "demo", "needle", kinds, 10))
+            query_request = await endpoint.next_request(MODEL, "needle")
+            await save("edited needle", LATER)
+            (await endpoint.next_request(MODEL, "edited needle")).send({}, status=413)
+            await await_cursor(ledger, index, 2)
+            assert await index.preflight(kinds, "different phrase") is EmbeddingReadiness.EMPTY
+            query_request.vectors([1, 0])
+            assert await query == SearchPage(
+                (SearchHit(COMMENT_ID, ISSUE_COMMENT_KIND, "edited needle"),),
+                1,
+                "lexical",
+                "embedding_rejected",
+            )
+            await save("latest needle", "2026-01-01T00:00:03Z")
+            latest = await endpoint.next_request(MODEL, "latest needle")
+            assert saved_rejections(store) == []
+            latest.vectors([0, 1])
+            await await_cursor(ledger, index, 3)
+            assert (await index.query_vector("demo", (0, 1), 10)).hits == (
+                SearchHit(COMMENT_ID, ISSUE_COMMENT_KIND, "latest needle"),
             )
 
 
@@ -422,7 +550,7 @@ async def test_vector_writes_rollback_together_and_reject_stale_or_foreign_attem
         with pytest.raises(RuntimeError, match="another project's transaction"):
             await other_ledger.run("system", invalid_batch)
 
-        async def save(expected: int, through: int, records: tuple[EmbeddedRecord, ...]) -> bool:
+        async def save(expected: int, through: int, records: tuple[IndexedEmbedding, ...]) -> bool:
             return await ledger.run(
                 "system", lambda uow: uow.save_embedding_batch(index, expected, through, records)
             )
@@ -442,12 +570,14 @@ async def test_vector_writes_rollback_together_and_reject_stale_or_foreign_attem
             return await uow.save_embedding_batch(index, 0, first.seq, (record,))
 
         async def aborted_batch(uow: UnitOfWork) -> None:
-            assert await valid_batch(uow)
+            rejection = RejectedRecord(2, last.kind, last.id, EmbeddingRejection.INPUT_TOO_LARGE)
+            assert await uow.save_embedding_batch(index, 0, 2, (record, rejection))
             raise ValueError("fixture rollback after cursor write")
 
         with pytest.raises(ValueError, match="fixture rollback"):
             await ledger.run("system", aborted_batch)
         assert await index.cursor() == 0
+        assert saved_rejections(store) == []
         assert await index.query_vector("demo", (1, 0), 20) == SearchPage((), 0)
         assert await ledger.run("system", valid_batch)
         assert not await ledger.run("system", invalid_batch)

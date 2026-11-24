@@ -90,9 +90,7 @@ async def index_record(
 async def search_records(
     connection: AsyncConnection, query: str, kinds: tuple[str, ...] | None, limit: int
 ) -> SearchPage:
-    # Quote the phrase so user-supplied punctuation cannot become FTS query syntax.
-    phrase = '"' + query.replace('"', '""') + '"'
-    params = {"query": phrase, "kinds": None if kinds is None else json.dumps(kinds)}
+    params = {"query": literal_phrase(query), "kinds": None if kinds is None else json.dumps(kinds)}
     total = (await connection.execute(COUNT_MATCHES, params)).scalar_one()
     # Highlight the complete phrase and give it priority over surrounding text.
     marker = uuid4().hex
@@ -111,3 +109,8 @@ async def search_records(
         for row in rows
     )
     return SearchPage(hits, total)
+
+
+def literal_phrase(query: str) -> str:
+    # Quote the phrase so user-supplied punctuation cannot become FTS query syntax.
+    return '"' + query.replace('"', '""') + '"'

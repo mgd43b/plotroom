@@ -106,6 +106,15 @@ Hosted container and Kubernetes setup are tracked in the project plan.
 See the [local server and ledger design](_bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md)
 and the [architecture notes](_bmad-output/initiative-orchestration-control-plane/architecture-orchestration-control-plane/architecture-orchestration-control-plane.md).
 
+## Local search
+
+Search uses the project's full-text index by default. A project can also configure an
+embedding endpoint for semantic search. If the endpoint confirms that one source record
+is too large, Plotroom records the rejection for that revision, model, and dimension and
+continues indexing later records. The original text stays searchable. A literal match
+against a rejected record returns lexical results with `fallback_reason: embedding_rejected`.
+Temporary provider failures retry from the last committed checkpoint.
+
 ## Local GitHub reads
 
 The daemon polls one GitHub repository per configured project. Use the existing

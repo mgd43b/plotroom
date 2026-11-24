@@ -43,8 +43,8 @@ from plotroom.ports.search import (
     BackfillPage,
     BackfillPosition,
     BackfillSource,
-    EmbeddedRecord,
     EmbeddingModel,
+    IndexedEmbedding,
     SearchRecord,
 )
 from plotroom.ports.work_items import WorkItem
@@ -276,7 +276,7 @@ class SqliteTransaction:
         model: EmbeddingModel,
         expected: int,
         through: int,
-        records: tuple[EmbeddedRecord, ...],
+        records: tuple[IndexedEmbedding, ...],
     ) -> bool:
         connection = self._live()
         if connection.engine is not engine:
