@@ -218,6 +218,52 @@ the project identified by that bearer. The scheduler does not mount either
 database or backup volume. Disabling it leaves the backup claim in place.
 Delete the disposable cluster when finished.
 
+### Verify the chart's local client and bridge configuration
+
+Reuse the locally built image in the disposable kind cluster. The fixture
+installs into a fresh namespace, reads the rendered TOML, consumes a private
+bridge token handoff from the Job, and forwards the Service only on loopback.
+It checks a bearer-authenticated snapshot with the configured Host, rejection
+of unlisted Hosts and ports, and a scripted relay round trip through a bridge
+process running outside kind.
+
+```sh
+uv run --locked python -m deploy.helm.bridge_smoke --kubeconfig "$KUBECONFIG" \
+  --context "kind-$cluster" --namespace bridge-fixture --release bridge --image-tag "$cluster"
+```
+
+For a disposable client-acceptance install, use values such as these with the
+locally loaded image tag. Each project listed in `bridge.projects` must also
+appear in `projects`. That entry sets `via_bridge = true` and maps the selected
+worker names to their exact relay addresses. Projects without a bridge entry
+keep the existing behavior.
+
+```yaml
+projects: [bridge-fixture]
+allowedHosts: [plotroom-fixture.example.test:8765]
+bridge:
+  projects:
+    bridge-fixture:
+      board: bridge-fixture-board
+      workers:
+        fixture: fixture-peer
+tokenJob:
+  enabled: true
+  project: bridge-fixture
+  role: bridge
+```
+
+`allowedHosts` adds literal DNS or IPv4 authorities to the built-in loopback
+and Service allowlist. Include the exact port when the client sends one.
+Forward the local Service on `127.0.0.1`. A client that needs the custom
+authority can set the explicit `Host` header while connecting to the forward.
+For the bridge, use the numeric loopback `/mcp` URL, the matching `--board`,
+and the Job's project-scoped bearer in `PLOTROOM_TOKEN`. Use a separately
+issued project bearer for the HTTP snapshot client.
+
+The smoke consumes and removes the Job's private handoff file without
+printing it. Keep real-client acceptance separate from the scripted smoke.
+
 ## Verify the Switchboard bridge locally
 
 Build a fixture image and pass the smoke helper a fresh Compose project name.
