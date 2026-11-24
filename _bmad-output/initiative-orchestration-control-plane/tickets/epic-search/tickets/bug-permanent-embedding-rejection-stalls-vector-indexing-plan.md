@@ -57,6 +57,7 @@ Authorized literal matches against a rejected revision use `embedding_rejected` 
 ## Review Triage Log
 
 - A bare HTTP 413 is ambiguous. Require a bounded typed input rejection and preserve the durable cursor during gateway-wide 413 failures.
+- Automatic opening review found that Python's JSON decoder accepts nonstandard constants. Reject those constants and repeated object keys before recording a permanent outcome. Raw loopback replies verify retry and checkpoint preservation.
 - Add end-to-end query fallback and same-dimension replacement-model coverage. Keep the populated migration test valid when later migrations extend the chain.
 
 ## Verification
@@ -65,3 +66,4 @@ Authorized literal matches against a rejected revision use `embedding_rejected` 
 - Ruff lint and format checks, Pyright, and `git diff --check` passed.
 - After the protocol review, 44 focused tests passed across embedding behavior, authenticated MCP rejection fallback, and the populated upgrade.
 - Combined independent review and rechecks completed. Full final suites passed 1,069 tests each on managed Python 3.14 and 3.15. Ruff, Pyright, core dependency and whitespace checks passed.
+- [Built in PR #179](https://github.com/mgd43b/plotroom/pull/179)

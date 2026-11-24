@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import URL, create_engine, event
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 
 from fakes import FixedClock
 from plotroom.adapters.store_sqlite import SqliteStore, head_revision, script_heads
@@ -355,6 +356,80 @@ async def test_failed_page_rolls_back_insert_and_cursor_then_retries(tmp_path: P
         assert not await ledger.run("system", commit)
         assert indexed_rows(store.path) == before
         assert len(before) == 2
+
+
+async def test_physical_sqlite_commit_failure_discards_writer_and_rolls_back_search_page(
+    tmp_path: Path,
+) -> None:
+    async with opened_search(tmp_path, "demo") as (store, ledger):
+        source = BackfillSource.DECISIONS
+        with closing(sqlite3.connect(store.path)) as db, db:
+            db.executescript("""
+                CREATE TABLE commit_parent (id INTEGER PRIMARY KEY);
+                CREATE TABLE commit_child (
+                    parent INTEGER REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED
+                );
+            """)
+        first = SearchRecord(DECISION_KIND, "a", "committed before failure")
+        await ledger.run(
+            "system",
+            lambda uow: uow.save_search_backfill(store, source, (), BackfillPage(("a",), (first,))),
+        )
+        before = indexed_rows(store.path)
+        page = BackfillPage(
+            ("c",),
+            (
+                SearchRecord(DECISION_KIND, "b", "first record in retry"),
+                SearchRecord(DECISION_KIND, "c", "second record in retry"),
+            ),
+        )
+        write = partial(
+            UnitOfWork.save_search_backfill, index=store, source=source, expected=("a",), page=page
+        )
+        engine = store._engine.sync_engine  # pyright: ignore[reportPrivateUsage]
+        connections: list[object] = []
+        inserted = False
+
+        def after_checkpoint(
+            connection: Connection,
+            _cursor: object,
+            sql: str,
+            parameters: tuple[object, ...],
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            nonlocal inserted
+            if "INSERT INTO project_meta (key, value)" in sql and parameters == (
+                f"search.backfill.{source}",
+                '["c"]',
+            ):
+                connections.append(connection.connection.dbapi_connection)
+                if len(connections) == 1:
+                    connection.exec_driver_sql("INSERT INTO commit_child VALUES (1)")
+                    inserted = True
+
+        event.listen(engine, "after_cursor_execute", after_checkpoint)
+        try:
+            with pytest.raises(IntegrityError) as failed:
+                await ledger.run("system", write)
+            assert inserted
+            assert failed.value.statement is None  # SQLite rejected COMMIT, after both INSERTs.
+            original = failed.value.orig
+            assert isinstance(original, sqlite3.IntegrityError)
+            assert original.sqlite_errorcode == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY
+            assert retryable_search_write_error(failed.value) is None
+            assert await store.backfill_position(source) == ("a",)
+            assert indexed_rows(store.path) == before
+            assert await ledger.run("system", write)
+        finally:
+            event.remove(engine, "after_cursor_execute", after_checkpoint)
+
+        failed_connection, successful_connection = connections
+        assert failed_connection is not successful_connection
+        assert await store.backfill_position(source) == ("c",)
+        assert set(indexed_rows(store.path)) == {(DECISION_KIND, id_) for id_ in ("a", "b", "c")}
+        with closing(sqlite3.connect(store.path)) as db:
+            assert db.execute("SELECT * FROM commit_child").fetchall() == []
 
 
 @contextmanager

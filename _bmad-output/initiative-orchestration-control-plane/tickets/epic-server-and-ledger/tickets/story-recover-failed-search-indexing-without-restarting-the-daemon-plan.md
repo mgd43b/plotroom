@@ -60,6 +60,7 @@ Approved choice implemented: “Surface the failure and retry within limits from
 - Forward the production keyword from the existing Epic 7 daemon fixture so unrelated acceptance still covers the real backfill setup.
 
 - Added exact SQLite `FULL` classification and an authenticated localhost test of both registered search inputs. The fixture forces `BUSY` after the lexical checkpoint write and `FULL` at embedding commit. Both inputs recover in the same daemon process.
+- The opening review requested a failure from the writer's physical SQLite `COMMIT`. A deferred foreign-key violation on the writer connection surfaces as `SQLITE_CONSTRAINT_FOREIGNKEY` at commit, preserving the prior checkpoint and index rows. Explicitly resubmitting the batch succeeds on a fresh DBAPI connection.
 
 ## Verification
 
@@ -69,3 +70,5 @@ Approved choice implemented: “Surface the failure and retry within limits from
 
 The focused suite passed all 72 tests on Python 3.14.10 and 3.15.2. Real fixture SQLite contention was injected after checkpoint SQL and at commit. Tests verified durable rollback, same-run recovery, exhausted retries, cancellation during backoff, and a redacted terminal error for a permanent constraint failure. Ruff lint and formatting checks and Pyright passed.
 - Combined independent review and rechecks completed. Full final suites passed 1,069 tests each on managed Python 3.14 and 3.15. Ruff, Pyright, core dependency and whitespace checks passed.
+- The backfill file passed eight tests each on Python 3.14 and 3.15 after adding the physical commit case. A negative control that retained the writer connection failed on the next `BEGIN` because SQLite still had the old transaction open.
+- [Built in PR #179](https://github.com/mgd43b/plotroom/pull/179)

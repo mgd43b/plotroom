@@ -370,6 +370,10 @@ def saved_rejections(store: SqliteStore) -> list[tuple[str, int, int, str]]:
         (413, {"error": {"code": "input_too_large"}}, 1),
         (413, {"error": {"code": "gateway_capacity"}}, None),
         (413, b'{"error":', None),
+        (413, b'{"error":{"code":"input_too_large"},"size":NaN}', None),
+        (413, b'{"error":{"code":"input_too_large"},"size":Infinity}', None),
+        (413, b'{"error":{"code":"unknown","code":"input_too_large"}}', None),
+        (413, '{"error":{"code":"input_too_large"}}'.encode("utf-16"), None),
         (
             413,
             {

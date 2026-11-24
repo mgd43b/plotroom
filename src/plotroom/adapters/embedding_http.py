@@ -3,7 +3,7 @@
 import asyncio
 import json
 from http import HTTPStatus
-from typing import Any, cast
+from typing import Any, Never, cast
 
 import httpx
 
@@ -118,7 +118,11 @@ async def _confirmed_input_rejection(response: httpx.Response) -> bool:
             return False
         body.extend(chunk)
     try:
-        payload: Any = json.loads(body)
+        payload: Any = json.loads(
+            body.decode("utf-8"),
+            parse_constant=_invalid_json_constant,
+            object_pairs_hook=_unique_json_object,
+        )
     except ValueError, RecursionError:
         return False
     if not isinstance(payload, dict):
@@ -128,3 +132,14 @@ async def _confirmed_input_rejection(response: httpx.Response) -> bool:
         isinstance(error, dict)
         and cast("dict[str, Any]", error).get("code") == EmbeddingRejection.INPUT_TOO_LARGE
     )
+
+
+def _invalid_json_constant(_value: str) -> Never:
+    raise ValueError("nonstandard JSON constant")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate JSON object key")
+    return result

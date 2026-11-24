@@ -61,3 +61,4 @@ Adapted the read-only stash without applying it. Explicit HTTPS bearer transport
 - `uv run --locked python -m pytest -q tests/test_proxy.py tests/test_daemon_start.py tests/test_transport_contract.py`
 - `uv run --locked ruff check src tests` and `uv run --locked pyright`
 - Combined independent review and rechecks completed. Full final suites passed 1,069 tests each on managed Python 3.14 and 3.15. Ruff, Pyright, core dependency and whitespace checks passed.
+- [Built in PR #179](https://github.com/mgd43b/plotroom/pull/179)
