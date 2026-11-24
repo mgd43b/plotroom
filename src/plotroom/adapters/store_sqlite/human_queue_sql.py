@@ -53,3 +53,8 @@ def decision_from_row(row: Row[Any]) -> Decision:
         json.loads(row.settles),
         row.created_at,
     )
+
+
+async def decision_refs(connection: AsyncConnection) -> list[tuple[str, list[str]]]:
+    rows = await connection.execute(text("SELECT id, governs FROM decisions"))
+    return [(row.id, json.loads(row.governs)) for row in rows]

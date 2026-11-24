@@ -27,7 +27,19 @@ from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
 from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, GitHubSummary, PullRequest
-from plotroom.core.github_projection import ASK_COMMENT_HISTORY, COMMENTS, GitHubResource
+from plotroom.core.github_projection import (
+    ASK_COMMENT_HISTORY,
+    COMMENTS,
+    ISSUE_TREE,
+    ISSUES,
+    GitHubResource,
+)
+from plotroom.core.goal_projection import (
+    GoalFacts,
+    StoredGoal,
+    project_goal_facts,
+    verified_issue_projection,
+)
 from plotroom.core.human_queue import Decision
 from plotroom.core.lanes import Lane, with_projected_pr
 from plotroom.core.ledger import Ledger
@@ -113,6 +125,7 @@ class _MemoryTransaction:
         self.triggers: dict[str, Trigger] = {}
         self.decisions: list[Decision] = []
         self.asks: dict[str, Ask] = {}
+        self.goals: dict[str, StoredGoal] = {}
         self.lanes: dict[str, Lane] = {}
         self.budgets: dict[str, Budget] = {}
         self.routes: dict[str, str] = {}
@@ -422,6 +435,14 @@ class _MemoryTransaction:
         self._live()
         return self.asks.get(ask_id)
 
+    async def goals_use_blockers(self) -> bool:
+        self._live()
+        return any(goal.uses_blockers for goal in self.goals.values())
+
+    async def save_goal(self, goal: StoredGoal) -> None:
+        self._live()
+        self.goals[goal.name] = goal
+
     async def save_ask(self, ask: Ask) -> None:
         self._live()
         self.asks[ask.ask_id] = ask
@@ -590,6 +611,7 @@ class MemoryStore:
         self._triggers: dict[str, Trigger] = {}
         self._decisions: list[Decision] = []
         self._asks: dict[str, Ask] = {}
+        self._goals: dict[str, StoredGoal] = {}
         self._lanes: dict[str, Lane] = {}
         self._budgets: dict[str, Budget] = {}
         self._routes: dict[str, str] = {}
@@ -632,6 +654,7 @@ class MemoryStore:
         tx.triggers = copy.deepcopy(self._triggers)
         tx.decisions = copy.deepcopy(self._decisions)
         tx.asks = self._asks.copy()
+        tx.goals = self._goals.copy()
         tx.lanes = self._lanes.copy()
         tx.budgets = self._budgets.copy()
         tx.routes = self._routes.copy()
@@ -659,6 +682,7 @@ class MemoryStore:
             self._triggers = tx.triggers
             self._decisions = tx.decisions
             self._asks = tx.asks
+            self._goals = tx.goals
             self._lanes = tx.lanes
             self._budgets = tx.budgets
             self._routes = tx.routes
@@ -818,6 +842,32 @@ class MemoryStore:
             for ask in self._asks.values()
             if ask.repository == repository and ask.settled_by is None
         }
+
+    async def goals_use_blockers(self) -> bool:
+        return any(goal.uses_blockers for goal in self._goals.values())
+
+    async def read_goals(
+        self,
+        name: str | None,
+        repository: str | None,
+        human_login: str | None,
+    ) -> tuple[list[StoredGoal], GoalFacts | None]:
+        goals = [goal for key, goal in sorted(self._goals.items()) if name is None or name == key]
+        if not goals or repository is None:
+            return goals, None
+        issues = self._github_resources.get((repository, ISSUES, ""))
+        if not verified_issue_projection(issues):
+            return goals, None
+        tree = self._github_resources.get((repository, ISSUE_TREE, ""))
+        decisions = [(decision.decision_id, decision.governs) for decision in self._decisions]
+        return goals, project_goal_facts(
+            repository,
+            human_login,
+            issues,
+            tree,
+            self._lanes.values(),
+            decisions,
+        )
 
     async def list_asks(self, stale_only: bool) -> list[Ask]:
         stale = {

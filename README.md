@@ -15,7 +15,8 @@ see the overlapping claims in `next()` and decide who should own the fixture.
 A replacement chat can read `snapshot()` to recover the lane state. The worker
 can save "Verify CI on main" in the lane's checklist for a specific PR and head
 SHA. When that head merges, the step keeps the lane open until the result is
-recorded.
+recorded. To see which issues are still keeping a milestone open, use
+[operator goals](#operator-goals).
 
 ## How a lane works
 
@@ -131,6 +132,34 @@ store_config = "path/to/project/_bmad/custom/ticketing-store-config.toml"
 The Issues source layers that file over the trusted installation's BMad GitHub
 starter. Without a milestone filter it includes open milestones and standalone
 tickets. The daemon preserves the last mirror when a source refresh fails.
+
+## Operator goals
+
+Which open issues still need an owner? Save that rule once, then ask Plotroom
+which issues remain and what is missing for each one.
+
+1. Set `human_login` in the project table to use the human's GitHub login.
+2. With an orchestrator token, call `goal_set` with a name, goal text, and
+   request ID. For example, name the goal below `milestone-1-owners`.
+3. Call `goal` with that name to check progress. Omit the name to check all
+   stored goals.
+
+```text
+every issue where state = open and milestone = 1 satisfies assigned_to human or blocked_by(assigned_to human)
+```
+
+Each report lists the remaining issues and points to the clauses that failed
+or still need evidence. `as_of` tells you when Plotroom observed the issues.
+The example counts only direct, open blockers. If assignment is already
+confirmed, the issue passes even when blocker evidence is unavailable.
+
+Predicates are `state = open`, `state = closed`, `milestone = <positive number>`, `label "name"`,
+`assigned_to human`, `assigned_to "login"`, `blocked_by(<predicate>)`, `lane "lane-id"`,
+and `decision "decision-id"`. Combine predicates with `not`, `and`, `or`, and parentheses.
+`lane` tests active lane ownership by GitHub issue reference, and `decision` tests whether
+the decision governs the issue. Use `#42` or `owner/repository#42` to link a lane to a GitHub
+issue explicitly. A local ticket reference without a known GitHub issue can leave a lane
+predicate unavailable.
 
 ## Lane briefs
 

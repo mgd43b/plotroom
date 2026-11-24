@@ -26,6 +26,7 @@ from plotroom.adapters.store_sqlite import (
     checklists_sql,
     embedding_sql,
     github_sql,
+    goals_sql,
     human_queue_sql,
     outbox_sql,
     triggers_sql,
@@ -53,7 +54,13 @@ from plotroom.core.ask_checks import Ask
 from plotroom.core.claims import Claim
 from plotroom.core.events import Event, LedgerError
 from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
-from plotroom.core.github_projection import GitHubResource
+from plotroom.core.github_projection import ISSUE_TREE, ISSUES, GitHubResource
+from plotroom.core.goal_projection import (
+    GoalFacts,
+    StoredGoal,
+    project_goal_facts,
+    verified_issue_projection,
+)
 from plotroom.core.merge_gate import GateSnapshot, load_gate_snapshot
 from plotroom.core.next_items import Item
 from plotroom.core.search import pack_vector
@@ -413,6 +420,35 @@ class SqliteStore:
     async def pending_ask_issues(self, repository: str) -> set[int]:
         async with self._engine.connect() as connection:
             return await asks_sql.pending_ask_issues(connection, repository)
+
+    async def goals_use_blockers(self) -> bool:
+        async with self._engine.connect() as connection:
+            return await goals_sql.goals_use_blockers(connection)
+
+    async def read_goals(
+        self,
+        name: str | None,
+        repository: str | None,
+        human_login: str | None,
+    ) -> tuple[list[StoredGoal], GoalFacts | None]:
+        async with self._engine.connect() as connection, connection.begin():
+            goals = await goals_sql.list_goals(connection, name)
+            if not goals or repository is None:
+                return goals, None
+            issues = await github_sql.github_resource(connection, repository, ISSUES, "")
+            if not verified_issue_projection(issues):
+                return goals, None
+            tree = await github_sql.github_resource(connection, repository, ISSUE_TREE, "")
+            lanes = await board_lanes(connection, "orchestrator")
+            decisions = await human_queue_sql.decision_refs(connection)
+            return goals, project_goal_facts(
+                repository,
+                human_login,
+                issues,
+                tree,
+                lanes,
+                decisions,
+            )
 
     async def list_asks(self, stale_only: bool) -> list[Ask]:
         async with self._engine.connect() as connection:

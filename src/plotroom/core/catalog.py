@@ -65,6 +65,7 @@ from plotroom.core.merge_flakes import (
     MAIN_FLAKE_EVENT,
 )
 from plotroom.core.next_items import ItemKind, ack, owns_ack
+from plotroom.core.operator_goals import set_goal
 from plotroom.core.outbox import complete_outbox, lease_outbox
 from plotroom.core.reports import DEPLOY_ARGS, DEPLOY_FIELDS, DEPLOY_STATUS, deploy_report
 from plotroom.core.roles import WriterRule, WriterRules
@@ -192,6 +193,14 @@ def build_catalog(
     )
     lane = FieldSpec("lane", "str")
     orchestrator = (WriterRule("orchestrator"),)
+    catalog.commands.register(
+        Command(
+            "goal_set",
+            (FieldSpec("name", "str"), FieldSpec("text", "str")),
+            partial(set_goal, repository=github_repository),
+        ),
+        rules=orchestrator,
+    )
     catalog.register_item(MISSING_ROUTE)
     catalog.commands.register(Command("route", (ACTION_KIND, lane), route), rules=orchestrator)
     catalog.commands.register(

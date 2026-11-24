@@ -16,6 +16,7 @@ from plotroom.adapters.github import (
 )
 from plotroom.adapters.github.ci import fetch_main
 from plotroom.adapters.github.details import GitHubDetailPoller
+from plotroom.adapters.github.issue_details import fetch_issue_tree, fetch_issues
 from plotroom.adapters.github.pr_details import fetch_threads
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.store_sqlite import SqliteStore
@@ -23,7 +24,7 @@ from plotroom.adapters.work_items_github_issues import GitHubIssuesWorkItems
 from plotroom.app.config import ConfigError, load_config
 from plotroom.app.runtime import ProjectRuntime
 from plotroom.core.catalog import build_catalog
-from plotroom.core.events import LedgerError
+from plotroom.core.events import LedgerError, format_time
 from plotroom.core.github import DETAILS, PullRequest
 from plotroom.core.github_projection import (
     CHECKS,
@@ -31,16 +32,20 @@ from plotroom.core.github_projection import (
     COMMENTS,
     FILES,
     ISSUE_TREE,
+    ISSUES,
     LABELS,
     MAIN,
     PULL_TEXT,
     THREADS,
+    GitHubRecord,
+    GitHubResource,
     latest_checks,
     main_verdict,
     unresolved_threads,
 )
 from plotroom.core.ledger import Ledger
 from plotroom.core.merge_gate import GatePolicy
+from plotroom.core.operator_goals import FIRST_GOAL
 from plotroom.ports.github_write import BranchUpdateReceipt, FixtureGitHubWrite
 
 REPO = "fixture/repo"
@@ -712,3 +717,225 @@ async def test_issue_comment_backfill_advances_beyond_foreground_page_budget(
     finally:
         await ledger.stop()
         await store.close()
+
+
+async def test_goal_poll_rebuilds_blocker_evidence_after_a_failed_refresh(tmp_path: Path) -> None:
+    provider = Fixture()
+    blocker_edge = True
+    fail_relationship = False
+    relationship_requests: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix(f"/repos/{REPO}")
+        if path == "/issues":
+            return httpx.Response(
+                200,
+                json=[
+                    Fixture.issue(1),
+                    {**Fixture.issue(2), "assignees": [{"login": "editor"}]},
+                ],
+            )
+        if path in {"/issues/1/sub_issues", "/issues/2/sub_issues"}:
+            return httpx.Response(200, json=[])
+        if path == "/issues/1/dependencies/blocked_by":
+            relationship_requests.append(1)
+            if fail_relationship:
+                return httpx.Response(503)
+            return httpx.Response(
+                200,
+                json=[{"number": 2, "repository_url": f"{API}/repos/{REPO}"}]
+                if blocker_edge
+                else [],
+            )
+        if path == "/issues/2/dependencies/blocked_by":
+            relationship_requests.append(2)
+            return httpx.Response(200, json=[])
+        return provider.handle(request)
+
+    clock = FixedClock()
+    store = SqliteStore("demo", tmp_path)
+    ledger = Ledger(
+        store,
+        build_catalog(github_repository=REPO),
+        clock,
+        github_repository=REPO,
+        human_login="editor",
+    )
+    detail = GitHubDetailPoller(
+        ledger,
+        clock,
+        GitHubReadClient(API, REPO),
+        LocalGitHubCredential("TOKEN", {"TOKEN": "fixture"}, None),
+        ("image",),
+    )
+    try:
+        await store.migrate()
+        ledger.start()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            await detail.poll(client)
+            ledger.github_error = None
+            assert relationship_requests == []
+            await ledger.execute(
+                "orchestrator",
+                "goal_set",
+                "assignment-only",
+                {
+                    "name": "assignment",
+                    "text": "every issue where state = open satisfies assigned_to human",
+                },
+            )
+            await detail.poll(client)
+            assert relationship_requests == []
+            await ledger.execute(
+                "orchestrator",
+                "goal_set",
+                "coverage",
+                {"name": "coverage", "text": FIRST_GOAL},
+            )
+            await detail.poll(client)
+            assert relationship_requests == [1, 2]
+            first = await ledger.goal("orchestrator", "coverage")
+            assert first["done"] is True
+            assert first["as_of"] == format_time(clock.now())
+
+            blocker_edge = False
+            fail_relationship = True
+            await detail.poll(client)
+            failed = await ledger.goal("orchestrator", "coverage")
+            assert failed["done"] is False
+            assert failed["goals"][0]["remaining"][0]["clauses"][1]["status"] == "unavailable"
+
+            fail_relationship = False
+            await detail.poll(client)
+            assert relationship_requests == [1, 2, 1, 1, 2]
+            recovered = await ledger.goal("orchestrator", "coverage")
+            assert recovered["done"] is False
+            [remaining] = recovered["goals"][0]["remaining"]
+            assert remaining["issue"] == 1
+            assert remaining["clauses"][1]["status"] == "failed"
+
+            assignment_only = "every issue where state = open satisfies assigned_to human"
+
+            async def change_goal(request_id: str, text: str) -> None:
+                await ledger.execute(
+                    "orchestrator", "goal_set", request_id, {"name": "coverage", "text": text}
+                )
+
+            await change_goal("pause-before-restoring", assignment_only)
+            blocker_edge = True
+            await change_goal("restore-edge-proof", FIRST_GOAL)
+            await detail.poll(client)
+            assert (await ledger.goal("orchestrator", "coverage"))["done"] is True
+
+            await change_goal("pause", assignment_only)
+            count = len(relationship_requests)
+            blocker_edge = False
+            await detail.poll(client)
+            assert len(relationship_requests) == count
+            await change_goal("resume", FIRST_GOAL)
+            pending = await ledger.goal("orchestrator", "coverage")
+            assert pending["done"] is False
+            assert pending["goals"][0]["remaining"][0]["clauses"][1]["status"] == "unavailable"
+            await detail.poll(client)
+            resumed = await ledger.goal("orchestrator", "coverage")
+            assert resumed["done"] is False
+            assert resumed["goals"][0]["remaining"][0]["clauses"][1]["status"] == "failed"
+
+            await change_goal("race-pause", assignment_only)
+            await change_goal("race-start", FIRST_GOAL)
+            blocker_edge = True
+
+            async def old_poll(previous: GitHubResource | None) -> GitHubResource:
+                nonlocal blocker_edge
+                projected = await ledger.github_resource(REPO, ISSUES)
+                assert projected is not None
+                captured = await fetch_issue_tree(
+                    GitHubReadClient(API, REPO), client, "fixture", projected, previous
+                )
+                await change_goal("race-pause-again", assignment_only)
+                blocker_edge = False
+                await change_goal("race-resume", FIRST_GOAL)
+                return captured
+
+            await detail._refresh(ISSUE_TREE, "", old_poll)  # pyright: ignore[reportPrivateUsage]
+            raced = await ledger.goal("orchestrator", "coverage")
+            assert raced["done"] is False
+            assert raced["goals"][0]["remaining"][0]["clauses"][1]["status"] == "unavailable"
+
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+@pytest.mark.parametrize("resource", ["issues", "dependencies"])
+async def test_goal_provider_rejects_duplicate_offset_pages(resource: str) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        base = f"{API}/repos/{REPO}"
+        path = request.url.path.removeprefix(f"/repos/{REPO}")
+        if path == "/milestones" or path == "/issues/1/sub_issues":
+            return httpx.Response(200, json=[])
+        if resource == "issues":
+            assert path == "/issues"
+            entry = Fixture.issue(1)
+        else:
+            assert path == "/issues/1/dependencies/blocked_by"
+            entry = {"number": 2, "repository_url": base}
+        headers = (
+            {"Link": f'<{base}{path}?page=2>; rel="next"'}
+            if request.url.params["page"] == "1"
+            else {}
+        )
+        return httpx.Response(200, headers=headers, json=[entry])
+
+    api = GitHubReadClient(API, REPO)
+    row = GitHubRecord(
+        "issue/1",
+        "issue_opened",
+        {"number": 1, "state": "open"},
+        details={"resource": "issue", "number": 1, "updated_at": NOW},
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        fetch = (
+            fetch_issues(api, client, "fixture", None)
+            if resource == "issues"
+            else fetch_issue_tree(api, client, "fixture", GitHubResource((row,)), None)
+        )
+        with pytest.raises(GitHubUnavailable, match="repeated an issue"):
+            await fetch
+
+
+async def test_issue_verification_rejects_a_shifted_nonduplicate_page() -> None:
+    calls: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        calls.append(page)
+        if page == 2:
+            return httpx.Response(200, json=[Fixture.issue(3)])
+        headers = {"Link": f'<{API}/repos/{REPO}/issues?page=2>; rel="next"'}
+        issue_number = 1 if len(calls) == 1 else 2
+        return httpx.Response(200, headers=headers, json=[Fixture.issue(issue_number)])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(GitHubUnavailable, match="pages shifted"):
+            await fetch_issues(GitHubReadClient(API, REPO), client, "fixture", None)
+    assert calls == [1, 2, 1]
+
+
+async def test_issue_verification_accepts_full_last_page_with_bounded_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("plotroom.adapters.github.read.MAX_PAGES", 1)
+    calls: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        calls.append(page)
+        rows = [Fixture.issue(number) for number in range(1, 101)] if page == 1 else []
+        return httpx.Response(200, json=rows)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        result = await fetch_issues(GitHubReadClient(API, REPO), client, "fixture", None)
+    assert result.complete
+    assert len(result.records) == 100
+    assert calls == [1, 2, 1]

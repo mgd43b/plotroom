@@ -193,22 +193,32 @@ class GitHubReadClient:
         recent: bool = False,
         verify_total: bool = False,
         verify_terminal: bool = False,
+        verify_boundaries: bool = False,
     ) -> AsyncIterator[Row]:
-        for page in range(1, MAX_PAGES + 1):
-            records, more = await self.page(
+        async def read(index: int) -> tuple[list[Row], bool]:
+            return await self.page(
                 client,
                 token,
                 path,
-                page,
+                index,
                 params=params,
                 key=key,
                 verify_total=verify_total,
                 verify_terminal=verify_terminal,
             )
+
+        prior: tuple[list[Row], bool] | None = None
+        for page in range(1, MAX_PAGES + 1 + verify_terminal):
+            records, more = await read(page)
+            if page > MAX_PAGES and (records or more):
+                break
+            if verify_boundaries and prior is not None and await read(page - 1) != prior:
+                raise GitHubUnavailable("GitHub pages shifted during the read")
             for row in records:
                 yield row
             if recent or not more:
                 return
+            prior = (records, more) if verify_boundaries else None
         raise GitHubUnavailable("GitHub read exceeded the page limit")
 
     async def review_threads(

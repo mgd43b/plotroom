@@ -735,6 +735,26 @@ def build_app(
             return err(exc.code, exc.message)
 
     @server.tool()
+    async def goal_set(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], name: str, text: str, request_id: str
+    ) -> dict[str, Any]:
+        """Store a validated operator goal under the given name."""
+        return await execute_command(ctx, "goal_set", request_id, {"name": name, "text": text})
+
+    @server.tool()
+    async def goal(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context[Any, Request], name: str | None = None
+    ) -> dict[str, Any]:
+        """Evaluate a named goal or all stored goals and report every remaining issue."""
+        try:
+            caller = board_access(ctx)
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            return ok(await caller.ledger.goal(caller.identity.role, name))
+        except LedgerError as exc:
+            return err(exc.code, exc.message)
+
+    @server.tool()
     async def trigger(  # pyright: ignore[reportUnusedFunction]
         ctx: Context[Any, Request],
         predicate: dict[str, Any],
