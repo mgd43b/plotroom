@@ -1,0 +1,12 @@
+image:
+  repository: plotroom
+  tag: local
+  pullPolicy: Never
+projects:
+  - helm-fixture
+storage:
+  size: 1Gi
+  className: ""
+tokenJob:
+  enabled: false
+  project: helm-fixture

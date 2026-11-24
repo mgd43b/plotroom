@@ -1,0 +1,36 @@
+{{- if .Values.tokenJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-token
+  labels:
+    {{- include "plotroom.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        {{- include "plotroom.podSecurity" . | nindent 8 }}
+      containers:
+        - name: token
+          image: {{ include "plotroom.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - token
+            - issue
+            - --config
+            - /etc/plotroom/plotroom.toml
+            - --no-local
+            - --project
+            - {{ .Values.tokenJob.project | quote }}
+            - --role
+            - orchestrator
+          securityContext:
+            {{- include "plotroom.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            {{- include "plotroom.mounts" . | nindent 12 }}
+      volumes:
+        {{- include "plotroom.volumes" . | nindent 8 }}
+{{- end }}

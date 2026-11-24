@@ -50,3 +50,30 @@ jobs:
       - uses: actions/checkout@v7
       - name: Build local container image
         run: docker build --tag plotroom:ci .
+
+  helm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.3.2
+      - uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          install_only: true
+      - name: Lint, render, and verify the chart on kind
+        run: |
+          set -eu
+          cfg=$(mktemp -d)
+          export KUBECONFIG="$cfg/config"
+          cluster="plotroom-ci-$GITHUB_RUN_ID"
+          trap 'kind delete cluster --name "$cluster" --kubeconfig "$KUBECONFIG"; rm -rf "$cfg"' EXIT
+          helm lint deploy/helm --set tokenJob.enabled=true
+          helm template plotroom deploy/helm --set tokenJob.enabled=true > "$cfg/rendered.yaml"
+          docker build --tag plotroom:helm-ci .
+          kind create cluster --name "$cluster" --kubeconfig "$KUBECONFIG" --wait 120s
+          kind load docker-image plotroom:helm-ci --name "$cluster"
+          python3 deploy/helm/smoke.py --kubeconfig "$KUBECONFIG" \
+            --context "kind-$cluster" --namespace plotroom-ci --release plotroom --image-tag helm-ci
