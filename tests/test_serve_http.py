@@ -44,6 +44,27 @@ EMPTY_BOARD: dict[str, Any] = {
 MODES = ["legacy", "auto"]
 
 
+async def test_health_and_project_readiness_are_host_checked_without_a_bearer(
+    server: tuple[Child, str],
+) -> None:
+    _, url = server
+    base = url.removesuffix("/mcp")
+    async with httpx.AsyncClient(trust_env=False) as http:
+        health = await http.get(f"{base}/healthz")
+        assert health.status_code == 200
+        assert health.json() == {"status": "ok"}
+        for path in ("/readyz", "/readyz/demo"):
+            ready = await http.get(f"{base}{path}")
+            assert ready.status_code == 200
+            assert ready.json() == {"status": "ready", "projects": {"demo": "ready"}}
+        assert (await http.head(f"{base}/healthz")).status_code == 200
+        assert (await http.get(f"{base}/readyz/unknown")).status_code == 404
+        assert (
+            await http.get(f"{base}/readyz", headers={"Host": "foreign.invalid"})
+        ).status_code == 421
+        assert (await http.post(url)).status_code == 401
+
+
 @pytest.mark.parametrize("mode", MODES)
 async def test_snapshot_over_http_is_the_empty_board(
     server: tuple[Child, str], server_token: IssuedToken, mode: str

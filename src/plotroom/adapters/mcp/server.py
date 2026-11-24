@@ -14,7 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, Stri
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from plotroom.core.clerk_import import PullImportRow, SkipImportRow, TriggerImportRow
@@ -110,6 +111,13 @@ class _AccessMiddleware:
             hosts = headers.getlist("host")
             if len(hosts) != 1 or not _allowed_host(hosts[0], self._allowed_hosts):
                 await Response(status_code=421)(scope, receive, send)
+                return
+            path = scope["path"]
+            if scope["method"] in ("GET", "HEAD") and (
+                path in ("/healthz", "/readyz")
+                or (path.startswith("/readyz/") and "/" not in path[len("/readyz/") :])
+            ):
+                await self._app(scope, receive, send)
                 return
             authorization = headers.getlist("authorization")
             identity = None
@@ -827,6 +835,32 @@ def build_app(
     app = server.streamable_http_app(
         stateless_http=True,
         transport_security=TransportSecuritySettings(allowed_hosts=list(allowed_hosts)),
+    )
+
+    async def health(_request: Request) -> Response:
+        return JSONResponse({"status": "ok"})
+
+    async def readiness(request: Request) -> Response:
+        project = request.path_params.get("project")
+        if project is not None and project not in project_ids:
+            return JSONResponse({"status": "unknown_project"}, status_code=404)
+        selected = project_ids if project is None else (str(project),)
+        states = {
+            name: "ready" if unavailable is None and name in ledgers else "unavailable"
+            for name in selected
+        }
+        ready = bool(states) and all(state == "ready" for state in states.values())
+        return JSONResponse(
+            {"status": "ready" if ready else "unavailable", "projects": states},
+            status_code=200 if ready else 503,
+        )
+
+    app.routes.extend(
+        [
+            Route("/healthz", health),
+            Route("/readyz", readiness),
+            Route("/readyz/{project}", readiness),
+        ]
     )
     app.add_middleware(
         _AccessMiddleware,

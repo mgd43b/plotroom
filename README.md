@@ -106,6 +106,41 @@ Hosted container and Kubernetes setup are tracked in the project plan.
 See the [local server and ledger design](_bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md)
 and the [architecture notes](_bmad-output/initiative-orchestration-control-plane/architecture-orchestration-control-plane/architecture-orchestration-control-plane.md).
 
+## Run locally with Docker Compose
+
+From the checkout, choose a Compose project name for this instance. Compose
+builds the image and mounts a named volume at `/data` for the project databases
+and the hashed instance token registry. The HTTP port is published on loopback.
+
+```sh
+export PLOTROOM_PROJECTS=compose-demo
+docker compose -p plotroom-local up --build --detach --wait
+curl --fail http://127.0.0.1:8765/healthz
+curl --fail http://127.0.0.1:8765/readyz/compose-demo
+docker compose -p plotroom-local run --rm --no-deps -T plotroom \\
+  token issue --no-local --project compose-demo --role orchestrator
+```
+
+Store the returned token privately. Configure an MCP HTTP client with
+http://127.0.0.1:8765/mcp and send the token as a bearer. Call snapshot to
+check the project. For a restart check, record a disposable decision with
+decide, restart the service, and use the same bearer to call snapshot and
+decisions. The decision and its event are stored in the volume.
+
+```sh
+docker compose -p plotroom-local restart plotroom
+docker compose -p plotroom-local up --detach --wait --no-build
+curl --fail http://127.0.0.1:8765/readyz/compose-demo
+```
+
+Keep the project name and configuration consistent between commands. Set
+PLOTROOM_HTTP_PORT before the first up to use a different host port, or set it
+to 0 and use docker compose port plotroom 8765 to look up the assigned port.
+GET /healthz shows whether HTTP is running. GET /readyz checks all configured
+projects, and GET /readyz/<project> checks one. A project that cannot serve its
+ledger returns HTTP 503 on its readiness endpoint. Both probes apply the Host
+allowlist. MCP calls use a project-scoped bearer.
+
 ## Local search
 
 Search uses the project's full-text index by default. A project can also configure an

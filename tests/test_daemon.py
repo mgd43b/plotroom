@@ -113,6 +113,11 @@ async def test_old_sqlite_serves_unavailable_and_never_opens_a_project_file(
         assert result["ok"] is False
         assert result["error"]["code"] == "unavailable"
         assert "3.50.4" in result["error"]["message"]
+        async with httpx.AsyncClient(trust_env=False) as http:
+            assert (await http.get(f"http://127.0.0.1:{port}/healthz")).status_code == 200
+            ready = await http.get(f"http://127.0.0.1:{port}/readyz/demo")
+            assert ready.status_code == 503
+            assert ready.json() == {"status": "unavailable", "projects": {"demo": "unavailable"}}
         assert not (config.data_dir / "demo.db").exists()
     finally:
         await stop(daemon, task)
