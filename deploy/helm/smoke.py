@@ -148,7 +148,12 @@ def main() -> None:
     run([*kube, "delete", "pod", old_name, "--wait=true", "--timeout=90s"])
     new_name, new_uid = running_pod(old_uid)
     assert new_uid != old_uid
-    assert check(new_name, create=False) == first
+    assert "previous data-directory owner has stopped" in run(
+        [*kube, "logs", new_name, "-c", "wait-for-data-owner"]
+    )
+    latest = check(new_name, create=False)
+    assert latest[1] == first[1]
+    assert int(latest[0]) >= int(first[0])
     print(
         "Helm smoke passed: one ready replica, RWO storage, token Job and event retained after replacement."
     )

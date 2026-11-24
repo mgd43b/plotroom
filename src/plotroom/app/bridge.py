@@ -8,6 +8,8 @@ import json
 import logging
 import os
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Any, Literal, cast
 from uuid import uuid4
 
@@ -84,6 +86,9 @@ async def _send(relay: ClientSession, client: Client, consumer_id: str, board: s
         lease = result["lease"]
         if lease is None:
             continue
+        expires = datetime.fromisoformat(lease["expires_at"])
+        if datetime.now(UTC) + timedelta(seconds=10) >= expires:
+            continue
         key, address, body = (lease[name] for name in ("action_key", "to", "body"))
         sent = await call_relay(
             relay,
@@ -110,6 +115,7 @@ async def _bridge(
     consumer = str(uuid4())
     delay = 0.25
     while True:
+        ready_at: float | None = None
         try:
             with open(os.devnull, "w", encoding="utf-8") as errlog:  # noqa: ASYNC230
                 async with (
@@ -126,10 +132,13 @@ async def _bridge(
                     registration = await call_relay(relay, "register", {"name": NAME})
                     if registration.get("ok") is not True or registration.get("you") != NAME:
                         raise ValueError("the relay refused the protected bridge address")
+                    ready_at = monotonic()
                     async with asyncio.TaskGroup() as directions:
                         directions.create_task(_receive(relay, client, board))
                         directions.create_task(_send(relay, client, consumer, board))
         except Exception:
+            if ready_at is not None and monotonic() - ready_at >= WAIT_SECONDS:
+                delay = 0.25
             log.warning("bridge connection unavailable, retrying", extra={"retry_seconds": delay})
         await asyncio.sleep(delay)
         delay = min(delay * 2, 30)

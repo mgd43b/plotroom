@@ -23,6 +23,31 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         {{- include "plotroom.podSecurity" . | nindent 8 }}
+      initContainers:
+        - name: wait-for-data-owner
+          image: {{ include "plotroom.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-c"]
+          args:
+            - |
+              import time
+              from pathlib import Path
+              from plotroom.app.lock import DataDirLock, LockError
+              from plotroom.app.portfile import pin_directory
+
+              with pin_directory(Path("/data")) as fd:
+                  while True:
+                      try:
+                          with DataDirLock(Path("/data"), directory_fd=fd):
+                              break
+                      except LockError:
+                          time.sleep(0.25)
+              print("The previous data-directory owner has stopped.")
+          securityContext:
+            {{- include "plotroom.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
       containers:
         - name: plotroom
           image: {{ include "plotroom.image" . | quote }}

@@ -1,9 +1,15 @@
+import asyncio
 from pathlib import Path
+from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
+from mcp import ClientSession
+from mcp.client.client import Client
 
 from fakes import FixedClock
 from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.app import bridge as bridge_app
 from plotroom.core.actions import SWITCHBOARD_SEND
 from plotroom.core.budgets import record_budget_observations
 from plotroom.core.catalog import build_catalog, register_bridge
@@ -129,3 +135,31 @@ async def test_reassigned_worker_never_receives_a_lane_pinned_stop(tmp_path: Pat
     finally:
         await ledger.stop()
         await store.close()
+
+
+async def test_bridge_does_not_send_an_expired_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    async def fake_tool(_client: Client, name: str, **_arguments: Any) -> dict[str, Any]:
+        calls.append(name)
+        if calls == ["wait"]:
+            return {"item": {"kind": "bridge_ready"}}
+        if name == "bridge_lease":
+            return {
+                "lease": {
+                    "expires_at": "2000-01-01T00:00:00Z",
+                    "act_id": "stale",
+                    "action_key": "fixture",
+                    "to": "peer",
+                    "body": "fixture",
+                }
+            }
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(bridge_app, "_tool", fake_tool)
+    relay = cast(ClientSession, Mock(spec=ClientSession))
+    client = cast(Client, Mock(spec=Client))
+    with pytest.raises(asyncio.CancelledError):
+        await bridge_app._send(relay, client, "consumer", "fixture")  # pyright: ignore[reportPrivateUsage]
+    assert calls == ["wait", "bridge_lease", "wait"]
+    assert cast(Mock, relay).mock_calls == []

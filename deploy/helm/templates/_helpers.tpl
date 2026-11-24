@@ -39,3 +39,12 @@ capabilities:
 - name: data
   mountPath: /data
 {{- end -}}
+
+
+{{- define "plotroom.backupJobName" -}}
+{{- if le (len .Release.Name) 45 -}}
+{{- printf "%s-backup" .Release.Name -}}
+{{- else -}}
+{{- printf "%s-%s-backup" (.Release.Name | trunc 35 | trimSuffix "-") (.Release.Name | sha256sum | trunc 9) -}}
+{{- end -}}
+{{- end -}}

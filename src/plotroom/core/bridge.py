@@ -88,7 +88,15 @@ async def lease_bridge(
                 payload={**action.payload, "_bridge_lease": {"id": act_id, "expires": expires}},
             ),
         )
-        return {"lease": {"act_id": act_id, "action_key": action.key, "to": address, "body": body}}
+        return {
+            "lease": {
+                "act_id": act_id,
+                "action_key": action.key,
+                "to": address,
+                "body": body,
+                "expires_at": expires,
+            }
+        }
     return {"lease": None}
 
 

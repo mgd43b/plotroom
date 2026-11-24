@@ -31,3 +31,5 @@ CI runs the same smoke on a fresh kind cluster. The smoke captures the token pri
 ## Independent review dispositions
 
 Poll for a new Ready pod after deletion. Issue the fixture token through a post-install Job so image upgrades do not patch an immutable Job.
+
+A Deployment can create a replacement Pod object while the old one terminates. The init container acquires the same data-directory lock before the daemon starts, so serving owners cannot overlap. The smoke checks init completion and allows the cursor to advance across restart.

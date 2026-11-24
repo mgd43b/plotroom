@@ -149,9 +149,13 @@ def main() -> None:
             }
         ),
     )
+    [cron] = json.loads(run([
+        *kube, "get", "cronjobs", "-l", f"app.kubernetes.io/instance={release}", "-o", "json"
+    ]))["items"]
+    cron_name = cron["metadata"]["name"]
     for index in range(3):
         name = f"{release}-copy-{index}"
-        run([*kube, "create", "job", f"--from=cronjob/{release}-backup", name])
+        run([*kube, "create", "job", f"--from=cronjob/{cron_name}", name])
         run([*kube, "wait", "--for=condition=complete", f"job/{name}", "--timeout=120s"])
     run([*kube, "exec", deployment, "--", "python", "-c", CHECK_BACKUPS])
     run([

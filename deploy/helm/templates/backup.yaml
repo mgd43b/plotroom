@@ -19,7 +19,7 @@ spec:
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {{ .Release.Name }}-backup
+  name: {{ include "plotroom.backupJobName" . }}
   labels:
     {{- include "plotroom.labels" . | nindent 4 }}
 spec:

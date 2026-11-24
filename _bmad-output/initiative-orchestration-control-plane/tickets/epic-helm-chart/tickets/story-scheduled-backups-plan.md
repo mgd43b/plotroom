@@ -31,3 +31,5 @@ PVC. The actual kind CronJob smoke and focused local backup tests passed.
 ## Independent review dispositions
 
 Retain the backup PVC when disabling the scheduler. A Job supplies its expected project and checks the result, so a misplaced bearer cannot make a run appear complete.
+
+Bound long CronJob names with a deterministic hash suffix. The smoke resolves the rendered name through the release label.
