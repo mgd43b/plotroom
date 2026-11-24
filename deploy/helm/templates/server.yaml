@@ -42,8 +42,17 @@ spec:
                   value: "localhost:8765"
           volumeMounts:
             {{- include "plotroom.mounts" . | nindent 12 }}
+            {{- if .Values.backup.enabled }}
+            - name: backups
+              mountPath: /backups
+            {{- end }}
       volumes:
         {{- include "plotroom.volumes" . | nindent 8 }}
+        {{- if .Values.backup.enabled }}
+        - name: backups
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-backups
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

@@ -1,0 +1,78 @@
+{{- if .Values.backup.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-backups
+  labels:
+    {{- include "plotroom.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.backup.storage.className }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.storage.size | quote }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-backup
+  labels:
+    {{- include "plotroom.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  suspend: {{ .Values.backup.suspend }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          securityContext:
+            {{- include "plotroom.podSecurity" . | nindent 12 }}
+          containers:
+            - name: backup
+              image: {{ include "plotroom.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "-c"]
+              args:
+                - |
+                  import sys
+                  from pathlib import Path
+                  from urllib.request import ProxyHandler, Request, build_opener
+
+                  endpoint, *projects = sys.argv[1:]
+                  direct = build_opener(ProxyHandler({}))
+                  failures = []
+                  for project in projects:
+                      try:
+                          token = (Path("/tokens") / project).read_text().strip()
+                          request = Request(endpoint, method="POST", headers={
+                              "Authorization": "Bearer " + token,
+                          })
+                          with direct.open(request, timeout=90) as response:
+                              if response.status != 201:
+                                  failures.append(project)
+                      except (OSError, ValueError):
+                          failures.append(project)
+                  if failures:
+                      raise SystemExit("Backup failed for: " + ", ".join(failures))
+                - {{ printf "http://%s:8765/backup" .Release.Name | quote }}
+                {{- range .Values.projects }}
+                - {{ . | quote }}
+                {{- end }}
+              securityContext:
+                {{- include "plotroom.containerSecurity" . | nindent 16 }}
+              volumeMounts:
+                - name: tokens
+                  mountPath: /tokens
+                  readOnly: true
+          volumes:
+            - name: tokens
+              secret:
+                secretName: {{ required "backup.tokenSecret is required when backups are enabled" .Values.backup.tokenSecret | quote }}
+                defaultMode: 0440
+{{- end }}

@@ -194,6 +194,26 @@ local verification and protect its logs while the Job exists. To remove the
 entire disposable cluster after the checks, run
 `kind delete cluster --name "$cluster" --kubeconfig "$KUBECONFIG"`.
 
+### Verify scheduled backups locally
+
+On the same disposable cluster, run the backup smoke helper in a fresh
+namespace. It configures two projects and a separate backup claim, issues
+fixture orchestrator tokens, and starts three Jobs from the suspended
+CronJob's spec. It verifies the configured retention and opens each retained
+copy through the SQLite migration entry point.
+
+```sh
+helm lint deploy/helm --set backup.enabled=true,backup.tokenSecret=fixture-token
+python3 deploy/helm/backup_smoke.py --kubeconfig "$KUBECONFIG" --context "kind-$cluster" \
+  --namespace backup-fixture --release backups --image-tag "$cluster"
+```
+
+With `backup.enabled` set, the server mounts the backup volume at `/backups`.
+The scheduler mounts an existing Secret whose keys are the configured project
+names and whose values are their orchestrator bearers. Each request backs up
+the project identified by that bearer. The scheduler does not mount either
+database or backup volume. Delete the disposable cluster when finished.
+
 ## Local search
 
 Search uses the project's full-text index by default. A project can also configure an

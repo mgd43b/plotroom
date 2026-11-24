@@ -77,3 +77,5 @@ jobs:
           kind load docker-image plotroom:helm-ci --name "$cluster"
           python3 deploy/helm/smoke.py --kubeconfig "$KUBECONFIG" \
             --context "kind-$cluster" --namespace plotroom-ci --release plotroom --image-tag helm-ci
+          python3 deploy/helm/backup_smoke.py --kubeconfig "$KUBECONFIG" \
+            --context "kind-$cluster" --namespace backup-ci --release backups --image-tag helm-ci

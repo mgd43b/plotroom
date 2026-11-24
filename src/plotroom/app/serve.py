@@ -62,6 +62,7 @@ from plotroom.app.tokens import TokenRegistry
 from plotroom.core.actions import SWITCHBOARD_SEND
 from plotroom.core.ask_checks import DEFAULT_ASK_STALE_DAYS
 from plotroom.core.catalog import build_catalog
+from plotroom.core.events import LedgerError
 from plotroom.core.ledger import Ledger
 from plotroom.core.routing import seed_routes
 from plotroom.core.search import SemanticSearch, backfill_search, follow_search_embeddings
@@ -322,6 +323,7 @@ class Daemon:
                     if project.work_items is not None
                 },
                 authenticate=TokenRegistry(config.data_dir).authenticate,
+                backup=self._backup_project if config.backup_dir is not None else None,
                 unavailable=problem,
                 snapshot_budget=config.snapshot_budget,
                 next_budget=config.next_budget,
@@ -554,6 +556,16 @@ class Daemon:
             usage_meter=self._usage_meters.get(project_id),
         )
         project.runtime.start()
+
+    async def _backup_project(self, project_id: str) -> str:
+        root = self._config.backup_dir
+        if root is None:
+            raise LedgerError("unavailable", "backups are disabled")
+        try:
+            return await self._projects[project_id].store.backup(root, self._config.backup_retain)
+        except (OSError, sqlite3.Error, ProjectMigrationError) as exc:
+            log.error("scheduled backup failed", extra={"project": project_id})
+            raise LedgerError("unavailable", "cannot complete the project backup") from exc
 
     def _stop_waiting(self) -> None:
         for ledger in self.ledgers.values():

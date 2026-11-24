@@ -39,6 +39,7 @@ from plotroom.ports.work_items import WorkItemSource
 _NEXT_PAGE_SIZE = 64
 
 type Authenticate = Callable[[str], Awaitable[Identity | None]]
+type Backup = Callable[[str], Awaitable[str]]
 
 
 class ReadyChecklistEntry(BaseModel):
@@ -171,6 +172,7 @@ def build_app(
     *,
     ledgers: Mapping[str, Ledger],
     authenticate: Authenticate,
+    backup: Backup | None = None,
     work_item_sources: Mapping[str, WorkItemSource] | None = None,
     unavailable: str | None = None,
     snapshot_budget: int = DEFAULT_SNAPSHOT_BUDGET,
@@ -859,8 +861,24 @@ def build_app(
             status_code=200 if ready else 503,
         )
 
+    async def backup_project(request: Request) -> Response:
+        if backup is None:
+            return Response(status_code=404)
+        caller: ProjectRequest = request.state.plotroom
+        if caller.identity.role != "orchestrator":
+            return Response(status_code=403)
+        if caller.ledger is None:
+            return JSONResponse({"status": "unavailable"}, status_code=503)
+        project = caller.identity.project_id
+        try:
+            name = await backup(project)
+        except LedgerError:
+            return JSONResponse({"status": "unavailable"}, status_code=503)
+        return JSONResponse({"project": project, "file": name}, status_code=201)
+
     app.routes.extend(
         [
+            Route("/backup", backup_project, methods=["POST"]),
             Route("/healthz", health),
             Route("/readyz", readiness),
             Route("/readyz/{project}", readiness),

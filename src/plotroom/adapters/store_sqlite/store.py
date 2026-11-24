@@ -52,6 +52,7 @@ from plotroom.adapters.store_sqlite.migrate import (
     ProjectMigrationError,
     alembic_config,
     prepare_upgrade,
+    scheduled_backup,
     upgrade_to_head,
 )
 from plotroom.adapters.store_sqlite.search_sql import search_records
@@ -237,6 +238,7 @@ class SqliteStore:
         event.listen(self._engine.sync_engine, "begin", _on_begin)
         self._writer: AsyncConnection | None = None
         self._writing = False
+        self._backup_lock = asyncio.Lock()
 
     @property
     def project_id(self) -> str:
@@ -249,6 +251,12 @@ class SqliteStore:
             await upgrade_to_head(self._engine, cfg)
         except (AlembicError, OSError, SQLAlchemyError, sqlite3.Error) as exc:
             raise ProjectMigrationError("cannot migrate the SQLite project database") from exc
+
+    async def backup(self, root: Path, retain: int) -> str:
+        async with self._backup_lock:
+            return await _uninterrupted(
+                asyncio.to_thread(scheduled_backup, self.path, root, self.project_id, retain)
+            )
 
     async def revision(self) -> str | None:
         def read(connection: Any) -> str | None:

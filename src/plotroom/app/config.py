@@ -43,6 +43,8 @@ _GITHUB_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
 GITHUB_API = "https://api.github.com"
 _TOP_LEVEL_KEYS = {
     "data_dir",
+    "backup_dir",
+    "backup_retain",
     "host",
     "port",
     "allowed_hosts",
@@ -136,6 +138,8 @@ class Config:
     human_logins: Mapping[str, str] = field(default_factory=lambda: {})
     ask_stale_days: Mapping[str, int] = field(default_factory=lambda: {})
     embedders: Mapping[str, EmbedderConfig] = field(default_factory=lambda: {})
+    backup_dir: Path | None = None
+    backup_retain: int = 3
 
     @property
     def url(self) -> str:
@@ -185,6 +189,11 @@ def load_config(
         raise ConfigError(f"unknown config keys in {file_path}: {', '.join(unknown)}")
 
     data_dir = _data_dir(env.get("PLOTROOM_DATA_DIR"), raw.get("data_dir"), base).resolve()
+    backup_dir = None
+    if (backup_path := raw.get("backup_dir")) is not None:
+        backup_dir = (base / Path(_string("backup_dir", backup_path)).expanduser()).resolve()
+        if backup_dir.is_relative_to(data_dir) or data_dir.is_relative_to(backup_dir):
+            raise ConfigError("backup_dir must be separate from data_dir")
     host = _string("host", env.get("PLOTROOM_HOST", raw.get("host", DEFAULT_HOST)))
     port = _port(env.get("PLOTROOM_PORT", raw.get("port", DEFAULT_PORT)))
     allowed_hosts = _string_list(
@@ -216,6 +225,8 @@ def load_config(
     github_trees, github_issues = _github_work_items(projects, raw.get("projects"), base, github)
     return Config(
         data_dir=data_dir,
+        backup_dir=backup_dir,
+        backup_retain=_integer("backup_retain", raw.get("backup_retain", 3), minimum=1),
         host=host,
         port=port,
         allowed_hosts=allowed_hosts,

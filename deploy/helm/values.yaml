@@ -10,3 +10,12 @@ storage:
 tokenJob:
   enabled: false
   project: helm-fixture
+backup:
+  enabled: false
+  schedule: "0 3 * * *"
+  suspend: false
+  retain: 3
+  tokenSecret: ""
+  storage:
+    size: 1Gi
+    className: ""
