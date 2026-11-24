@@ -67,6 +67,7 @@ jobs:
       - uses: helm/kind-action@v1
         with:
           version: v0.33.0
+          kubectl_version: v1.37.0
           install_only: true
       - name: Lint, render, and verify the chart on kind
         run: |
@@ -74,7 +75,30 @@ jobs:
           cfg=$(mktemp -d)
           export KUBECONFIG="$cfg/config"
           cluster="plotroom-ci-$GITHUB_RUN_ID"
-          trap 'kind delete cluster --name "$cluster" --kubeconfig "$KUBECONFIG"; rm -rf "$cfg"' EXIT
+          cleanup() {
+            status=$?
+            trap - EXIT
+            if [ "$status" -ne 0 ] && [ -s "$KUBECONFIG" ]; then
+              kube() { kubectl --kubeconfig "$KUBECONFIG" --context "kind-$cluster" "$@"; }
+              kube get pods,pvc -A -o wide || true
+              kube get pv,storageclass || true
+              kube get events -A --sort-by=.lastTimestamp || true
+              for deployment in "plotroom-ci plotroom" "backup-ci backups"; do
+                read -r namespace release <<< "$deployment"
+                for container in wait-for-data-owner plotroom; do
+                  kube --namespace "$namespace" logs "deployment/$release" \
+                    --container "$container" --tail=40 || true
+                  kube --namespace "$namespace" logs "deployment/$release" \
+                    --container "$container" --previous --tail=40 || true
+                done
+              done
+            fi
+            kind delete cluster --name "$cluster" --kubeconfig "$KUBECONFIG" || true
+            rm -f -- "$KUBECONFIG" "$cfg/rendered.yaml"
+            rmdir "$cfg" || true
+            exit "$status"
+          }
+          trap cleanup EXIT
           helm lint deploy/helm --set tokenJob.enabled=true
           helm template plotroom deploy/helm --set tokenJob.enabled=true > "$cfg/rendered.yaml"
           docker build --tag plotroom:helm-ci .

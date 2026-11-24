@@ -42,7 +42,11 @@ _BRIDGE_EXPIRY = text(
 _PENDING = text(
     "SELECT rowid AS queue_position, * FROM actions WHERE state = 'pending' AND rowid > :after "
     "AND (:skip_branch_updates = 0 OR kind != :branch_update) "
-    "AND (:skip_controller_merges = 0 OR kind != :controller_merge) ORDER BY rowid LIMIT :limit"
+    "AND (:skip_controller_merges = 0 OR kind != :controller_merge) "
+    "AND (:skip_bridge = 0 OR (kind != :switchboard AND (kind != :send OR "
+    "NOT EXISTS (SELECT 1 FROM json_each(:workers) "
+    "WHERE value = json_extract(payload, '$.worker'))))) "
+    "ORDER BY rowid LIMIT :limit"
 )
 
 
@@ -77,6 +81,7 @@ async def pending_actions(
     limit: int,
     skip_branch_updates: bool,
     skip_controller_merges: bool = False,
+    skip_bridge_workers: tuple[str, ...] | None = None,
 ) -> tuple[QueuedAction, ...]:
     rows = await connection.execute(
         _PENDING,
@@ -87,6 +92,10 @@ async def pending_actions(
             "branch_update": BRANCH_UPDATE,
             "controller_merge": CONTROLLER_MERGE,
             "skip_controller_merges": skip_controller_merges,
+            "skip_bridge": skip_bridge_workers is not None,
+            "workers": json.dumps(skip_bridge_workers or ()),
+            "switchboard": SWITCHBOARD_SEND,
+            "send": SEND,
         },
     )
     return tuple(

@@ -296,6 +296,7 @@ class Store(Protocol):
         limit: int,
         skip_branch_updates: bool = False,
         skip_controller_merges: bool = False,
+        skip_bridge_workers: tuple[str, ...] | None = None,
     ) -> tuple[QueuedAction, ...]: ...
 
     async def outbox_readiness(self, now: str) -> OutboxReadiness: ...

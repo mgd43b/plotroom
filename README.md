@@ -210,6 +210,7 @@ python3 deploy/helm/backup_smoke.py --kubeconfig "$KUBECONFIG" --context "kind-$
 ```
 
 With `backup.enabled` set, the server mounts the backup volume at `/backups`.
+The server requires the configured backup directory to exist and be writable.
 The scheduler mounts an existing Secret whose keys are the configured project
 names and whose values are their orchestrator bearers. Each request backs up
 the project identified by that bearer. The scheduler does not mount either

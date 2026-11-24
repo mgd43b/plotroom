@@ -38,3 +38,5 @@ Return the expiry with each lease and skip sends with insufficient time to finis
 Two full native Codex passes informed the review dispositions. Both locked Python versions
 passed all 1,086 tests. Ruff, strict typing for both versions, and the dependency check passed.
 The final locally built image passed all three fixture workflows before cleanup.
+
+Opening Kodus review fixed clock-skew sensitivity and local scans of bridge-owned actions. The client budgets elapsed monotonic request time against server lease duration, and SQLite filters bridge sends out of local runner pages. The 16 focused tests passed.

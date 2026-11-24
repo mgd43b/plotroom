@@ -4,7 +4,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import httpx
+import pytest
 
+from plotroom.app.config import ConfigError
 from plotroom.app.serve import Daemon
 from test_daemon import bearer, make_config, run_daemon, stop
 
@@ -58,3 +60,10 @@ async def test_backup_uses_project_scope_and_prunes_only_its_scheduled_copies(
                 assert db.execute("SELECT count(*) FROM events").fetchone() == (count,)
     finally:
         await stop(daemon, task)
+
+
+async def test_server_rejects_a_missing_backup_mount(tmp_path: Path) -> None:
+    config = replace(make_config(tmp_path), backup_dir=tmp_path / "unmounted")
+    with pytest.raises(ConfigError, match="existing writable directory"):
+        await Daemon(config).run()
+    assert not config.data_dir.exists()

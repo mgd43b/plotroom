@@ -95,6 +95,7 @@ async def lease_bridge(
                 "to": address,
                 "body": body,
                 "expires_at": expires,
+                "lease_seconds": LEASE_DURATION.total_seconds(),
             }
         }
     return {"lease": None}

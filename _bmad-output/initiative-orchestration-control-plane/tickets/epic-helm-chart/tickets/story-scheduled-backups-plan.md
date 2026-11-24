@@ -37,3 +37,5 @@ Bound long CronJob names with a deterministic hash suffix. The smoke resolves th
 Two full native Codex passes informed the review dispositions. Both locked Python versions
 passed all 1,086 tests. Ruff, strict typing for both versions, and the dependency check passed.
 The final locally built image passed all three fixture workflows before cleanup.
+
+Opening Kodus review fixed a missing mounted backup directory. The daemon validates it before taking the data lock.

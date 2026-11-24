@@ -130,13 +130,19 @@ class Ledger:
         return await self._store.pending_action()
 
     async def pending_actions(
-        self, *, after: int, skip_branch_updates: bool, skip_controller_merges: bool = False
+        self,
+        *,
+        after: int,
+        skip_branch_updates: bool,
+        skip_controller_merges: bool = False,
+        skip_bridge_workers: tuple[str, ...] | None = None,
     ) -> tuple[QueuedAction, ...]:
         return await self._store.pending_actions(
             after=after,
             limit=ACTION_PAGE_SIZE,
             skip_branch_updates=skip_branch_updates,
             skip_controller_merges=skip_controller_merges,
+            skip_bridge_workers=skip_bridge_workers,
         )
 
     @property

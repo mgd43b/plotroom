@@ -960,6 +960,7 @@ class MemoryStore:
         limit: int,
         skip_branch_updates: bool = False,
         skip_controller_merges: bool = False,
+        skip_bridge_workers: tuple[str, ...] | None = None,
     ) -> tuple[QueuedAction, ...]:
         candidates = (
             QueuedAction(position, action)
@@ -968,6 +969,16 @@ class MemoryStore:
             and action.state == "pending"
             and (not skip_branch_updates or action.kind != BRANCH_UPDATE)
             and (not skip_controller_merges or action.kind != CONTROLLER_MERGE)
+            and (
+                skip_bridge_workers is None
+                or (
+                    action.kind != "switchboard.send"
+                    and (
+                        action.kind != "send"
+                        or action.payload.get("worker") not in skip_bridge_workers
+                    )
+                )
+            )
         )
         return copy.deepcopy(tuple(islice(candidates, limit)))
 

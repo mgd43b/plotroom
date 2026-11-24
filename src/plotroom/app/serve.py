@@ -282,6 +282,10 @@ class Daemon:
     async def run(self) -> None:
         """Serve until stopped. Raises ``LockError`` when another server owns the directory."""
         config = self._config
+        if config.backup_dir is not None and not (
+            config.backup_dir.is_dir() and os.access(config.backup_dir, os.W_OK | os.X_OK)
+        ):
+            raise ConfigError("backup_dir must be an existing writable directory")
         if self._started is None:
             self._started = asyncio.get_running_loop().create_future()
         with pin_directory(config.data_dir) as directory_fd:

@@ -8,7 +8,6 @@ import json
 import logging
 import os
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any, Literal, cast
 from uuid import uuid4
@@ -80,14 +79,15 @@ async def _send(relay: ClientSession, client: Client, consumer_id: str, board: s
         item = wake["item"]
         if item is None or item["kind"] != "bridge_ready":
             continue
+        requested_at = monotonic()
         result = await _tool(
             client, "bridge_lease", request_id=str(uuid4()), consumer_id=consumer_id, board=board
         )
         lease = result["lease"]
         if lease is None:
             continue
-        expires = datetime.fromisoformat(lease["expires_at"])
-        if datetime.now(UTC) + timedelta(seconds=10) >= expires:
+        lease_deadline = requested_at + lease["lease_seconds"]
+        if monotonic() + 10 >= lease_deadline:
             continue
         key, address, body = (lease[name] for name in ("action_key", "to", "body"))
         sent = await call_relay(

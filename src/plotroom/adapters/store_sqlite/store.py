@@ -557,6 +557,7 @@ class SqliteStore:
         limit: int,
         skip_branch_updates: bool = False,
         skip_controller_merges: bool = False,
+        skip_bridge_workers: tuple[str, ...] | None = None,
     ) -> tuple[QueuedAction, ...]:
         async with self._engine.connect() as connection:
             return await pending_actions(
@@ -565,6 +566,7 @@ class SqliteStore:
                 limit=limit,
                 skip_branch_updates=skip_branch_updates,
                 skip_controller_merges=skip_controller_merges,
+                skip_bridge_workers=skip_bridge_workers,
             )
 
     async def bridge_readiness(self, workers: tuple[str, ...], now: str) -> OutboxReadiness:

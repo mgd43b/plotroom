@@ -42,6 +42,10 @@ async def test_bridge_leases_survive_expiry_and_reuse_the_action_key(
 
     try:
         key = await ledger.run("system", enqueue)
+        assert (
+            await ledger.pending_actions(after=0, skip_branch_updates=False, skip_bridge_workers=())
+            == ()
+        )
         with pytest.raises(LedgerError, match="scoped to another board"):
             await ledger.execute("bridge", "bridge_lease", "other-board", {"board": "other"})
         cursor, item = await ledger.wait_for_item("bridge", None, 0, no_progress)
@@ -147,7 +151,7 @@ async def test_bridge_does_not_send_an_expired_lease(monkeypatch: pytest.MonkeyP
         if name == "bridge_lease":
             return {
                 "lease": {
-                    "expires_at": "2000-01-01T00:00:00Z",
+                    "lease_seconds": 60,
                     "act_id": "stale",
                     "action_key": "fixture",
                     "to": "peer",
@@ -156,6 +160,8 @@ async def test_bridge_does_not_send_an_expired_lease(monkeypatch: pytest.MonkeyP
             }
         raise asyncio.CancelledError
 
+    samples = iter((100.0, 161.0))
+    monkeypatch.setattr(bridge_app, "monotonic", lambda: next(samples))
     monkeypatch.setattr(bridge_app, "_tool", fake_tool)
     relay = cast(ClientSession, Mock(spec=ClientSession))
     client = cast(Client, Mock(spec=Client))
