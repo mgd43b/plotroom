@@ -1,11 +1,13 @@
 import json
 import shutil
 import sqlite3
-from contextlib import closing
+import stat
+from contextlib import ExitStack, closing
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
@@ -15,7 +17,12 @@ from sqlalchemy import MetaData, create_engine
 from conftest import authenticated_client, tool_json
 from fakes import FixedClock
 from plotroom.adapters.store_sqlite import SqliteStore, head_revision, script_heads
-from plotroom.adapters.store_sqlite.migrate import MIGRATIONS_DIR, alembic_config, upgrade_to_head
+from plotroom.adapters.store_sqlite.migrate import (
+    MIGRATIONS_DIR,
+    ProjectMigrationError,
+    alembic_config,
+    upgrade_to_head,
+)
 from plotroom.app.config import GitHubConfig
 from plotroom.app.serve import Daemon
 from plotroom.core.ask_checks import Ask
@@ -503,8 +510,97 @@ async def test_a_file_with_an_unknown_revision_is_not_migrated(tmp_path: Path) -
         db.execute("INSERT INTO alembic_version VALUES ('from-the-future')")
     store = SqliteStore("demo", tmp_path)
     try:
-        with pytest.raises(Exception, match="from-the-future"):
+        with pytest.raises(ProjectMigrationError, match="unknown project schema revision"):
             await store.migrate()
+    finally:
+        await store.close()
+
+
+async def test_daemon_upgrades_and_backs_up_two_projects_while_isolating_a_corrupt_file(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path, "alpha", "corrupt", "beta")
+    config.data_dir.mkdir()
+    corrupt = config.data_dir / "corrupt.db"
+    garbage = b"not a SQLite database"
+    corrupt.write_bytes(garbage)
+    revisions = {"alpha": "0013", "beta": "0023"}
+
+    with ExitStack() as opened:
+        for name, revision in revisions.items():
+            old = alembic_config(_migrations_at(tmp_path / f"through-{name}", revision))
+            store = SqliteStore(name, config.data_dir)
+            try:
+                await upgrade_to_head(store._engine, old)  # pyright: ignore[reportPrivateUsage]
+            finally:
+                await store.close()
+            writer = opened.enter_context(closing(sqlite3.connect(store.path)))
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            with writer:
+                writer.execute(
+                    "INSERT INTO events VALUES (1, ?, 'claude', 'claude.session_message', "
+                    "'fixture', NULL, ?, ?, '2026-11-24T00:00:00Z')",
+                    (f"fixture-{name}", '{"session_id":"migration-fixture"}', name),
+                )
+                writer.execute("UPDATE project_seq SET value=1")
+            assert store.path.with_suffix(".db-wal").stat().st_size > 0
+
+        for _ in range(2):
+            daemon = Daemon(config)
+            task, port = await run_daemon(daemon)
+            try:
+                base = f"http://127.0.0.1:{port}"
+                async with httpx.AsyncClient(trust_env=False) as http:
+                    health = await http.get(f"{base}/healthz")
+                    readiness = await http.get(f"{base}/readyz")
+                    assert health.status_code == 200
+                    assert readiness.status_code == 503
+                    assert readiness.json()["projects"] == {
+                        "alpha": "ready",
+                        "corrupt": "unavailable",
+                        "beta": "ready",
+                    }
+                    assert (await http.get(f"{base}/readyz/corrupt")).status_code == 503
+                    assert (await http.get(f"{base}/readyz/alpha")).status_code == 200
+                for name in revisions:
+                    async with authenticated_client(f"{base}/mcp", bearer(config, name)) as client:
+                        snapshot = tool_json(await client.call_tool("snapshot", {}))
+                        assert snapshot["data"]["project"] == name
+                    [event] = await daemon.ledgers[name].events_after(0)
+                    assert event.body == name
+                async with authenticated_client(f"{base}/mcp", bearer(config, "corrupt")) as client:
+                    failed = tool_json(await client.call_tool("snapshot", {}))
+                    assert failed["error"]["code"] == "unavailable"
+            finally:
+                await stop(daemon, task)
+
+    directory = config.data_dir / "migration-backups"
+    backups = sorted(directory.iterdir())
+    assert len(backups) == 2
+    for name, revision in revisions.items():
+        [backup] = directory.glob(f"{name}.db.pre-migration-*.bak")
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+        with closing(sqlite3.connect(backup)) as db:
+            assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (revision,)
+            assert db.execute("SELECT body FROM events").fetchall() == [(name,)]
+        with closing(sqlite3.connect(config.data_dir / f"{name}.db")) as db:
+            assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
+                head_revision(),
+            )
+    assert corrupt.read_bytes() == garbage
+
+
+async def test_backup_failure_prevents_migration(tmp_path: Path) -> None:
+    old = alembic_config(_migrations_at(tmp_path / "prior", "0023"))
+    store = SqliteStore("demo", tmp_path)
+    try:
+        await upgrade_to_head(store._engine, old)  # pyright: ignore[reportPrivateUsage]
+        backups = tmp_path / "migration-backups"
+        backups.mkdir()
+        backups.chmod(0o755)
+        with pytest.raises(ProjectMigrationError, match="backup directory must be private"):
+            await store.migrate()
+        assert await store.revision() == "0023"
     finally:
         await store.close()
 

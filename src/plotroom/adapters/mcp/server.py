@@ -203,11 +203,15 @@ def build_app(
             caller = board_access(ctx)
             if lane_offset < 0:
                 return err("invalid", "lane_offset must be nonnegative")
-            (cursor, items, lanes, details), github, trigger_counts, claim_count, freeze_reason = (
-                ((0, [], {}, []), None, {}, 0, None)
-                if caller.ledger is None
-                else await caller.ledger.snapshot_summary(caller.identity.role, checklist_lane=lane)
-            )
+            if caller.ledger is None:
+                raise LedgerError("unavailable", "the project ledger is unavailable")
+            (
+                (cursor, items, lanes, details),
+                github,
+                trigger_counts,
+                claim_count,
+                freeze_reason,
+            ) = await caller.ledger.snapshot_summary(caller.identity.role, checklist_lane=lane)
             if lane is not None:
                 for detail in details:
                     if detail.id == lane:
@@ -223,7 +227,7 @@ def build_app(
                     lane_details=details,
                     lane_offset=lane_offset,
                     github=github,
-                    github_error=None if caller.ledger is None else caller.ledger.github_error,
+                    github_error=caller.ledger.github_error,
                     claim_count=claim_count,
                     trigger_counts=trigger_counts,
                     freeze_reason=freeze_reason,

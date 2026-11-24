@@ -122,10 +122,10 @@ docker compose -p plotroom-local run --rm --no-deps -T plotroom \\
 ```
 
 Store the returned token privately. Configure an MCP HTTP client with
-http://127.0.0.1:8765/mcp and send the token as a bearer. Call snapshot to
+`http://127.0.0.1:8765/mcp` and send the token as a bearer. Call `snapshot` to
 check the project. For a restart check, record a disposable decision with
-decide, restart the service, and use the same bearer to call snapshot and
-decisions. The decision and its event are stored in the volume.
+`decide`, restart the service, and use the same bearer to call `snapshot` and
+`decisions`. The decision and its event are stored in the volume.
 
 ```sh
 docker compose -p plotroom-local restart plotroom
@@ -134,12 +134,25 @@ curl --fail http://127.0.0.1:8765/readyz/compose-demo
 ```
 
 Keep the project name and configuration consistent between commands. Set
-PLOTROOM_HTTP_PORT before the first up to use a different host port, or set it
-to 0 and use docker compose port plotroom 8765 to look up the assigned port.
-GET /healthz shows whether HTTP is running. GET /readyz checks all configured
-projects, and GET /readyz/<project> checks one. A project that cannot serve its
+`PLOTROOM_HTTP_PORT` before the first `up` to use a different host port, or set it
+to `0` and use `docker compose -p plotroom-local port plotroom 8765` to look up the assigned port.
+`GET /healthz` shows whether HTTP is running. `GET /readyz` checks all configured
+projects, and `GET /readyz/<project>` checks one. A project that cannot serve its
 ledger returns HTTP 503 on its readiness endpoint. Both probes apply the Host
 allowlist. MCP calls use a project-scoped bearer.
+
+An existing project is backed up with SQLite's online backup API before its
+schema changes. Backups are private files under `migration-backups` in the data
+directory, alongside the project databases. A restart at the current revision
+creates no new backup.
+
+If a backup fails or a project file is corrupt or stamped with a newer schema,
+that project's readiness reports unavailable. Healthy projects remain usable.
+Inspect `docker compose -p plotroom-local logs plotroom` for the project and reason. Compose's
+container health check uses `/healthz`, so it can stay healthy while an individual
+project's `/readyz` endpoint returns 503. To restore a backup, stop the daemon
+first and preserve the current database and its SQLite sidecars before replacing
+it. Use a Plotroom version that supports the backup's schema.
 
 ## Local search
 

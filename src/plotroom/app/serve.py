@@ -34,6 +34,7 @@ from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.github.ticket_tree import GitHubTicketTree
 from plotroom.adapters.mcp import build_app
 from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.adapters.store_sqlite.migrate import ProjectMigrationError
 from plotroom.adapters.store_sqlite.store import retryable_search_write_error
 from plotroom.adapters.switchboard import Switchboard
 from plotroom.adapters.work_items_bmad import BmadTicketTree, read_ticket_body, read_ticket_tree
@@ -379,7 +380,20 @@ class Daemon:
         for project_id in self._config.projects:
             project = _Project(SqliteStore(project_id, self._config.data_dir))
             self._projects[project_id] = project  # registered first so a failure closes it
-            await project.store.migrate()
+            try:
+                await project.store.migrate()
+            except ProjectMigrationError as exc:
+                log.error(
+                    "project not ready",
+                    extra={"project": project_id, "reason": str(exc)},
+                )
+                try:
+                    await project.store.close()
+                except Exception:
+                    log.exception("store close failed", extra={"project": project_id})
+                else:
+                    del self._projects[project_id]
+                continue
             log.info(
                 "migrated",
                 extra={"project": project_id, "revision": await project.store.revision()},

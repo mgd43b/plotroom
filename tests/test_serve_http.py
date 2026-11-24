@@ -24,7 +24,7 @@ from conftest import (
     tool_json,
 )
 from plotroom.adapters.store_sqlite import head_revision
-from plotroom.app.cli import EXIT_CONFIG, EXIT_FAILURE, EXIT_LOCKED, main
+from plotroom.app.cli import EXIT_CONFIG, EXIT_LOCKED, main
 from plotroom.app.portfile import PORT_FILE_NAME, read_listener, read_port
 from plotroom.app.tokens import IssuedToken
 
@@ -279,22 +279,30 @@ def test_connect_refuses_a_bearer_over_plaintext_remote_http(
     assert "fixture-bearer" not in capsys.readouterr().err
 
 
-def test_a_project_file_that_cannot_migrate_stops_serve_before_it_listens(
-    tmp_path: Path, config_path: Path
+async def test_a_project_file_with_a_newer_revision_is_refused(
+    tmp_path: Path,
+    config_path: Path,
 ) -> None:
     data = tmp_path / "data"
     data.mkdir()
-    with sqlite3.connect(data / "demo.db") as db:
+    path = data / "demo.db"
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
-        db.execute("INSERT INTO alembic_version VALUES ('from-the-future')")
+        db.execute("INSERT INTO alembic_version VALUES ('9999')")
+    original = path.read_bytes()
     child = start_plotroom("serve", "--config", str(config_path))
     try:
-        entry = child.wait_for_log("serve failed")
-        assert "from-the-future" in entry["exc"]
-        assert child.process.wait(timeout=60) == EXIT_FAILURE
+        entry = child.wait_for_log("project not ready")
+        assert "9999 is newer than supported revision" in entry["reason"]
+        port = child.wait_for_log("serving")["port"]
+        async with httpx.AsyncClient(trust_env=False) as http:
+            response = await http.get(f"http://127.0.0.1:{port}/readyz/demo")
+            assert response.status_code == 503
+            assert response.json()["projects"] == {"demo": "unavailable"}
     finally:
         child.stop()
-    assert not any(e["msg"] == "serving" for e in child.seen)
+    assert path.read_bytes() == original
+    assert not (data / "migration-backups").exists()
 
 
 def test_connect_refuses_a_credential_in_a_plaintext_remote_url(

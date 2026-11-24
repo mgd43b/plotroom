@@ -14,9 +14,10 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 import sqlite_vec  # pyright: ignore[reportMissingTypeStubs]
 from alembic.runtime.migration import MigrationContext
+from alembic.util import CommandError as AlembicError
 from sqlalchemy import URL, Connection, event
 from sqlalchemy.engine.interfaces import DBAPIConnection
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import ConnectionPoolEntry
 
@@ -47,7 +48,12 @@ from plotroom.adapters.store_sqlite.ledger_sql import (
     SqliteTransaction,
     event_from_row,
 )
-from plotroom.adapters.store_sqlite.migrate import upgrade_to_head
+from plotroom.adapters.store_sqlite.migrate import (
+    ProjectMigrationError,
+    alembic_config,
+    prepare_upgrade,
+    upgrade_to_head,
+)
 from plotroom.adapters.store_sqlite.search_sql import search_records
 from plotroom.adapters.store_sqlite.work_items_sql import ready_work_items
 from plotroom.core.actions import Action, QueuedAction
@@ -237,7 +243,12 @@ class SqliteStore:
         return self._project_id
 
     async def migrate(self) -> None:
-        await upgrade_to_head(self._engine)
+        cfg = alembic_config()
+        try:
+            await _uninterrupted(asyncio.to_thread(prepare_upgrade, self.path, cfg))
+            await upgrade_to_head(self._engine, cfg)
+        except (AlembicError, OSError, SQLAlchemyError, sqlite3.Error) as exc:
+            raise ProjectMigrationError("cannot migrate the SQLite project database") from exc
 
     async def revision(self) -> str | None:
         def read(connection: Any) -> str | None:
