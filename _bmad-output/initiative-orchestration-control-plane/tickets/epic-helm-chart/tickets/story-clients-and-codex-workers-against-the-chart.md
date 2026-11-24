@@ -25,3 +25,9 @@ Verify: A bridge run outside the kind cluster delivers a scripted switchboard pa
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-helm-chart/epic-helm-chart.md
+
+## Notes
+
+- Built: https://github.com/mgd43b/plotroom/pull/187
+- Chart wiring and scripted outside-kind acceptance were verified locally. Separate actual
+  Claude Code and Codex acceptance is pending on the merged revision.
