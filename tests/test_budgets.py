@@ -655,7 +655,7 @@ async def test_relay_submission_serializes_with_lane_reassignment(
     (relay_dir / "acked").touch()
     submitting = asyncio.Event()
     release_submission = asyncio.Event()
-    original_call = switchboard_adapter._call  # pyright: ignore[reportPrivateUsage]
+    original_call = switchboard_adapter.call_relay
 
     async def call(
         session: ClientSession, name: str, arguments: dict[str, Any], read_seconds: float = 5
@@ -666,7 +666,7 @@ async def test_relay_submission_serializes_with_lane_reassignment(
         await release_submission.wait()
         return {"id": 11, "to": arguments["to"]}
 
-    monkeypatch.setattr(switchboard_adapter, "_call", call)
+    monkeypatch.setattr(switchboard_adapter, "call_relay", call)
     async with open_ledger(tmp_path, clock, with_stop_routes=True) as ledger:
         await cap_lane(ledger, clock, "fixture")
         relay = fixture_relay(ledger, relay_dir)

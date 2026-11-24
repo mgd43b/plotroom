@@ -324,6 +324,7 @@ class Daemon:
                 },
                 authenticate=TokenRegistry(config.data_dir).authenticate,
                 backup=self._backup_project if config.backup_dir is not None else None,
+                bridge_enabled=any(relay.via_bridge for relay in config.switchboards.values()),
                 unavailable=problem,
                 snapshot_budget=config.snapshot_budget,
                 next_budget=config.next_budget,
@@ -417,6 +418,8 @@ class Daemon:
         repository = github.repository if github is not None else None
         remote_tree = self._config.github_ticket_trees.get(project_id)
         routes = self._config.delivery_routes.get(project_id)
+        relay = self._config.switchboards.get(project_id)
+        bridged = relay is not None and relay.via_bridge
         fixture_write = self._fixture_github_writes.get(project_id)
         policy = github.merge_gate_policy if github is not None else None
         live_merge = policy is not None and policy.ci_workflow is not None
@@ -437,6 +440,8 @@ class Daemon:
                 image_jobs=github.image_jobs if github is not None else (),
                 lane_idle_minutes=self._config.lane_idle_minutes,
                 human_login=human_login,
+                bridge_board=relay.board if relay is not None and bridged else None,
+                bridge_senders=relay.senders if relay is not None and bridged else None,
             ),
             self._clock,
             watcher_roles=self._config.watchers.get(project_id, ()),
@@ -446,6 +451,11 @@ class Daemon:
             github_tree_path=remote_tree[0] if remote_tree is not None else None,
             session_workers=desktop.sessions if desktop is not None else None,
             drain_enabled=project_id in self._config.drain_sessions,
+            bridge_workers=tuple(
+                worker for worker, route in (routes or {}).items() if route.channel == "switchboard"
+            )
+            if bridged
+            else None,
             brief_settings=self._config.briefs.get(project_id),
             live_merge_controller=live_merge,
             merge_clerk=partial(tokens.has_role, project_id, "clerk") if live_merge else None,
@@ -463,10 +473,9 @@ class Daemon:
         await project.ledger.clean_disabled_merge_items()
         # A valid SQLite file can still be missing required application records.
         await project.ledger.snapshot_summary("orchestrator")
-        relay = self._config.switchboards.get(project_id)
         switchboard = (
             Switchboard(project.ledger, relay.board, relay.command, relay.senders)
-            if relay is not None
+            if relay is not None and not bridged
             else None
         )
         inputs = [switchboard.run] if switchboard is not None else []
@@ -554,6 +563,7 @@ class Daemon:
             fixture_github_write=fixture_write,
             fixture_github_merge=fixture_write,
             usage_meter=self._usage_meters.get(project_id),
+            switchboard_bridged=bridged,
         )
         project.runtime.start()
 

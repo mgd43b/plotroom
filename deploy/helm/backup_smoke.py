@@ -61,43 +61,102 @@ def main() -> None:
     if not args.context.startswith("kind-"):
         parser.error("an explicit disposable kind context is required")
     kube = [
-        "kubectl", "--kubeconfig", args.kubeconfig, "--context", args.context,
-        "--namespace", args.namespace,
+        "kubectl",
+        "--kubeconfig",
+        args.kubeconfig,
+        "--context",
+        args.context,
+        "--namespace",
+        args.namespace,
     ]
     release = args.release
     chart = str(Path(__file__).resolve().parent)
     secret = f"{release}-backup-token"
     deployment = f"deployment/{release}"
-    run([
-        "helm", "install", release, chart, "--kubeconfig", args.kubeconfig,
-        "--kube-context", args.context, "--namespace", args.namespace, "--create-namespace",
-        "--wait", "--timeout", "2m", "--set", "backup.enabled=true,backup.suspend=true,backup.retain=2",
-        "--set", "projects={alpha,beta}", "--set-string", f"image.tag={args.image_tag}",
-        "--set-string", f"backup.tokenSecret={secret}",
-    ])
+    run(
+        [
+            "helm",
+            "install",
+            release,
+            chart,
+            "--kubeconfig",
+            args.kubeconfig,
+            "--kube-context",
+            args.context,
+            "--namespace",
+            args.namespace,
+            "--create-namespace",
+            "--wait",
+            "--timeout",
+            "2m",
+            "--set",
+            "backup.enabled=true,backup.suspend=true,backup.retain=2",
+            "--set",
+            "projects={alpha,beta}",
+            "--set-string",
+            f"image.tag={args.image_tag}",
+            "--set-string",
+            f"backup.tokenSecret={secret}",
+        ]
+    )
     volumes = [
-        json.loads(run([*kube, "get", "pvc", f"{release}-{purpose}", "-o", "json"]))["spec"]["volumeName"]
+        json.loads(run([*kube, "get", "pvc", f"{release}-{purpose}", "-o", "json"]))["spec"][
+            "volumeName"
+        ]
         for purpose in ("data", "backups")
     ]
     assert len(set(volumes)) == 2
     tokens = {}
     for project in ("alpha", "beta"):
-        token = json.loads(run([
-            *kube, "exec", deployment, "--", "plotroom", "token", "issue", "--config",
-            "/etc/plotroom/plotroom.toml", "--no-local", "--project", project, "--role", "orchestrator",
-        ]))["token"]
-        fixture = {"base": f"http://{release}:8765", "project": project, "token": token, "create": True}
-        run([*kube, "exec", "-i", deployment, "--", "python", "-c", CHECK_HTTP], json.dumps(fixture))
+        token = json.loads(
+            run(
+                [
+                    *kube,
+                    "exec",
+                    deployment,
+                    "--",
+                    "plotroom",
+                    "token",
+                    "issue",
+                    "--config",
+                    "/etc/plotroom/plotroom.toml",
+                    "--no-local",
+                    "--project",
+                    project,
+                    "--role",
+                    "orchestrator",
+                ]
+            )
+        )["token"]
+        fixture = {
+            "base": f"http://{release}:8765",
+            "project": project,
+            "token": token,
+            "create": True,
+        }
+        run(
+            [*kube, "exec", "-i", deployment, "--", "python", "-c", CHECK_HTTP], json.dumps(fixture)
+        )
         tokens[project] = base64.b64encode(token.encode()).decode()
-    run([*kube, "create", "-f", "-"], json.dumps({
-        "apiVersion": "v1", "kind": "Secret", "metadata": {"name": secret}, "data": tokens,
-    }))
+    run(
+        [*kube, "create", "-f", "-"],
+        json.dumps(
+            {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {"name": secret},
+                "data": tokens,
+            }
+        ),
+    )
     for index in range(3):
         name = f"{release}-copy-{index}"
         run([*kube, "create", "job", f"--from=cronjob/{release}-backup", name])
         run([*kube, "wait", "--for=condition=complete", f"job/{name}", "--timeout=120s"])
     run([*kube, "exec", deployment, "--", "python", "-c", CHECK_BACKUPS])
-    print("CronJob smoke passed: separate claim, two retained consistent and reopenable backups per project.")
+    print(
+        "CronJob smoke passed: separate claim, two retained consistent and reopenable backups per project."
+    )
 
 
 if __name__ == "__main__":

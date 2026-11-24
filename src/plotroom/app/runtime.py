@@ -84,6 +84,7 @@ class ProjectRuntime:
         fixture_github_write: FixtureGitHubWrite | None = None,
         fixture_github_merge: FixtureGitHubMerge | None = None,
         usage_meter: UsageMeter | None = None,
+        switchboard_bridged: bool = False,
     ) -> None:
         self.ledger = ledger
         self.clock = clock
@@ -96,6 +97,7 @@ class ProjectRuntime:
         self.work_items = work_items
         self.usage_meter = usage_meter
         self.inputs = inputs
+        self._switchboard_bridged = switchboard_bridged
         self.fixture_github_write = fixture_github_write
         self._fixture_github_merge = (
             fixture_github_merge if ledger.merge_gate_policy.controller_merges is True else None
@@ -161,6 +163,13 @@ class ProjectRuntime:
                 after = page[-1].position
 
     async def _run_action(self, action: Action) -> bool:
+        if self._switchboard_bridged:
+            if action.kind == SWITCHBOARD_SEND:
+                return False
+            if action.kind == SEND:
+                route = self.delivery_routes.get(action.payload["worker"])
+                if route is not None and route.channel == "switchboard":
+                    return False
         pinned = action.kind in (BRANCH_UPDATE, CONTROLLER_MERGE)
         if action.attempts >= self.action_attempts and not pinned:
             await self.ledger.run("system", lambda uow: finish_action(uow, action, "failed"))

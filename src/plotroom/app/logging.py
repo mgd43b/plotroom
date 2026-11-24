@@ -89,5 +89,5 @@ def setup_logging(
     root.addHandler(handler)
     root.setLevel(level)
     # httpx logs every request URL at INFO, query string and userinfo included
-    for noisy in ("httpx", "httpcore"):
+    for noisy in ("httpx", "httpx2", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

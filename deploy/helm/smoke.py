@@ -68,8 +68,13 @@ def main() -> None:
     if not args.context.startswith("kind-"):
         parser.error("an explicit disposable kind context is required")
     kube = [
-        "kubectl", "--kubeconfig", args.kubeconfig, "--context", args.context,
-        "--namespace", args.namespace,
+        "kubectl",
+        "--kubeconfig",
+        args.kubeconfig,
+        "--context",
+        args.context,
+        "--namespace",
+        args.namespace,
     ]
     release = args.release
     project = "helm-fixture"
@@ -77,12 +82,29 @@ def main() -> None:
     job = f"job/{release}-token"
     selector = f"app.kubernetes.io/instance={release},app.kubernetes.io/component=server"
     chart = str(Path(__file__).resolve().parent)
-    run([
-        "helm", "install", release, chart, "--kubeconfig", args.kubeconfig,
-        "--kube-context", args.context, "--namespace", args.namespace, "--create-namespace",
-        "--wait", "--wait-for-jobs", "--timeout", "2m", "--set", "tokenJob.enabled=true",
-        "--set-string", f"image.tag={args.image_tag}",
-    ])
+    run(
+        [
+            "helm",
+            "install",
+            release,
+            chart,
+            "--kubeconfig",
+            args.kubeconfig,
+            "--kube-context",
+            args.context,
+            "--namespace",
+            args.namespace,
+            "--create-namespace",
+            "--wait",
+            "--wait-for-jobs",
+            "--timeout",
+            "2m",
+            "--set",
+            "tokenJob.enabled=true",
+            "--set-string",
+            f"image.tag={args.image_tag}",
+        ]
+    )
     spec = json.loads(run([*kube, "get", deployment, "-o", "json"]))["spec"]
     assert spec["replicas"] == 1 and spec["strategy"]["type"] == "Recreate"
     pvc = json.loads(run([*kube, "get", "pvc", f"{release}-data", "-o", "json"]))
@@ -96,12 +118,21 @@ def main() -> None:
     def running_pod() -> tuple[str, str]:
         run([*kube, "rollout", "status", deployment, "--timeout=90s"])
         [pod] = json.loads(run([*kube, "get", "pods", "-l", selector, "-o", "json"]))["items"]
-        assert any(c["type"] == "Ready" and c["status"] == "True" for c in pod["status"]["conditions"])
+        assert any(
+            c["type"] == "Ready" and c["status"] == "True" for c in pod["status"]["conditions"]
+        )
         return pod["metadata"]["name"], pod["metadata"]["uid"]
 
     def check(pod: str, *, create: bool) -> list[str | int]:
-        data = {"base": f"http://{release}:8765", "project": project, "token": token, "create": create}
-        return json.loads(run([*kube, "exec", "-i", pod, "--", "python", "-c", CHECK_HTTP], json.dumps(data)))
+        data = {
+            "base": f"http://{release}:8765",
+            "project": project,
+            "token": token,
+            "create": create,
+        }
+        return json.loads(
+            run([*kube, "exec", "-i", pod, "--", "python", "-c", CHECK_HTTP], json.dumps(data))
+        )
 
     old_name, old_uid = running_pod()
     first = check(old_name, create=True)
@@ -109,7 +140,9 @@ def main() -> None:
     new_name, new_uid = running_pod()
     assert new_uid != old_uid
     assert check(new_name, create=False) == first
-    print("Helm smoke passed: one ready replica, RWO storage, token Job and event retained after replacement.")
+    print(
+        "Helm smoke passed: one ready replica, RWO storage, token Job and event retained after replacement."
+    )
 
 
 if __name__ == "__main__":

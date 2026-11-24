@@ -173,6 +173,7 @@ def build_app(
     ledgers: Mapping[str, Ledger],
     authenticate: Authenticate,
     backup: Backup | None = None,
+    bridge_enabled: bool = False,
     work_item_sources: Mapping[str, WorkItemSource] | None = None,
     unavailable: str | None = None,
     snapshot_budget: int = DEFAULT_SNAPSHOT_BUDGET,
@@ -837,6 +838,38 @@ def build_app(
     ) -> dict[str, Any]:
         """Complete the current lease after delivery. Pass its opaque act_id."""
         return await execute_command(ctx, "outbox_done", request_id, {"act_id": act_id})
+
+    if bridge_enabled:
+
+        @server.tool()
+        async def bridge_receive(  # pyright: ignore[reportUnusedFunction]
+            ctx: Context[Any, Request], board: str, message_id: StrictInt, sender: str, body: str
+        ) -> dict[str, Any]:
+            """Commit a claimed Switchboard message before acknowledging it on the relay."""
+            return await execute_command(
+                ctx,
+                "bridge_receive",
+                f"{board}:{message_id}",
+                {"board": board, "message_id": message_id, "sender": sender, "body": body},
+            )
+
+        @server.tool()
+        async def bridge_lease(  # pyright: ignore[reportUnusedFunction]
+            ctx: Context[Any, Request], request_id: str, consumer_id: str
+        ) -> dict[str, Any]:
+            """Claim the next pending Switchboard delivery for this bridge."""
+            try:
+                scoped = lease_request_id(consumer_id, request_id)
+            except LedgerError as exc:
+                return err(exc.code, exc.message)
+            return await execute_command(ctx, "bridge_lease", scoped, {})
+
+        @server.tool()
+        async def bridge_done(  # pyright: ignore[reportUnusedFunction]
+            ctx: Context[Any, Request], act_id: str
+        ) -> dict[str, Any]:
+            """Finish the current delivery lease after the relay accepts the send."""
+            return await execute_command(ctx, "bridge_done", act_id, {"act_id": act_id})
 
     app = server.streamable_http_app(
         stateless_http=True,

@@ -70,6 +70,7 @@ class SwitchboardConfig:
     board: str
     command: tuple[str, ...]
     senders: Mapping[str, str]
+    via_bridge: bool = False
 
 
 @dataclass(frozen=True)
@@ -438,7 +439,10 @@ def _switchboards(projects: tuple[str, ...], table: Any) -> dict[str, Switchboar
                 if address in senders:
                     raise ConfigError(f"{label} worker addresses must be unique")
                 senders[address] = worker
-        configured[project_id] = SwitchboardConfig(board, command, senders)
+        via_bridge = settings.get("via_bridge", False)
+        if not isinstance(via_bridge, bool):
+            raise ConfigError(f"{label}.via_bridge must be a boolean")
+        configured[project_id] = SwitchboardConfig(board, command, senders, via_bridge)
     return configured
 
 

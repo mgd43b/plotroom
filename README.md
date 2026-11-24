@@ -214,6 +214,27 @@ names and whose values are their orchestrator bearers. Each request backs up
 the project identified by that bearer. The scheduler does not mount either
 database or backup volume. Delete the disposable cluster when finished.
 
+## Verify the Switchboard bridge locally
+
+Build a fixture image and pass the smoke helper a fresh Compose project name.
+It creates a local HTTP instance and a scripted relay, commits a claimed message
+before acknowledging it, kills and restarts the bridge, and checks that the
+redelivered message is stored once. It verifies an outbound delivery and removes
+the fixture Compose volume on exit.
+
+```sh
+docker build --tag plotroom:bridge-local .
+uv run --locked python deploy/bridge_smoke.py --image-tag bridge-local \
+  --project "plotroom-bridge-$(date +%s)-$$"
+```
+
+For an explicit local fixture, set `via_bridge = true` in the server project's
+`switchboard` table and give it an explicit `board`. The bridge runs on the
+relay machine. Configure `PLOTROOM_TOKEN` with that project's bridge bearer and
+run `plotroom bridge --url http://127.0.0.1:8765/mcp --board fixture-board`.
+The daemon retains outgoing Switchboard actions until the bridge completes a
+lease. The relay receives the same action key on each delivery attempt.
+
 ## Local search
 
 Search uses the project's full-text index by default. A project can also configure an

@@ -15,7 +15,10 @@ def publish(path: Path, value: str) -> None:
 
 
 def serve(state: Path) -> None:
-    assert os.environ["SWITCHBOARD_BOARD"] == "fixture-board"
+    board_file = state / "board"
+    board = board_file.read_text() if board_file.exists() else "fixture-board"
+    bridge = (state / "bridge-fixture").exists()
+    assert os.environ["SWITCHBOARD_BOARD"] == board
     assert os.environ["SWITCHBOARD_AUTO"] == "0"
     if not (state / "available").exists():
         (state / "unavailable").touch()
@@ -58,13 +61,35 @@ def serve(state: Path) -> None:
                         }
                     ]
                 )
+                if (
+                    bridge
+                    and (state / "acked").exists()
+                    and (state / "outbound-cause").exists()
+                    and not (state / "acked-cause").exists()
+                ):
+                    messages = [
+                        {
+                            "id": 8,
+                            "from": "fixture-peer",
+                            "body": "trigger the fixture send",
+                            "receipt": "cause",
+                        }
+                    ]
                 if not messages:
                     time.sleep(0.05)
                 payload = {"messages": messages}
+            elif name == "ack" and bridge and args["id"] == 8:
+                assert args["receipt"] == "cause"
+                publish(state / "acked-cause", args["receipt"])
+                payload = {"ok": True, "id": 8}
             elif name == "ack":
                 assert args["id"] == 7
                 if args["receipt"] == "first":
                     (state / "interrupted").touch()
+                    if bridge:
+                        while os.getppid() != 1:
+                            time.sleep(0.025)
+                        return
                     time.sleep(60)
                     raise AssertionError("expected interruption before ack")
                 assert args["receipt"] == "redelivered"
@@ -82,9 +107,11 @@ def serve(state: Path) -> None:
                 first = state / "send-first"
                 if not first.exists():
                     publish(first, json.dumps(args))
-                    time.sleep(60)
-                    raise AssertionError("expected interruption after send")
-                publish(state / "send-retry", json.dumps(args))
+                    if not bridge:
+                        time.sleep(60)
+                        raise AssertionError("expected interruption after send")
+                else:
+                    publish(state / "send-retry", json.dumps(args))
                 payload = {"id": 11, "to": args["to"]}
             else:
                 raise AssertionError(name)

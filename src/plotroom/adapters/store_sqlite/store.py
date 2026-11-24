@@ -33,7 +33,7 @@ from plotroom.adapters.store_sqlite import (
     outbox_sql,
     triggers_sql,
 )
-from plotroom.adapters.store_sqlite.actions_sql import pending_actions
+from plotroom.adapters.store_sqlite.actions_sql import bridge_action, bridge_expiry, pending_actions
 from plotroom.adapters.store_sqlite.claims_sql import count_claims, read_claims
 from plotroom.adapters.store_sqlite.items_sql import (
     first_change,
@@ -71,6 +71,7 @@ from plotroom.core.goal_projection import (
 )
 from plotroom.core.merge_gate import GateSnapshot, load_gate_snapshot
 from plotroom.core.next_items import Item
+from plotroom.core.outbox import OutboxReadiness
 from plotroom.core.search import pack_vector
 from plotroom.core.search_sources import EVENT_KINDS
 from plotroom.ports.search import (
@@ -92,7 +93,6 @@ from plotroom.ports.work_items import WorkItem
 if TYPE_CHECKING:
     from plotroom.core.budgets import Budget
     from plotroom.core.human_queue import Decision
-    from plotroom.core.outbox import OutboxReadiness
     from plotroom.core.triggers import Trigger
 
 BEGIN_OPTION = "plotroom_begin"
@@ -566,6 +566,13 @@ class SqliteStore:
                 skip_branch_updates=skip_branch_updates,
                 skip_controller_merges=skip_controller_merges,
             )
+
+    async def bridge_readiness(self, workers: tuple[str, ...], now: str) -> OutboxReadiness:
+        async with self._engine.begin() as connection:
+            head = (await connection.execute(HEAD_SEQ)).scalar_one()
+            available = await bridge_action(connection, workers, now, None)
+            expires = await bridge_expiry(connection, workers, now)
+            return OutboxReadiness(head, head if available is not None else None, expires)
 
     async def outbox_readiness(self, now: str) -> OutboxReadiness:
         async with self._engine.connect() as connection:

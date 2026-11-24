@@ -14,8 +14,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.types import TextContent
 
 from plotroom.core.actions import Action
-from plotroom.core.events import NewEvent
-from plotroom.core.intake import append_inbound
+from plotroom.core.bridge import record_inbound
 from plotroom.core.lanes import infer_lane
 from plotroom.core.ledger import Ledger
 from plotroom.core.unit_of_work import UnitOfWork
@@ -27,7 +26,7 @@ REGISTRATION_WAIT_SECONDS = 10
 PINNED_SEND_TIMEOUT_SECONDS = 5
 
 
-async def _call(
+async def call_relay(
     session: ClientSession, name: str, arguments: dict[str, Any], read_seconds: float = 5
 ) -> dict[str, Any]:
     result = await session.call_tool(name, arguments, read_timeout_seconds=read_seconds)
@@ -67,7 +66,7 @@ class Switchboard:
                         ClientSession(read, write, read_timeout_seconds=10) as session,
                     ):
                         await session.initialize()
-                        registered = await _call(session, "register", {"name": NAME})
+                        registered = await call_relay(session, "register", {"name": NAME})
                         if registered.get("ok") is not True or registered.get("you") != NAME:
                             raise ValueError("Switchboard refused the protected address")
                         self._session = session
@@ -102,7 +101,7 @@ class Switchboard:
         }
 
         async def submit() -> None:
-            response = await _call(session, "send", arguments)
+            response = await call_relay(session, "send", arguments)
             if type(response.get("id")) is not int or response.get("to") != address:
                 raise ValueError("Switchboard did not accept the send")
 
@@ -120,7 +119,7 @@ class Switchboard:
         await self._ledger.run("system", submit_if_current)
 
     async def receive(self, session: ClientSession) -> None:
-        batch = await _call(session, "wait", {"timeout_s": WAIT_SECONDS}, WAIT_SECONDS + 5)
+        batch = await call_relay(session, "wait", {"timeout_s": WAIT_SECONDS}, WAIT_SECONDS + 5)
         messages = batch.get("messages")
         if not isinstance(messages, list):
             raise ValueError("Switchboard wait did not return a message list")
@@ -145,24 +144,9 @@ class Switchboard:
             raise ValueError("Switchboard returned an invalid claim")
 
         async def record(uow: UnitOfWork) -> None:
-            worker = self._senders.get(sender)
-            lane = await infer_lane(uow, worker=worker)
-            fields = {"sender": sender}
-            if worker is not None:
-                fields["worker"] = worker
-            await append_inbound(
-                uow,
-                NewEvent(
-                    "switchboard",
-                    "switchboard.message",
-                    f"{self._board}:{message_id}",
-                    fields,
-                    body,
-                    lane,
-                ),
-            )
+            await record_inbound(uow, self._board, self._senders, message_id, sender, body)
 
         await self._ledger.run("system", record)
-        acknowledged = await _call(session, "ack", {"id": message_id, "receipt": receipt})
+        acknowledged = await call_relay(session, "ack", {"id": message_id, "receipt": receipt})
         if acknowledged.get("ok") is not True:
             log.warning("Switchboard claim expired", extra={"project": self._ledger.project_id})

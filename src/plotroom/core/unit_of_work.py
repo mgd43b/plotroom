@@ -403,6 +403,11 @@ class UnitOfWork:
         await self._tx.insert_action(Action(key, kind, cause.id, payload))
         return key
 
+    async def bridge_action(
+        self, workers: tuple[str, ...], now: str, act_id: str | None = None
+    ) -> Action | None:
+        return await self._tx.bridge_action(workers, now, act_id)
+
     async def update_action(self, action: Action) -> None:
         if self._append_role != "system":
             raise LedgerError("forbidden", "only core may update a committed action")
