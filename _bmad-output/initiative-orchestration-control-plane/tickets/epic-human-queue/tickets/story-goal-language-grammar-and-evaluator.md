@@ -9,7 +9,7 @@ hitl: false
 risk: high
 tracker_id: "83"
 remote: "https://github.com/mgd43b/plotroom/issues/83"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Goal language: grammar and evaluator
