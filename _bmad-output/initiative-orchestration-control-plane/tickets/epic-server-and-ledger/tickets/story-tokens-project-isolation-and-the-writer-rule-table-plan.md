@@ -62,7 +62,7 @@ Given a running two-project daemon, when each token calls snapshot, then the res
 - `connect --stdio --token-id <id>` selects a local credential when several exist. The proxy also accepts `PLOTROOM_TOKEN_ID`. An explicitly managed endpoint can use `PLOTROOM_TOKEN`.
 - Ownership checks use the original arguments for a stored command receipt. A caller cannot replay a receipt for a target it no longer owns by sending different arguments.
 - The focused pytest run passed 281 tests. The final serial suite passed all 397 tests on Python 3.14.10. Ruff lint and format, Pyright for 3.14 and 3.15, and the core dependency check passed.
-- Matt's direct HTTP check in Claude Code and Codex is pending. The ticketer will record the observations in the epic Notes.
+- The real-client bare-401 results are recorded in the Server and ledger epic Notes.
 - After the review patches, 283 focused tests passed, including the local listener and `localhost` Host behavior. A loopback curl probe confirmed an empty 401 without `WWW-Authenticate`.
 - All 401 tests passed in the serial suite after the review patches. Ruff lint and formatting, both Pyright targets, the core dependency check, and the diff check passed.
 

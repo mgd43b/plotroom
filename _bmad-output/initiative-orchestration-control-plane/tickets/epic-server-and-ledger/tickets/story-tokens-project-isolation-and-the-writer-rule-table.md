@@ -9,7 +9,7 @@ hitl: true
 risk: medium
 tracker_id: "16"
 remote: "https://github.com/mgd43b/plotroom/issues/16"
-tracker_status: backlog
+tracker_status: done
 status: built
 ---
 
@@ -31,4 +31,4 @@ Verify: With two projects and a fixture orchestrator-only command, an orchestrat
 
 - Hands on from #15 (PRs #50, #92): event kinds and commands register in core/catalog.py build_catalog(); an event's source must equal its kind's prefix; a duplicate returns the stored event whatever its fields, only after role, kind and source pass; migration 0002 carries CHECK(seq > 0) and CHECK(json_valid(fields)), and the next revision's parent is 0002; Ledger.execute checks no role yet. This story adds command authorization to Ledger.execute.
 - Built: https://github.com/mgd43b/plotroom/pull/134
-- Matt's direct HTTP 401 checks in Claude Code and Codex are pending. The build plan contains the procedure. The ticketer records both observations in the epic Notes.
+- The real-client bare-401 results are recorded in the Server and ledger epic Notes.
