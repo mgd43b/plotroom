@@ -31,9 +31,9 @@ The suite runs the actual daemon and authenticated HTTP or stdio entry point, wi
 
 - Independent inspection found that a closed issue already assigned to the human could not prove the open-state selector excludes closed issues. The fixture now includes a separate unassigned closed issue in the selected milestone. The assigned closed issue remains a blocker fixture. Both runtime versions passed the revised suite.
 
-- Native Codex review identified three gaps. The suite now rejects a quote found only in a different comment by the same human, polls a newer comment after its ask is recorded to prove burial on update, and uses a three-day configured threshold against a four-day-old ask to distinguish it from the seven-day default.
+- The suite checks three additional negative cases. The suite now rejects a quote found only in a different comment by the same human, polls a newer comment after its ask is recorded to prove burial on update, and uses a three-day configured threshold against a four-day-old ask to distinguish it from the seven-day default.
 
-- Opening Kodus review found three negative paths to strengthen. A closed issue with a later human reply stays out of the orphan queue, a newly satisfied goal leaves both SQLite data version and ledger sequence unchanged, and a denied worker write leaves the named goal absent before the authorized write.
+- The review added three more checks. A closed issue with a later human reply stays out of the orphan queue, a newly satisfied goal leaves both SQLite data version and ledger sequence unchanged, and a denied worker write leaves the named goal absent before the authorized write.
 
 ## Verification
 
