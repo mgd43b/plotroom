@@ -189,6 +189,23 @@ async def test_a_full_stdout_pipe_handles_client_shutdown_and_resumption(
                 await emit(proxy, {**message, "fixture_padding": "p" * padding_bytes})
 
             StdioProxy._emit = emit_large
+            finish_pipe_writes = StdioProxy._finish_pipe_writes
+
+            async def mark_partial_drain(proxy):
+                wait = asyncio.wait
+
+                async def mark_wait(tasks, **options):
+                    if proxy._partial_write in tasks:
+                        print("draining partial line", file=sys.stderr, flush=True)
+                    return await wait(tasks, **options)
+
+                asyncio.wait = mark_wait
+                try:
+                    await finish_pipe_writes(proxy)
+                finally:
+                    asyncio.wait = wait
+
+            StdioProxy._finish_pipe_writes = mark_partial_drain
 
         raw_write = os.write
 
@@ -257,6 +274,9 @@ async def test_a_full_stdout_pipe_handles_client_shutdown_and_resumption(
                     if outcome == "partial-eof":
                         assert await asyncio.to_thread(stderr.readline) == b"stdout full\n"
                         stdin.close()
+                        assert (
+                            await asyncio.to_thread(stderr.readline) == b"draining partial line\n"
+                        )
                         answer = json.loads(await asyncio.to_thread(reader.readline))
                         assert answer["fixture_padding"] == "p" * padding_bytes
                     else:
