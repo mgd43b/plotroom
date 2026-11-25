@@ -267,10 +267,11 @@ printing it. Keep real-client acceptance separate from the scripted smoke.
 ## Verify the Switchboard bridge locally
 
 Build a fixture image and pass the smoke helper a fresh Compose project name.
-It creates a local HTTP instance and a scripted relay, commits a claimed message
-before acknowledging it, kills and restarts the bridge, and checks that the
-redelivered message is stored once. It verifies an outbound delivery and removes
-the fixture Compose volume on exit.
+It checks project readiness and an authenticated snapshot, then restarts the
+Compose service and verifies that the same bearer still works and a fixture
+decision persists. It also uses a scripted relay to verify durable delivery
+before acknowledgment, deduplication after a bridge restart, and an outbound
+delivery. It removes the fixture Compose volume on exit.
 
 ```sh
 docker build --tag plotroom:bridge-local .

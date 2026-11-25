@@ -1,4 +1,4 @@
-"""Verify the bridge with a fresh Compose instance and a scripted local relay."""
+"""Verify Compose restart and bridge delivery with a fresh local fixture."""
 
 from __future__ import annotations
 
@@ -25,6 +25,9 @@ with closing(sqlite3.connect("file:/data/bridge-fixture.db?mode=ro", uri=True)) 
     if sys.argv[1] == "event":
         print(db.execute("SELECT count(*) FROM events WHERE kind = ? AND upstream_id = ?",
                          ("switchboard.message", sys.argv[2])).fetchone()[0])
+    elif sys.argv[1] == "decision":
+        print(db.execute("SELECT count(*) FROM events WHERE kind = ? AND upstream_id = ?",
+                         ("core.decide", sys.argv[2])).fetchone()[0])
     else:
         row = db.execute("SELECT state FROM actions WHERE action_key = ?", (sys.argv[2],)).fetchone()
         print(json.dumps(row[0] if row else None))
@@ -57,6 +60,37 @@ async def tool(client, name, arguments):
     result = json.loads(response.content[0].text)
     assert result.get("ok"), name
     return result["data"]
+
+
+async def check_project(url, operator, decision_id=None):
+    ready_url = url.removesuffix("/mcp") + "/readyz/bridge-fixture"
+    async with httpx2.AsyncClient(trust_env=False) as http:
+        ready = await http.get(ready_url)
+        ready.raise_for_status()
+        assert ready.json() == {"status": "ready", "projects": {"bridge-fixture": "ready"}}
+
+    async with connect(url, operator) as client:
+        snapshot = await tool(client, "snapshot", {})
+        assert snapshot["project"] == "bridge-fixture"
+        if decision_id is None:
+            created = await tool(
+                client,
+                "decide",
+                {
+                    "who": "Fixture operator",
+                    "exact_words": "Compose restart fixture",
+                    "where_ref": {"kind": "chat", "ref": "compose-fixture"},
+                    "governs": [],
+                    "settles": [],
+                    "request_id": "compose-fixture-one",
+                },
+            )
+            return created["decision_id"]
+
+        decisions = await tool(client, "decisions", {})
+        (decision,) = decisions["decisions"]
+        assert decision["decision_id"] == decision_id
+        assert decision["exact_words"] == "Compose restart fixture"
 
 
 async def seed(url, operator, board):
@@ -169,6 +203,17 @@ def smoke(root: Path, name: str, tag: str) -> None:
         command("up", "--detach", "--wait", "--no-build")
         url = "http://" + command("port", "plotroom", "8765").strip() + "/mcp"
         operator, bridge_token = token("orchestrator"), token("bridge")
+        decision_id = asyncio.run(check_project(url, operator))
+        container = command("ps", "-q", "plotroom").strip()
+        assert container
+        command("restart", "plotroom")
+        command("up", "--detach", "--wait", "--no-build", "--no-recreate")
+        assert command("ps", "-q", "plotroom").strip() == container
+        url = "http://" + command("port", "plotroom", "8765").strip() + "/mcp"
+        asyncio.run(check_project(url, operator, decision_id))
+        assert database("decision", "orchestrator:compose-fixture-one") == "1"
+        print("Compose restart passed: readiness, original bearer, and one durable event.")
+
         verify_bridge(root, board, url, operator, bridge_token, database)
     finally:
         if run(["docker", "volume", "ls", "-q", "--filter", f"name=^{volume}$"]).strip():

@@ -1,16 +1,20 @@
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from conftest import authenticated_client, tool_json
 from fakes import FixedClock
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.app.runtime import ProjectRuntime
+from plotroom.app.serve import Daemon
 from plotroom.core.actions import Action
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import NewEvent
 from plotroom.core.ledger import Ledger
 from plotroom.core.unit_of_work import UnitOfWork
+from test_daemon import bearer, make_config, run_daemon, stop
 
 
 async def test_action_attempts_survive_restart_and_ticks_follow_clock(tmp_path: Path) -> None:
@@ -81,6 +85,43 @@ async def test_action_attempts_survive_restart_and_ticks_follow_clock(tmp_path: 
     finally:
         await ledger.stop()
         await store.close()
+
+
+async def test_failed_action_can_be_closed_through_the_daemon(tmp_path: Path) -> None:
+    config = replace(make_config(tmp_path), action_attempts=1)
+    daemon = Daemon(config)
+    token = bearer(config)
+    task, port = await run_daemon(daemon)
+
+    async def enqueue(uow: UnitOfWork) -> str:
+        cause = (await uow.append(NewEvent("core", "core.tick", "fixture-cause"))).event
+        # The daemon has no handler for this fixture action.
+        return await uow.enqueue_action(cause, "fixture", {"try": 1})
+
+    try:
+        async with authenticated_client(f"http://127.0.0.1:{port}/mcp", token) as client:
+            initial = tool_json(await client.call_tool("next", {}))["data"]
+            assert initial["items"] == []
+            key = await daemon.ledgers["demo"].run("system", enqueue)
+            ready = tool_json(
+                await client.call_tool("wait", {"cursor": initial["cursor"], "timeout": 10})
+            )["data"]
+            items = tool_json(await client.call_tool("next", {}))["data"]["items"]
+            assert len(items) == 1
+            (item,) = items
+            assert item == ready["item"]
+            assert item["kind"] == "failed_action"
+            assert item["subject_ref"] == key
+            closed = tool_json(
+                await client.call_tool(
+                    "ack", {"item": item["id"], "request_id": "close-failed-action"}
+                )
+            )["data"]
+            assert closed["state"] == "closed"
+            assert closed["changed"] is True
+            assert tool_json(await client.call_tool("next", {}))["data"]["items"] == []
+    finally:
+        await stop(daemon, task)
 
 
 async def test_interrupted_final_attempt_can_deliver_after_restart(tmp_path: Path) -> None:

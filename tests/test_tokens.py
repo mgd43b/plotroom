@@ -9,6 +9,7 @@ import json
 import os
 import stat
 from pathlib import Path
+from threading import Barrier
 from typing import Any
 
 import httpx
@@ -344,6 +345,31 @@ async def test_concurrent_token_writes_do_not_lose_credentials(tmp_path: Path) -
     assert set(entries) == {token.token_id for token in issued}
     assert select_local_token(tmp_path, issued[0].token_id) == issued[0].bearer
     assert select_local_token(tmp_path, issued[1].token_id) == issued[1].bearer
+
+
+async def test_concurrent_local_tokens_stay_scoped_to_their_instances(tmp_path: Path) -> None:
+    alpha, beta = TokenRegistry(tmp_path / "alpha"), TokenRegistry(tmp_path / "beta")
+    start = Barrier(2)
+
+    def issue(registry: TokenRegistry, role: str) -> IssuedToken:
+        start.wait(timeout=10)
+        return registry.issue("demo", role, local=True)
+
+    first, second = await asyncio.gather(
+        asyncio.to_thread(issue, alpha, "clerk"),
+        asyncio.to_thread(issue, beta, "orchestrator"),
+    )
+    for registry, own, other, role in (
+        (alpha, first, second, "clerk"),
+        (beta, second, first, "orchestrator"),
+    ):
+        directory = registry.path.parent
+        assert select_local_token(directory, None) == own.bearer
+        assert select_local_token(directory, own.token_id) == own.bearer
+        assert await registry.authenticate(own.bearer) == Identity("demo", role)
+        assert await registry.authenticate(other.bearer) is None
+        with pytest.raises(TokenError, match="no local token"):
+            select_local_token(directory, other.token_id)
 
 
 async def test_invalid_instance_file_fails_closed_and_recovers_on_replacement(
