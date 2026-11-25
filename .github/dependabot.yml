@@ -1,0 +1,41 @@
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: tuesday
+      time: "07:00"
+      timezone: UTC
+    # Enable one version PR when the hosted updater supports the project's minimum uv.
+    open-pull-requests-limit: 0
+    groups:
+      python-compatible:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: UTC
+    open-pull-requests-limit: 1
+    groups:
+      actions-compatible:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: wednesday
+      time: "07:00"
+      timezone: UTC
+    open-pull-requests-limit: 1
+    groups:
+      docker-base:
+        patterns: ["python"]
+        update-types: ["minor", "patch"]
