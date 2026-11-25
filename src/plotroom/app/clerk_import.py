@@ -244,10 +244,18 @@ def parse_ledger(text: str) -> tuple[str, list[PullImportRow], list[SkipImportRo
         for heading, _ in sections
     ):
         raise ValueError("expected the clerk ledger template")
+    open_sections = sum(heading.lower() == "open prs" for heading, _ in sections)
     for heading, body in sections:
         name = heading.lower()
         if name == "open prs":
-            for pr, owner, _, channel, state, after_merge in _table(body, _OPEN_HEADER):
+            rows = _table(body, _OPEN_HEADER)
+            if rows and rows[0][0].casefold() == "none":
+                if open_sections != 1 or len(rows) != 1 or any(rows[0][1:]):
+                    raise ValueError(
+                        "the empty Open PRs marker requires one table with no other data"
+                    )
+                continue
+            for pr, owner, _, channel, state, after_merge in rows:
                 if pr.lower() == "(soon)":
                     continue
                 number = _pull_number(pr)

@@ -9,7 +9,7 @@ hitl: true
 risk: medium
 tracker_id: "195"
 remote: "https://github.com/mgd43b/plotroom/issues/195"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Verify the clerk ledger import against a live ledger

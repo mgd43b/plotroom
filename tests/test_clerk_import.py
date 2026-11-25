@@ -116,6 +116,59 @@ def test_refuses_rows_that_do_not_match_the_template() -> None:
         parse_triggers("## T1: #10 merges\n## T1: #11 merges")
 
 
+OPEN_TABLE = (
+    "## Open PRs\n"
+    "| PR | Owner (lane) | Kind | Channel | State | After merge |\n"
+    "|---|---|---|---|---|---|\n"
+)
+EMPTY_OPEN_ROW = "| NONE | | | | | |\n"
+NUMBERED_OPEN_ROW = "| #41 | fixture | codex | coordinator-only | waiting | Review output |\n"
+
+
+async def test_empty_open_pr_marker_imports_and_replays(
+    board: tuple[Ledger, SqliteStore],
+) -> None:
+    ledger, store = board
+    repo, pulls, skips = parse_ledger(
+        f"# Clerk ledger: {REPO}\n\n{OPEN_TABLE}{EMPTY_OPEN_ROW}\n"
+        "## Skip list\n| PR | Why, and who asked |\n|---|---|\n| #48 | Fixture hold |\n"
+    )
+    assert pulls == []
+    args = {"ledger_repository": repo, "pulls": pulls, "skips": skips, "triggers": []}
+    first = await ledger.execute("orchestrator", "clerk_import", "empty-board", args)
+    assert first.result["lanes"] == {}
+    assert first.result["triggers"] == {}
+    assert set(first.result["items"]) == {"skip:48"}
+    cursor = await store.head_seq()
+    before = await ledger.events_after(0)
+    assert await store.pending_action() is None
+    repeat = await ledger.execute("orchestrator", "clerk_import", "empty-board", args)
+    assert repeat.replayed
+    assert repeat.result == first.result
+    assert await store.head_seq() == cursor
+    assert await ledger.events_after(0) == before
+    assert await store.pending_action() is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "| NONE | fixture | | | | |\n",
+        "| NONE | | | | |\n",
+        "| (NONE) | | | | | |\n",
+        EMPTY_OPEN_ROW + EMPTY_OPEN_ROW,
+        EMPTY_OPEN_ROW + "| (soon) | | | | | |\n",
+        EMPTY_OPEN_ROW + NUMBERED_OPEN_ROW,
+        NUMBERED_OPEN_ROW + EMPTY_OPEN_ROW,
+        EMPTY_OPEN_ROW + "\n" + OPEN_TABLE + NUMBERED_OPEN_ROW,
+        NUMBERED_OPEN_ROW + "\n" + OPEN_TABLE + EMPTY_OPEN_ROW,
+    ],
+)
+def test_refuses_ambiguous_empty_open_pr_marker(body: str) -> None:
+    with pytest.raises(ValueError, match=r"empty Open PRs marker|row width|positive #PR"):
+        parse_ledger(f"# Clerk ledger: {REPO}\n\n{OPEN_TABLE}{body}")
+
+
 async def test_import_states_lane_links_checklist_items_and_replay(
     board: tuple[Ledger, SqliteStore],
 ) -> None:
