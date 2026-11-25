@@ -17,30 +17,32 @@ the same file and find out when the PR conflicts.
 Plotroom moves that state out of the conversation and into a ledger every session can read:
 
 - **Lanes with owners.** The orchestrator gives each worker a lane (a branch and its work items)
-  with `lane_start`. `snapshot()` recovers the whole board from any chat.
+  with `lane_start`. `snapshot()` summarizes the board and pages through lane details.
 - **File claims that catch collisions early.** Workers `claim` the paths they plan to change, with
   a reason. Overlapping claims, and PRs that touch another lane's claims, become items for the
   orchestrator before the work collides.
-- **One attention queue.** `next()` ranks what needs the orchestrator: overlaps, lanes waiting on
-  someone, PRs ready to merge, stale questions to the human, actions nobody owns. `wait()` blocks
-  until something changes or its timeout passes, so agents don't poll. On a timeout it returns
-  just a cursor; call `wait()` again with that cursor to keep watching.
-- **Merge readiness you can check.** `merge_gate(pr)` judges a PR at its exact head: its checks,
-  open review threads, main's CI, a stale base and closing keywords. A refusal goes to the lane
-  that owns the PR. A person or a clerk session does the merge.
+- **One attention queue.** `next()` pages through ranked items visible to your role, including
+  overlaps, lanes waiting on someone, PRs ready to merge, stale questions and missing action routes.
+  `wait()` blocks until a visible change or a timeout. On timeout, `data.item` is `null`;
+  pass `data.cursor` to the next `wait()` call to keep watching.
+- **Merge readiness you can check.** `merge_gate(pr)` returns an advisory verdict for the exact PR
+  head using checks, review threads, main's CI, base freshness and closing keywords. The controller
+  separately routes actionable refusals to the owning worker or, for an unowned PR, the orchestrator.
+  A person or a clerk session does the merge.
 - **Post-merge steps that stay on the board.** `lane_ready` attaches a checklist to a PR and its
   head. After that head merges, the lane stays open until every step is recorded.
 - **Briefs written from the ticket.** `brief` drafts a worker's handoff from the ticket's full text
   and the paths other lanes have claimed.
 - **Your words, kept exactly.** `decide` records a decision word for word, with where you said it.
-  `ask` tracks open questions to you and flags the stale ones. `goal` checks a rule such as "every
-  open issue in milestone 1 has an owner" against GitHub.
-- **Triggers.** `trigger` fires once, or every time, a condition holds (a PR merges, or main goes
-  green with its images built). It can message a worker, notify the orchestrator, mark a lane or
-  propose archiving it.
-- **Spend caps.** `budget_open` registers a run's cap. As a usage meter reports the run's spend,
-  Plotroom raises items at 50% and 80% of the cap and, at 100%, sends the lane a stop request and
-  tells the orchestrator. The first provider meter is still to come (see Status).
+  `ask` tracks questions tied to an existing GitHub issue comment and flags stale ones. `goal`
+  checks a rule such as "every open issue in milestone 1 has an owner" against projected GitHub data.
+- **Triggers.** `trigger` can fire once or recur when a condition becomes true, such as a PR
+  merging or main going green with its images built. It can message a worker, notify the
+  orchestrator, mark a lane or propose archiving it.
+- **Budget thresholds.** `budget_open` records a run's cap. With usage meter readings, Plotroom
+  raises orchestrator items at 50%, 80%, and 100%. At 100% it queues a stop request for an active
+  lane. Delivery depends on its route. Bridged lane-pinned stops surface as failed actions for
+  operator attention. The first provider meter is still to come (see Status).
 - **Search.** `search` covers messages, turn reports, decisions, asks, issue comments and PR bodies,
   with full-text search by default and search by meaning when you configure an embedding endpoint.
 
@@ -49,7 +51,9 @@ instances serve MCP over HTTP. Workers on a Switchboard relay reach it through `
 
 ## What it looks like
 
-An orchestrator starts two lanes, and both workers decide to touch the same fixture:
+An orchestrator starts two lanes, and both workers decide to touch the same fixture.
+Use the orchestrator token to start the lanes and each worker's token to claim paths.
+[Run your own](#run-your-own) shows how to issue all three tokens.
 
 ```text
 orchestrator  lane_start(lane="api",   worker="agent",  branch="feat/api",   work_items=[], request_id="r1")
@@ -63,8 +67,10 @@ orchestrator  next()
                     "context": { "lanes": ["api", "tests"], "claims": [...], ... }, ... } ] } }
 ```
 
-Every command takes a `request_id`, so a retried call is recorded once. The orchestrator settles who owns the fixture before either PR exists. If the agent's chat is
-compacted or replaced, `snapshot()` still shows its lane, its claims and what it is waiting on.
+Reuse the same `request_id` to retry a command for the same role. The orchestrator can settle
+who owns the fixture before either PR exists. If a chat is compacted or replaced,
+`snapshot(lane="api")` recovers that lane and what it is waiting on, and
+`claims(lane="api")` lists its path claims.
 
 Every token is bound to one project and one role: `orchestrator`, `clerk`, `worker:<name>`,
 `drain` or `bridge`. Each command declares which roles may call it, and anything undeclared is
@@ -78,8 +84,8 @@ tested. The remaining items are mostly checks against live services and the rele
 
 | Works now | Not yet |
 |---|---|
-| The local daemon, with all of the above over MCP | A tested run against a live GitHub repository ([#29](https://github.com/mgd43b/plotroom/issues/29)) |
-| Real Claude Code and Codex clients, locally and against the chart | Releases to PyPI and ghcr.io ([#25](https://github.com/mgd43b/plotroom/issues/25)) |
+| The local daemon and its MCP tools | A tested run against a live GitHub repository ([#29](https://github.com/mgd43b/plotroom/issues/29)) |
+| Real Claude Code and Codex clients against the local daemon and the chart in disposable local kind | Releases to PyPI and ghcr.io ([#25](https://github.com/mgd43b/plotroom/issues/25)) |
 | Docker Compose, and the Helm chart on a local kind cluster | GitHub App credentials for hosted mode ([#39](https://github.com/mgd43b/plotroom/issues/39)) and a published chart ([#125](https://github.com/mgd43b/plotroom/issues/125)) |
 | Restart safety, migration backups, scheduled backups | A provider adapter for real spend readings ([#102](https://github.com/mgd43b/plotroom/issues/102)) |
 | The Switchboard bridge | Plotroom coordinating its own development for a working day ([#110](https://github.com/mgd43b/plotroom/issues/110)) |
@@ -109,31 +115,37 @@ You should see **7 passed**:
 
 ## Run your own
 
-Save a config next to the checkout as `plotroom.toml`:
+Save this two-worker config next to the checkout as `plotroom.toml`:
 
 ```toml
 data_dir = "plotroom-data"
 
 [projects.example.workers.agent]
+[projects.example.workers.tester]
 ```
 
 Start the daemon from the checkout. It runs in the foreground:
 
 ```sh
-uv run plotroom serve --config ../plotroom.toml
+uv run --locked plotroom serve --config ../plotroom.toml
 ```
 
 In a second terminal, from the same checkout, issue a token for each role:
 
 ```sh
-uv run plotroom token issue --config ../plotroom.toml --project example --role orchestrator
-uv run plotroom token issue --config ../plotroom.toml --project example --role worker:agent
+uv run --locked plotroom token issue --config ../plotroom.toml --project example --role orchestrator
+uv run --locked plotroom token issue --config ../plotroom.toml --project example --role worker:agent
+uv run --locked plotroom token issue --config ../plotroom.toml --project example --role worker:tester
 ```
 
-Point each MCP client at the stdio proxy, with the checkout as the server command's working
-directory (or an absolute path to `--config`):
-`uv run plotroom connect --stdio --config ../plotroom.toml --token-id <id>`. Use the `token_id`
-issued for that client's role.
+Configure each MCP client to launch the stdio proxy. Set `--directory` to the absolute checkout
+path so uv finds the project even when the client starts elsewhere. Set `--config` to the absolute
+TOML path and replace `YOUR_TOKEN_ID` with the ID for that client's role.
+
+```sh
+uv --directory /path/to/plotroom run --locked plotroom connect --stdio \
+  --config /path/to/plotroom.toml --token-id YOUR_TOKEN_ID
+```
 
 - [Running Plotroom](docs/running.md): the local daemon, Docker Compose, the Helm chart on kind, and
   the Switchboard bridge.

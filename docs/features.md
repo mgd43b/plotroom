@@ -128,6 +128,9 @@ opens an archive proposal as soon as its PR merges.
 Which open issues still need an owner? Save that rule once, then ask Plotroom
 which issues remain and what is missing for each one.
 
+Goal evaluation needs an available GitHub issue projection. Configure
+[GitHub reads](#local-github-reads) for the project before evaluating a goal.
+
 1. Set `human_login` in the project table to use the human's GitHub login.
 2. With an orchestrator token, call `goal_set` with a name, goal text, and
    request ID. For example, name the goal below `milestone-1-owners`.

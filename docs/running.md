@@ -15,17 +15,17 @@ data_dir = "plotroom-data"
 [projects.example.workers.agent]
 ```
 
-From the checkout, run `uv run plotroom serve --config ../plotroom.toml` to
-serve MCP over HTTP. Issue a project-scoped token for each role.
+From the checkout, run `uv run --locked plotroom serve --config ../plotroom.toml` in one
+terminal. In a second terminal, from the same checkout, issue a project-scoped token for each role.
 
 ```sh
-uv run plotroom token issue --config ../plotroom.toml --project example --role orchestrator
-uv run plotroom token issue --config ../plotroom.toml --project example --role worker:agent
+uv run --locked plotroom token issue --config ../plotroom.toml --project example --role orchestrator
+uv run --locked plotroom token issue --config ../plotroom.toml --project example --role worker:agent
 ```
 
-Configure each MCP client to run
-`uv run plotroom connect --stdio --config ../plotroom.toml --token-id <id>` from
-the checkout. Replace `<id>` with the `token_id` returned for that client's role.
+Configure each MCP client to launch the stdio proxy using the
+[checkout and config paths in the README](../README.md#run-your-own). Use the `token_id`
+returned for that client's role.
 
 On macOS and Linux, `plotroom connect --stdio` with a config-derived URL uses a private Unix socket
 to verify the local daemon before sending credentials or MCP requests. Restart any `plotroom serve`
@@ -213,12 +213,12 @@ uv run --locked python deploy/bridge_smoke.py --image-tag bridge-local \
   --project "plotroom-bridge-$(date +%s)-$$"
 ```
 
-For an explicit local fixture, set `via_bridge = true` in the server project's
-`switchboard` table and give it an explicit `board`. The bridge runs on the
-relay machine. Configure `PLOTROOM_TOKEN` with that project's bridge bearer and
-run `plotroom bridge --url http://127.0.0.1:8765/mcp --board fixture-board`.
+For an explicit local fixture, set `via_bridge = true` and `board = "fixture-board"` in the
+server project's `switchboard` table. Set `switchboard_address` for each participating worker.
+On the relay machine, make `switchboard-relay` available on PATH or pass a relay command with
+`--relay-command`. Configure `PLOTROOM_TOKEN` with that project's bridge bearer and, from the
+checkout, run `uv run --locked plotroom bridge --url http://127.0.0.1:8765/mcp --board fixture-board`.
 The daemon retains outgoing Switchboard actions until the bridge completes a
 lease. The relay receives the same action key on each delivery attempt.
 Lane-pinned budget stops require a local lane fence. A bridged project reports
 these as failed actions for operator attention.
-
