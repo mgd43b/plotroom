@@ -8,7 +8,7 @@ hitl: true
 risk: low
 tracker_id: "12"
 remote: "https://github.com/mgd43b/plotroom/issues/12"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Which milestone pays first? Log the clerk session

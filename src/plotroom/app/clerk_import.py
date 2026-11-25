@@ -38,6 +38,7 @@ _NOTIFY = re.compile(r'- Tell the coordinator:[ \t]*"(.+?)"( Don\'t message the 
 _ARCHIVE_OWNER = re.compile(r'- Owner: [^`]+ `[^`]+`\. Its post-merge list is "none"\.')
 _TRIGGER_TITLE = "# Clerk triggers"
 _LEDGER_TITLE = re.compile(r"# Clerk ledger: ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
+_OPEN_HEADING = re.compile(r"open prs(?:[ \t]+#+)?", re.IGNORECASE)
 _OPEN_HEADER = ("pr", "owner (lane)", "kind", "channel", "state", "after merge")
 _SKIP_HEADER = ("pr", "why, and who asked")
 
@@ -244,10 +245,25 @@ def parse_ledger(text: str) -> tuple[str, list[PullImportRow], list[SkipImportRo
         for heading, _ in sections
     ):
         raise ValueError("expected the clerk ledger template")
+    # A heading with closing hashes contributes to ambiguity without changing what gets imported.
+    open_sections = [body for heading, body in sections if _OPEN_HEADING.fullmatch(heading)]
+    if len(open_sections) > 1 and any(
+        (cells := _cells(line)) and cells[0].casefold() == "none"
+        for body in open_sections
+        for line in body
+    ):
+        raise ValueError("the empty Open PRs marker requires a single Open PRs table")
     for heading, body in sections:
         name = heading.lower()
         if name == "open prs":
-            for pr, owner, _, channel, state, after_merge in _table(body, _OPEN_HEADER):
+            rows = _table(body, _OPEN_HEADER)
+            if rows and rows[0][0].casefold() == "none":
+                if len(rows) != 1 or any(rows[0][1:]):
+                    raise ValueError(
+                        "the empty Open PRs marker requires one table with no other data"
+                    )
+                continue
+            for pr, owner, _, channel, state, after_merge in rows:
                 if pr.lower() == "(soon)":
                     continue
                 number = _pull_number(pr)
