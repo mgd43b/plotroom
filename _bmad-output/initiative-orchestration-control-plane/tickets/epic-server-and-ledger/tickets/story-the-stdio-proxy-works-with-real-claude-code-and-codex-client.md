@@ -31,3 +31,4 @@ Verify: A real Claude Code session and a real Codex session each call snapshot()
 
 - Check beyond its criteria: the proxy holds two concurrent calls, one of them a long wait, without blocking the other.
 - Built: https://github.com/mgd43b/plotroom/pull/51
+- An agent performed the independent interactive Claude Code and Codex snapshot and cancellation checks. [Merged evidence PR #181](https://github.com/mgd43b/plotroom/pull/181). Matt will decide whether to accept this evidence or repeat the check by hand.

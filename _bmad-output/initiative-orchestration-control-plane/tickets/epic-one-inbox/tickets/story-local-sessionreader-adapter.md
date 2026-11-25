@@ -38,4 +38,4 @@ Verify: On a machine running the Claude desktop app, a lane's turn end appears o
   and with the index omitted. Each of the four cases retained exactly one
   `claude.turn_report` in the committed ledger after another poll. The existing
   SessionReader, intake, and configuration fixture suites passed 77 tests.
-- The tracker mirror is provisional until the acceptance note is verified on main.
+- An agent performed the independent four-case real Claude Desktop turn deduplication check. [Merged evidence PR #183](https://github.com/mgd43b/plotroom/pull/183). Matt will decide whether to accept this evidence or repeat the check by hand.

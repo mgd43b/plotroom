@@ -119,3 +119,4 @@ An orchestrator running about 15 workers spends its turns deciding, approving, r
 - Decision: 2026-11-22, R7's provider usage source is owned by epic-guardrails; every other R7 source by epic-one-inbox. R9 is shared: epic-server-and-ledger acks next items, epic-one-inbox acknowledges upstream.
 - Decision: 2026-11-22, epics built in parallel each add Alembic revisions on one linear history; the later one to merge re-parents its revision onto main's head.
 - Decision: 2026-11-22, the spine's transport and packaging work (client spikes, pre-migration backups) belongs to epic-server-and-ledger; scheduled backups go with the Helm chart.
+- Decision: 2026-11-25, Matt: “Batching 5-10 tickets per PR is my instruction and is not a finding.” This records his November 24 direction in the Plotroom coordination chat, “remember we can batch 5-10,” for coherent ready batches. Existing prerequisites and owner decisions still apply.

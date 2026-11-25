@@ -20,7 +20,7 @@ A fetcher adds each PR's merge base and the files main changed since it; rule 4 
 
 ## Requirements
 
-Verify: A PR whose file changed on main is refused as stale and gets exactly one branch update per head, also across a restart, and only once rules 1 to 3 pass; a conflicting update opens one lane item; the write adapter has no call besides branch update and merge.
+Verify: A PR whose file changed on main is refused as stale and gets exactly one branch update per head, also across a restart, and only once rules 1 to 3 pass; a conflicting update opens one lane item; the write adapter has no call besides branch update and merge. On the authorized dedicated repository with its approved scoped permissions, re-verify #70's live/read verdict and audit log, #71's pinned merge offer, refusal and observed-merge outcomes, and #73's enabled test-project merge and disabled-mode guard. Review #74's deferred-finding dispositions against that live evidence. Keep adverse cases that require deterministic fixtures in their existing checks. Record a public-safe result for each issue and keep any live write confined to the separately authorized test scope.
 
 ## References
 
