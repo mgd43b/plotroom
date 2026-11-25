@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import fcntl
 import hashlib
 import json
 import os
 import stat
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from typing import Any
 
 import httpx
 import pytest
 
 from conftest import Child, authenticated_client
+from plotroom.app import tokens as token_store
 from plotroom.app.cli import EXIT_CONFIG, EXIT_FAILURE, main
 from plotroom.app.lock import LOCK_FILE_NAME
 from plotroom.app.tokens import (
@@ -347,18 +351,37 @@ async def test_concurrent_token_writes_do_not_lose_credentials(tmp_path: Path) -
     assert select_local_token(tmp_path, issued[1].token_id) == issued[1].bearer
 
 
-async def test_concurrent_local_tokens_stay_scoped_to_their_instances(tmp_path: Path) -> None:
+async def test_concurrent_local_tokens_stay_scoped_to_their_instances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     alpha, beta = TokenRegistry(tmp_path / "alpha"), TokenRegistry(tmp_path / "beta")
-    start = Barrier(2)
+    local = local_token_path()
+    contended = Event()
+    start = Barrier(2, action=contended.set)
+    lock = token_store._locked  # pyright: ignore[reportPrivateUsage]
+    read = token_store._read_local  # pyright: ignore[reportPrivateUsage]
 
-    def issue(registry: TokenRegistry, role: str) -> IssuedToken:
-        start.wait(timeout=10)
-        return registry.issue("demo", role, local=True)
+    @contextmanager
+    def contend(path: Path) -> Generator[None]:
+        if path == local:
+            start.wait(timeout=10)
+        with lock(path):
+            yield
 
-    first, second = await asyncio.gather(
-        asyncio.to_thread(issue, alpha, "clerk"),
-        asyncio.to_thread(issue, beta, "orchestrator"),
-    )
+    def read_while_locked(path: Path) -> dict[str, dict[str, str]]:
+        # A separate file description must contend with the writer's kernel lock.
+        with path.with_suffix(".lock").open("rb") as handle, pytest.raises(BlockingIOError):
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return read(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(token_store, "_locked", contend)
+        patch.setattr(token_store, "_read_local", read_while_locked)
+        first, second = await asyncio.gather(
+            asyncio.to_thread(alpha.issue, "demo", "clerk"),
+            asyncio.to_thread(beta.issue, "demo", "orchestrator"),
+        )
+    assert contended.is_set(), "both issuers must reach the shared registry lock"
     for registry, own, other, role in (
         (alpha, first, second, "clerk"),
         (beta, second, first, "orchestrator"),

@@ -49,6 +49,14 @@ decision and its single persisted command event before running the bridge fixtur
 
 ## Review Triage Log
 
+The independent Codex review found two coverage gaps, both addressed.
+
+- Synchronize both issuers at the shared registry lock and require kernel lock
+  contention during the registry read. The prior start barrier allowed the
+  shared updates to run sequentially.
+- Keep the shutdown cancellation assertion tied to the test's own request.
+  Fixture cleanup releases the pause even when an assertion fails.
+
 ## Verification
 
 Run the focused tests, the locked Python 3.14 and 3.15 suites, and the image and Compose smoke with a unique local project. Verify the exact PR head in CI and repeat the Compose acceptance after merge.

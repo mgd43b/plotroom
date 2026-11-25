@@ -405,12 +405,14 @@ async def test_cancelling_during_uvicorns_own_shutdown_waits_for_it_and_keeps_th
     assert publication is not None
     assert publication.local_socket is not None
     port_file = config.data_dir / PORT_FILE_NAME
-    assert await asyncio.to_thread(port_file.is_file)
-    daemon.stop()  # uvicorn starts its graceful shutdown
+    cancel_requested = False
     try:
+        assert await asyncio.to_thread(port_file.is_file)
+        daemon.stop()  # uvicorn starts its graceful shutdown
         await asyncio.wait_for(in_shutdown.wait(), timeout=30)
         assert not await asyncio.to_thread(port_file.exists)
         assert not await asyncio.to_thread(Path(publication.local_socket).parent.exists)
+        cancel_requested = True
         task.cancel()
         task.cancel()  # a second cancel must not cut the shutdown short either
         await asyncio.sleep(0)
@@ -419,11 +421,11 @@ async def test_cancelling_during_uvicorns_own_shutdown_waits_for_it_and_keeps_th
             await Daemon(config).run()
     finally:
         finish.set()
-        if task.cancelling():
+        if cancel_requested:
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, timeout=30)
         else:
-            await asyncio.wait_for(task, timeout=30)
+            await stop(daemon, task)
     assert calls == 1
     again = Daemon(config)  # and it is free once the shutdown has completed
     task2, _ = await run_daemon(again)
