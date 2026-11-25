@@ -144,23 +144,32 @@ class LogCheckpoint:
     @classmethod
     def capture(cls, log_path: Path, backups: int) -> LogCheckpoint:
         archived: set[tuple[int, int, int, int]] = set()
-        active = None
-        for path in _log_paths(log_path, backups):
-            try:
-                info = path.stat()
-            except FileNotFoundError:
-                continue
-            if path == log_path:
-                active = info
-            else:
-                archived.add(_log_fingerprint(info))
+        try:
+            active = log_path.stat()
+        except FileNotFoundError:
+            active = None
+        try:
+            for path in _log_paths(log_path, backups)[:-1]:
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISREG(info.st_mode):
+                    archived.add(_log_fingerprint(info))
+        except OSError:
+            # Incomplete backup metadata cannot establish which archives are old.
+            # Keep the active-file diagnostic and allow the daemon to start.
+            backups = 0
         return cls(active, frozenset(archived), backups)
 
 
 def _startup_lines(log_path: Path, checkpoint: LogCheckpoint) -> Iterator[str]:
     for path in _log_paths(log_path, checkpoint.backups):
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            flags = os.O_RDONLY | os.O_NONBLOCK
+            if path != log_path:
+                flags |= os.O_NOFOLLOW
+            fd = os.open(path, flags)
             with os.fdopen(fd, "rb") as handle:
                 info = os.fstat(fd)
                 if not stat.S_ISREG(info.st_mode) or _log_fingerprint(info) in checkpoint.archived:

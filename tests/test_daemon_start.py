@@ -1247,6 +1247,21 @@ async def test_a_startup_failure_is_read_across_real_log_rotation(
     )
 
 
+async def test_invalid_backup_metadata_does_not_block_daemon_startup(
+    tmp_path: Path, data_dir: Path
+) -> None:
+    config = write_config(tmp_path)
+    backup = data_dir / f"{LOG_FILE_NAME}.1"
+
+    def prepare() -> None:
+        data_dir.mkdir(exist_ok=True)
+        backup.symlink_to(backup.name)
+
+    await asyncio.to_thread(prepare)
+    async with Client(proxy_params(config), mode="auto") as client:
+        assert tool_json(await client.call_tool("snapshot", {}))["ok"] is True
+
+
 async def test_the_rotation_settings_reach_the_daemon_from_the_environment(
     tmp_path: Path, data_dir: Path
 ) -> None:

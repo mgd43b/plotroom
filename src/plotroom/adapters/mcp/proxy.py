@@ -146,10 +146,13 @@ def _error_response(request_id: Any, message: str) -> dict[str, Any]:
     }
 
 
-def _pipe_fd(stream: BinaryIO) -> int | None:
+def _pipe_fd(stream: BinaryIO, *, anonymous_only: bool = False) -> int | None:
     try:
         fd = stream.fileno()
-        return fd if stat.S_ISFIFO(os.fstat(fd).st_mode) else None
+        info = os.fstat(fd)
+        if stat.S_ISFIFO(info.st_mode) and (not anonymous_only or info.st_nlink == 0):
+            return fd
+        return None
     except OSError, ValueError:
         return None
 
@@ -219,6 +222,7 @@ class StdioProxy:
         try:
             loop.add_reader(fd, self._input_ready.set)
             pending = bytearray()
+            turn = asyncio.Event()
             while not self._gone:
                 await self._input_ready.wait()
                 self._input_ready.clear()
@@ -237,6 +241,12 @@ class StdioProxy:
                 if rest:
                     yield bytes(pending)
                     for line in rest[:-1]:
+                        # Let forwarding and its done callbacks run between buffered messages.
+                        loop.call_soon(turn.set)
+                        await turn.wait()
+                        turn.clear()
+                        if self._gone:
+                            return
                         yield line
                     pending = bytearray(rest[-1])
         finally:
@@ -253,9 +263,10 @@ class StdioProxy:
         )
         tasks = self._tasks
         # The selector reports an EOF/error on a pipe's write end when the peer closes it
-        # (the same read-side watch used by asyncio's Unix write-pipe transport).
+        # (the same read-side watch used by asyncio's Unix write-pipe transport). On macOS a
+        # named FIFO can signal readability while its reader is still open.
         loop = asyncio.get_running_loop()
-        output_fd = _pipe_fd(self._stdout)
+        output_fd = _pipe_fd(self._stdout, anonymous_only=sys.platform == "darwin")
 
         def output_closed() -> None:
             assert output_fd is not None
