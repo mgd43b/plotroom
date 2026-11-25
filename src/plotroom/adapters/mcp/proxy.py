@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import re
-import select
 import socket
 import ssl
 import stat
@@ -281,7 +280,12 @@ class StdioProxy:
             loop.remove_reader(output_fd)
             self._client_gone()
 
+        write_fd = self._stdout_fd
+        blocking = None
         try:
+            if write_fd is not None:
+                blocking = os.get_blocking(write_fd)
+                os.set_blocking(write_fd, False)
             if output_fd is not None:
                 loop.add_reader(output_fd, output_closed)
             async with aclosing(self._input_lines()) as lines:
@@ -315,8 +319,22 @@ class StdioProxy:
         finally:
             if output_fd is not None:
                 loop.remove_reader(output_fd)
-            if owned:
-                await http.aclose()
+            try:
+                if write_fd is not None and blocking is not None:
+                    try:
+                        # On EOF ordinary replies have drained. Any remaining pipe write
+                        # belongs to a canceled request, so it need not hold shutdown open.
+                        for task in tasks:
+                            task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        for write in self._orphaned_writes:
+                            write.cancel()
+                        await asyncio.gather(*self._orphaned_writes, return_exceptions=True)
+                    finally:
+                        os.set_blocking(write_fd, blocking)
+            finally:
+                if owned:
+                    await http.aclose()
 
     def _over_limit(self, message: Mapping[str, Any]) -> bool:
         """Too much work is pending; a cancel still gets through, since it frees work."""
@@ -535,8 +553,8 @@ class StdioProxy:
         await self._write(json.dumps(message, separators=(",", ":")).encode())
 
     async def _write(self, payload: bytes) -> None:
-        # Shielded: a cancelled caller must not release the lock while the thread still writes.
-        # The write it leaves behind still counts toward the pending limit until it finishes.
+        # A canceled caller must not release the lock while its protocol line is still being
+        # written. The write it leaves behind counts toward the pending limit until it finishes.
         write = asyncio.ensure_future(self._locked_write(payload))
         try:
             await asyncio.shield(write)
@@ -549,27 +567,34 @@ class StdioProxy:
     async def _locked_write(self, payload: bytes) -> None:
         async with self._write_lock:
             try:
-                await asyncio.to_thread(self._write_blocking, payload)
+                if (fd := self._stdout_fd) is None:
+                    await asyncio.to_thread(self._write_blocking, payload)
+                else:
+                    await self._write_pipe(fd, payload + b"\n")
             except BrokenPipeError:
                 log.error("stdout closed; the client is gone")
                 self._client_gone()
 
-    def _write_blocking(self, payload: bytes) -> None:
-        """Runs off the event loop: a client that stops reading must not stall forwarding."""
-        line = payload + b"\n"
-        if (fd := self._stdout_fd) is None:
-            self._stdout.write(line)
-            self._stdout.flush()
-            return
-        # A failed buffered flush can leave data for interpreter shutdown to retry.
+    async def _write_pipe(self, fd: int, line: bytes) -> None:
+        # Write directly so an interrupted flush cannot leave bytes for Python to retry at exit.
+        loop = asyncio.get_running_loop()
+        ready = asyncio.Event()
         remaining = memoryview(line)
         while remaining:
             try:
                 remaining = remaining[os.write(fd, remaining) :]
-            except BlockingIOError:  # inherited nonblocking stdout
-                ready = select.poll()
-                ready.register(fd, select.POLLOUT)
-                ready.poll()  # hangup also wakes this; the next write reports the broken pipe
+            except BlockingIOError:
+                loop.add_writer(fd, ready.set)
+                try:
+                    await ready.wait()
+                    ready.clear()
+                finally:
+                    loop.remove_writer(fd)
+
+    def _write_blocking(self, payload: bytes) -> None:
+        """Runs off the event loop for streams outside the process pipe path."""
+        self._stdout.write(payload + b"\n")
+        self._stdout.flush()
 
 
 class EndpointError(ValueError):
