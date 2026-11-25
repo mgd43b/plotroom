@@ -11,6 +11,7 @@ import os
 import stat
 from collections.abc import Generator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from threading import Barrier, Event
 from typing import Any
@@ -358,25 +359,49 @@ async def test_concurrent_local_tokens_stay_scoped_to_their_instances(
     local = local_token_path()
     contended = Event()
     start = Barrier(2, action=contended.set)
+    operations: ContextVar[list[str] | None] = ContextVar("registry_operations", default=None)
     lock = token_store._locked  # pyright: ignore[reportPrivateUsage]
     read = token_store._read_local  # pyright: ignore[reportPrivateUsage]
+    write = token_store._write  # pyright: ignore[reportPrivateUsage]
 
     @contextmanager
     def contend(path: Path) -> Generator[None]:
-        if path == local:
-            start.wait(timeout=10)
+        if path != local:
+            with lock(path):
+                yield
+            return
+        start.wait(timeout=10)
         with lock(path):
-            yield
+            trace: list[str] = []
+            current = operations.set(trace)
+            try:
+                yield
+                assert trace == ["read", "write"]
+            finally:
+                operations.reset(current)
+
+    def record(operation: str) -> None:
+        trace = operations.get()
+        assert trace is not None, f"shared registry {operation} ran outside the lock"
+        # A separate file description must contend with the writer's kernel lock.
+        with local.with_suffix(".lock").open("rb") as handle, pytest.raises(BlockingIOError):
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        trace.append(operation)
 
     def read_while_locked(path: Path) -> dict[str, dict[str, str]]:
-        # A separate file description must contend with the writer's kernel lock.
-        with path.with_suffix(".lock").open("rb") as handle, pytest.raises(BlockingIOError):
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if path == local:
+            record("read")
         return read(path)
+
+    def write_while_locked(path: Path, records: dict[str, Any]) -> None:
+        if path == local:
+            record("write")
+        write(path, records)
 
     with monkeypatch.context() as patch:
         patch.setattr(token_store, "_locked", contend)
         patch.setattr(token_store, "_read_local", read_while_locked)
+        patch.setattr(token_store, "_write", write_while_locked)
         first, second = await asyncio.gather(
             asyncio.to_thread(alpha.issue, "demo", "clerk"),
             asyncio.to_thread(beta.issue, "demo", "orchestrator"),

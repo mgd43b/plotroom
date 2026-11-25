@@ -57,6 +57,10 @@ The independent Codex review found two coverage gaps, both addressed.
 - Keep the shutdown cancellation assertion tied to the test's own request.
   Fixture cleanup releases the pause even when an assertion fails.
 
+The second pass identified a remaining registry gap. The regression now checks
+that each issuer reads and writes within a single shared lock acquisition and that
+the kernel lock is held at both steps.
+
 ## Verification
 
 Run the focused tests, the locked Python 3.14 and 3.15 suites, and the image and Compose smoke with a unique local project. Verify the exact PR head in CI and repeat the Compose acceptance after merge.
