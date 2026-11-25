@@ -1,3 +1,25 @@
+{{- $bridgeProjects := ((.Values.bridge | default dict).projects | default dict) -}}
+{{- $hosts := list "127.0.0.1:*" "localhost:*" (printf "%s:8765" .Release.Name) -}}
+{{- range .Values.allowedHosts -}}
+  {{- $host := toString . -}}
+  {{- if not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?[.]?(:[0-9]{1,5})?$" $host) -}}
+    {{- fail "allowedHosts entries must be exact DNS names or IPv4 addresses, optionally with a port" -}}
+  {{- end -}}
+  {{- $parts := splitList ":" $host -}}
+  {{- if eq (len $parts) 2 -}}
+    {{- $port := atoi (index $parts 1) -}}
+    {{- if or (lt $port 1) (gt $port 65535) -}}
+      {{- fail "allowedHosts port must be between 1 and 65535" -}}
+    {{- end -}}
+  {{- end -}}
+  {{- $hosts = append $hosts $host -}}
+{{- end -}}
+{{- range $project, $settings := $bridgeProjects -}}
+  {{- if not (has $project $.Values.projects) -}}
+    {{- fail (printf "bridge project %q must also appear in projects" $project) -}}
+  {{- end -}}
+  {{- $board := required "each bridge project needs an explicit board" (get ($settings | default dict) "board") -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -13,7 +35,16 @@ data:
     backup_dir = "/backups"
     backup_retain = {{ .Values.backup.retain | int }}
     {{- end }}
-    allowed_hosts = ["127.0.0.1:*", "localhost:*", {{ printf "%s:8765" .Release.Name | quote }}]
-    {{- range .Values.projects }}
-    [projects.{{ . | quote }}]
+    allowed_hosts = {{ $hosts | uniq | mustToJson }}
+    {{- range $project := .Values.projects }}
+    [projects.{{ $project | quote }}]
+    {{- with index $bridgeProjects $project }}
+    [projects.{{ $project | quote }}.switchboard]
+    board = {{ required "each bridge project needs an explicit board" .board | quote }}
+    via_bridge = true
+    {{- range $worker, $address := .workers }}
+    [projects.{{ $project | quote }}.workers.{{ $worker | quote }}]
+    switchboard_address = {{ required "bridge workers need an explicit Switchboard address" $address | quote }}
+    {{- end }}
+    {{- end }}
     {{- end }}

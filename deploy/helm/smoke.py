@@ -23,6 +23,9 @@ async def check():
     base = fixture["base"]
     async with httpx2.AsyncClient(trust_env=False) as http:
         assert (await http.get(base + "/healthz")).status_code == 200
+        assert (await http.get(
+            base + "/healthz", headers={"Host": "unlisted.example.test:8765"}
+        )).status_code == 421
         ready = await http.get(base + "/readyz/" + fixture["project"])
         assert ready.status_code == 200
         assert ready.json()["projects"] == {fixture["project"]: "ready"}
@@ -56,6 +59,36 @@ asyncio.run(check())
 
 def run(command: list[str], stdin: str | None = None) -> str:
     return subprocess.check_output(command, input=stdin, text=True, timeout=180)
+
+
+def consume_token_job(kube: list[str], deployment: str, job: str) -> str:
+    assert not run([*kube, "logs", job]).strip()
+    handoff = """
+from pathlib import Path
+import stat
+path = Path("/data/.helm-bootstrap-token.json")
+assert stat.S_IMODE(path.stat().st_mode) == 0o600
+value = path.read_text()
+path.unlink()
+print(value)
+"""
+    token = json.loads(
+        run(
+            [
+                *kube,
+                "exec",
+                deployment,
+                "--container",
+                "plotroom",
+                "--",
+                "python",
+                "-c",
+                handoff,
+            ]
+        )
+    )["token"]
+    run([*kube, "delete", job, "--wait=true"])
+    return token
 
 
 def main() -> None:
@@ -142,32 +175,7 @@ def main() -> None:
     assert pvc["spec"]["accessModes"] == ["ReadWriteOnce"]
     assert pvc["status"]["phase"] == "Bound"
     run([*kube, "wait", "--for=condition=complete", job, "--timeout=90s"])
-    assert not run([*kube, "logs", job]).strip()
-    handoff = """
-from pathlib import Path
-import stat
-path = Path("/data/.helm-bootstrap-token.json")
-assert stat.S_IMODE(path.stat().st_mode) == 0o600
-value = path.read_text()
-path.unlink()
-print(value)
-"""
-    token = json.loads(
-        run(
-            [
-                *kube,
-                "exec",
-                deployment,
-                "--container",
-                "plotroom",
-                "--",
-                "python",
-                "-c",
-                handoff,
-            ]
-        )
-    )["token"]
-    run([*kube, "delete", job, "--wait=true"])
+    token = consume_token_job(kube, deployment, job)
 
     def running_pod(previous_uid: str | None = None) -> tuple[str, str]:
         deadline = time.monotonic() + 90

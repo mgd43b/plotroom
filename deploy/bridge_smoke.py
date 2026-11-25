@@ -139,11 +139,6 @@ def smoke(root: Path, name: str, tag: str) -> None:
     assert not run(
         ["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={name}"]
     ).strip()
-    state = root / "relay"
-    state.mkdir()
-    (state / "available").touch()
-    (state / "bridge-fixture").touch()
-    (state / "board").write_text(board)
 
     def command(*arguments):
         return run([*compose, *arguments], env=env)
@@ -170,11 +165,38 @@ def smoke(root: Path, name: str, tag: str) -> None:
     def database(which, value):
         return command("exec", "-T", "plotroom", "python", "-c", DB_QUERY, which, value).strip()
 
-    processes = []
     try:
         command("up", "--detach", "--wait", "--no-build")
         url = "http://" + command("port", "plotroom", "8765").strip() + "/mcp"
         operator, bridge_token = token("orchestrator"), token("bridge")
+        verify_bridge(root, board, url, operator, bridge_token, database)
+    finally:
+        if run(["docker", "volume", "ls", "-q", "--filter", f"name=^{volume}$"]).strip():
+            label = run(
+                [
+                    "docker",
+                    "volume",
+                    "inspect",
+                    "--format",
+                    '{{ index .Labels "com.docker.compose.project" }}',
+                    volume,
+                ]
+            ).strip()
+            assert label == name
+            command("down", "--volumes")
+
+
+def verify_bridge(
+    root: Path, board: str, url: str, operator: str, bridge_token: str, database
+) -> None:
+    state = root / "relay"
+    state.mkdir()
+    (state / "available").touch()
+    (state / "bridge-fixture").touch()
+    (state / "board").write_text(board)
+
+    processes = []
+    try:
         asyncio.run(seed(url, operator, board))
 
         def launch(mode):
@@ -241,19 +263,6 @@ def smoke(root: Path, name: str, tag: str) -> None:
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=10)
-        if run(["docker", "volume", "ls", "-q", "--filter", f"name=^{volume}$"]).strip():
-            label = run(
-                [
-                    "docker",
-                    "volume",
-                    "inspect",
-                    "--format",
-                    '{{ index .Labels "com.docker.compose.project" }}',
-                    volume,
-                ]
-            ).strip()
-            assert label == name
-            command("down", "--volumes")
 
 
 def main() -> None:

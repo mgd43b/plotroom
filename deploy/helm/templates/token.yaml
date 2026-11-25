@@ -1,4 +1,15 @@
 {{- if .Values.tokenJob.enabled }}
+{{- $role := .Values.tokenJob.role | default "orchestrator" }}
+{{- $bridgeProjects := ((.Values.bridge | default dict).projects | default dict) }}
+{{- if not (has .Values.tokenJob.project .Values.projects) }}
+{{- fail "tokenJob.project must appear in projects" }}
+{{- end }}
+{{- if not (has $role (list "orchestrator" "bridge")) }}
+{{- fail "tokenJob.role must be orchestrator or bridge" }}
+{{- end }}
+{{- if and (eq $role "bridge") (not (hasKey $bridgeProjects .Values.tokenJob.project)) }}
+{{- fail "bridge token Job requires a configured bridge project" }}
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -37,7 +48,7 @@ spec:
                   with os.fdopen(fd, "wb") as output:
                       subprocess.run(
                           ["plotroom", "token", "issue", "--config", "/etc/plotroom/plotroom.toml",
-                           "--no-local", "--project", sys.argv[1], "--role", "orchestrator"],
+                           "--no-local", "--project", sys.argv[1], "--role", sys.argv[2]],
                           stdout=output, check=True,
                       )
                       output.flush()
@@ -46,6 +57,7 @@ spec:
                   handoff.unlink(missing_ok=True)
                   raise
             - {{ .Values.tokenJob.project | quote }}
+            - {{ $role | quote }}
           securityContext:
             {{- include "plotroom.containerSecurity" . | nindent 12 }}
           volumeMounts:
