@@ -166,31 +166,44 @@ async def test_stdin_eof_drains_the_final_unterminated_message(
     assert proxy.process.returncode == 0
 
 
-async def test_disconnecting_during_a_blocked_stdout_write_exits_cleanly(
-    slow: tuple[SlowState, str],
+@pytest.mark.parametrize("disconnect", [True, False], ids=["disconnect", "resume"])
+async def test_a_full_stdout_pipe_handles_disconnect_or_resumption(
+    slow: tuple[SlowState, str], disconnect: bool
 ) -> None:
     _, url = slow
     script = dedent("""
-        import sys
+        import os, sys
         from plotroom.adapters.mcp.proxy import StdioProxy
         from plotroom.app.cli import main
 
         write = StdioProxy._write_blocking
+        raw_write = os.write
+
+        def mark_full(fd, data):
+            try:
+                return raw_write(fd, data)
+            except BlockingIOError:
+                if fd == sys.stdout.fileno():
+                    print("stdout full", file=sys.stderr, flush=True)
+                raise
 
         def mark_write(proxy, payload):
             print("writing response", file=sys.stderr, flush=True)
             write(proxy, payload)
 
+        os.write = mark_full
         StdioProxy._write_blocking = mark_write
         raise SystemExit(main(sys.argv[1:]))
     """)
     read_fd, write_fd = os.pipe()
     with os.fdopen(read_fd, "rb") as reader, os.fdopen(write_fd, "wb") as writer:
         os.set_blocking(write_fd, False)
-        with contextlib.suppress(BlockingIOError):
-            while True:
-                os.write(write_fd, b"x" * 4096)
-        os.set_blocking(write_fd, True)
+        queued = 0
+        for padding in (b"x" * 4096, b"x"):
+            with contextlib.suppress(BlockingIOError):
+                while True:
+                    queued += os.write(write_fd, padding)
+        os.set_blocking(write_fd, disconnect)
         child = await asyncio.to_thread(
             subprocess.Popen,
             [sys.executable, "-c", script, "connect", "--stdio", "--url", url],
@@ -208,9 +221,16 @@ async def test_disconnecting_during_a_blocked_stdout_write_exits_cleanly(
             stdin.flush()
             async with asyncio.timeout(POLL_TIMEOUT):
                 assert await asyncio.to_thread(stderr.readline) == b"writing response\n"
-            reader.close()  # the child has entered its write path and stdin stays open
+                if disconnect:
+                    reader.close()  # the child entered its write path and stdin stays open
+                else:
+                    assert await asyncio.to_thread(stderr.readline) == b"stdout full\n"
+                    assert await asyncio.to_thread(reader.read, queued) == b"x" * queued
+                    answer = json.loads(await asyncio.to_thread(reader.readline))
+                    assert answer["result"]["content"] == [{"type": "text", "text": "blocked"}]
+                    stdin.close()
             assert await asyncio.to_thread(child.wait, timeout=5) == 0
-            assert not stdin.closed
+            assert stdin.closed == (not disconnect)
             assert b"BrokenPipeError" not in stderr.read()
         finally:
             if child.poll() is None:

@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import select
 import socket
 import ssl
 import stat
@@ -563,7 +564,12 @@ class StdioProxy:
         # A failed buffered flush can leave data for interpreter shutdown to retry.
         remaining = memoryview(line)
         while remaining:
-            remaining = remaining[os.write(fd, remaining) :]
+            try:
+                remaining = remaining[os.write(fd, remaining) :]
+            except BlockingIOError:  # inherited nonblocking stdout
+                ready = select.poll()
+                ready.register(fd, select.POLLOUT)
+                ready.poll()  # hangup also wakes this; the next write reports the broken pipe
 
 
 class EndpointError(ValueError):
