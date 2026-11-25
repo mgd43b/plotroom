@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import os
+import pty
 import subprocess
 import sys
 from collections.abc import AsyncGenerator
@@ -151,6 +152,39 @@ async def test_closing_stdout_ends_the_proxy_while_stdin_is_still_open(
         await asyncio.to_thread(child.wait, timeout=5)
         stdin.close()
         stdout.close()
+
+
+async def test_closing_stdout_ends_the_proxy_while_terminal_stdin_is_open(
+    slow: tuple[SlowState, str],
+) -> None:
+    _, url = slow
+    master_fd, slave_fd = pty.openpty()
+    try:
+        child = await asyncio.to_thread(
+            subprocess.Popen,
+            [sys.executable, "-m", "plotroom", "connect", "--stdio", "--url", url],
+            stdin=slave_fd,
+            stdout=subprocess.PIPE,
+            env=child_env(),
+        )
+        assert child.stdout is not None
+        stdout = child.stdout
+        try:
+            first = modern_call(1, "fast", {"label": "from terminal"})
+            os.write(master_fd, json.dumps(first).encode() + b"\n")
+            async with asyncio.timeout(POLL_TIMEOUT):
+                answer = json.loads(await asyncio.to_thread(stdout.readline))
+            assert answer["result"]["content"] == [{"type": "text", "text": "from terminal"}]
+            stdout.close()  # the separate terminal master stays open
+            assert await asyncio.to_thread(child.wait, timeout=5) == 0
+        finally:
+            if child.poll() is None:
+                child.kill()
+            await asyncio.to_thread(child.wait, timeout=5)
+            stdout.close()
+    finally:
+        os.close(slave_fd)
+        os.close(master_fd)
 
 
 async def test_stdin_eof_drains_the_final_unterminated_message(

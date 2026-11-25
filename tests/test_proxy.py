@@ -1227,7 +1227,8 @@ async def test_buffered_stdio_messages_give_forwarding_tasks_a_turn(
     ):
         for marker in range(25):
             notification = request("notifications/fixture", None, {"marker": marker})
-            writer.write(json.dumps(notification).encode() + b"\n")
+            ending = b"\n" if marker < 24 else b""
+            writer.write(json.dumps(notification).encode() + ending)
         writer.close()
         patch.setattr(sys, "stdin", reader)
         async with client_for(handle) as http:

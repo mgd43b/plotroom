@@ -164,27 +164,34 @@ class LogCheckpoint:
 
 
 def _startup_lines(log_path: Path, checkpoint: LogCheckpoint) -> Iterator[str]:
-    for path in _log_paths(log_path, checkpoint.backups):
+    try:
+        paths = _log_paths(log_path, checkpoint.backups)
+    except OSError:
+        paths = [log_path]
+    for path in paths:
         try:
             flags = os.O_RDONLY | os.O_NONBLOCK
             if path != log_path:
                 flags |= os.O_NOFOLLOW
             fd = os.open(path, flags)
-            with os.fdopen(fd, "rb") as handle:
+            try:
                 info = os.fstat(fd)
                 if not stat.S_ISREG(info.st_mode) or _log_fingerprint(info) in checkpoint.archived:
                     continue
-                active = checkpoint.active
-                # The original active file may now be a backup. Skip its old prefix even
-                # there; a different active inode starts at byte zero regardless of its size.
-                if (
-                    active is not None
-                    and os.path.samestat(info, active)
-                    and info.st_size >= active.st_size
-                ):
-                    handle.seek(active.st_size)
-                for line in handle:
-                    yield line.decode("utf-8", errors="replace")
+                with os.fdopen(fd, "rb", closefd=False) as handle:
+                    active = checkpoint.active
+                    # The original active file may now be a backup. Skip its old prefix even
+                    # there; a different active inode starts at byte zero regardless of its size.
+                    if (
+                        active is not None
+                        and os.path.samestat(info, active)
+                        and info.st_size >= active.st_size
+                    ):
+                        handle.seek(active.st_size)
+                    for line in handle:
+                        yield line.decode("utf-8", errors="replace")
+            finally:
+                os.close(fd)
         except OSError:
             continue
 

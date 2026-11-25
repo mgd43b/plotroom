@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import fcntl
 import io
 import json
@@ -229,6 +230,49 @@ def test_the_last_logged_error_after_an_offset_is_the_reason(tmp_path: Path) -> 
         handle.write(new)
     assert logged_reason(log, checkpoint) == "data directory is locked: pid 7"
     assert logged_reason(tmp_path / "missing.log") is None
+
+
+def test_backup_listing_failure_still_reads_the_current_active_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = tmp_path / LOG_FILE_NAME
+    log.write_text('{"level":"error","msg":"old failure"}\n', encoding="utf-8")
+    checkpoint = LogCheckpoint.capture(log, 1)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write('{"level":"error","msg":"current failure"}\n')
+
+    def unavailable(path: Path) -> Iterator[Path]:
+        raise PermissionError("fixture listing error")
+
+    monkeypatch.setattr(Path, "iterdir", unavailable)
+    assert logged_reason(log, checkpoint) == "current failure"
+
+
+def test_directory_at_backup_path_does_not_leak_its_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = tmp_path / LOG_FILE_NAME
+    backup = log.with_name(f"{log.name}.1")
+    backup.mkdir()
+    checkpoint = LogCheckpoint.capture(log, 1)
+    log.write_text("current failure\n", encoding="utf-8")
+    descriptors: list[int] = []
+    open_file = os.open
+
+    def observe(path: Path, flags: int) -> int:
+        fd = open_file(path, flags)
+        if path == backup:
+            descriptors.append(fd)
+        return fd
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", observe)
+        assert logged_reason(log, checkpoint) == "current failure"
+    (descriptor,) = descriptors
+    with pytest.raises(OSError, check=lambda exc: exc.errno == errno.EBADF):
+        fcntl.fcntl(descriptor, fcntl.F_GETFD)
 
 
 def test_the_daemon_command_names_an_absolute_log_file(tmp_path: Path) -> None:

@@ -159,6 +159,17 @@ def _pipe_fd(stream: BinaryIO, *, anonymous_only: bool = False) -> int | None:
         return None
 
 
+def _input_fd(stream: BinaryIO) -> int | None:
+    try:
+        fd = stream.fileno()
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or os.isatty(fd):
+            return fd
+    except OSError, ValueError:
+        pass
+    return None
+
+
 @contextmanager
 def _nonblocking(fd: int) -> Generator[None]:
     # Do not share a changed status flag with the launcher while waiting for readiness.
@@ -198,8 +209,8 @@ class StdioProxy:
         self._orphaned_writes: set[asyncio.Future[None]] = set()
         self._partial_write: asyncio.Future[None] | None = None
         self._stdin = stdin if stdin is not None else sys.stdin.buffer
-        # The process pipe has no earlier buffered reads. Injected streams retain readline().
-        self._stdin_fd = _pipe_fd(self._stdin) if stdin is None else None
+        # Built-in process input has no earlier buffered reads. Injected streams retain readline().
+        self._stdin_fd = _input_fd(self._stdin) if stdin is None else None
         self._input_ready = asyncio.Event()
         self._stdout = stdout if stdout is not None else sys.stdout.buffer
         self._stdout_fd = _pipe_fd(self._stdout) if stdout is None else None
@@ -238,6 +249,13 @@ class StdioProxy:
             loop.add_reader(fd, self._input_ready.set)
             pending = bytearray()
             turn = asyncio.Event()
+
+            async def let_forwarding_run() -> None:
+                # Give forwarding tasks and their done callbacks a turn.
+                loop.call_soon(turn.set)
+                await turn.wait()
+                turn.clear()
+
             while not self._gone:
                 await self._input_ready.wait()
                 self._input_ready.clear()
@@ -250,17 +268,16 @@ class StdioProxy:
                     continue
                 if not chunk:
                     if pending:
-                        yield bytes(pending)  # readline also returns a final unterminated line
+                        await let_forwarding_run()
+                        if not self._gone:
+                            yield bytes(pending)  # readline also returns an unterminated line
                     break
                 first, *rest = chunk.split(b"\n")
                 pending.extend(first)
                 if rest:
                     yield bytes(pending)
                     for line in rest[:-1]:
-                        # Let forwarding and its done callbacks run between buffered messages.
-                        loop.call_soon(turn.set)
-                        await turn.wait()
-                        turn.clear()
+                        await let_forwarding_run()
                         if self._gone:
                             return
                         yield line
