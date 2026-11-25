@@ -7,6 +7,9 @@ covers: [R1]
 after: [1.1, 2]
 hitl: true
 risk: medium
+tracker_id: "195"
+remote: "https://github.com/mgd43b/plotroom/issues/195"
+tracker_status: backlog
 ---
 
 # Verify the clerk ledger import against a live ledger

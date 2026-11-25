@@ -63,7 +63,9 @@ No separate architecture decision record is proposed. The observed trigger and d
 
 ## Acceptance verdict
 
-**accepted-with-open-items** against the declared criteria. The observed runtime evidence satisfies all four criteria, including the agent-run native #60 check that the scripted suite leaves separate. Every native child is complete. The open items are the bridge-role cancellation test gap, the R4 wording clarification, and Matt’s pending decision to accept the #60 evidence or repeat the check by hand. The implementation enforces the role and uses the completed-attempt policy recorded in #57 and #62. The owner still determines whether to close the epic.
+**accepted-with-open-items** against the declared criteria. The observed runtime evidence satisfies all four criteria, including the agent-run native #60 check that the scripted suite leaves separate. Every native child is complete. The open items are the bridge-role cancellation test gap and the R4 wording clarification. The implementation enforces the role and uses the completed-attempt policy recorded in #57 and #62. Matt accepted the #60 evidence and approved completion of Epic #3 with those items open.
+
+- Decision, 2026-11-25, Plotroom coordinator chat: Matt replied “A for boyh” to tracker sync option A (apply the full audit tracker sync and bind the clerk ledger re-check) and Epic #3 option A (accept the agent-run #60 evidence and close Epic #3). The verdict remains `accepted-with-open-items`. #29 and #33 retain their independent live verification.
 
 ## Open questions
 
