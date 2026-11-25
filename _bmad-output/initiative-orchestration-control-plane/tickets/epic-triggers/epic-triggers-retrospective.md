@@ -63,7 +63,7 @@ No separate architecture decision record is proposed. The observed trigger and d
 
 ## Acceptance verdict
 
-**accepted-with-open-items** against the declared criteria. The runtime evidence satisfies all four criteria, including the native #60 check that the scripted suite leaves separate. Every native child is complete. The open items are a bridge-role cancellation test gap and an R4 wording clarification. The implementation enforces the role and uses the completed-attempt policy recorded in #57 and #62. The owner still determines whether to close the epic.
+**accepted-with-open-items** against the declared criteria. The observed runtime evidence satisfies all four criteria, including the agent-run native #60 check that the scripted suite leaves separate. Every native child is complete. The open items are the bridge-role cancellation test gap, the R4 wording clarification, and Matt’s pending decision to accept the #60 evidence or repeat the check by hand. The implementation enforces the role and uses the completed-attempt policy recorded in #57 and #62. The owner still determines whether to close the epic.
 
 ## Open questions
 
