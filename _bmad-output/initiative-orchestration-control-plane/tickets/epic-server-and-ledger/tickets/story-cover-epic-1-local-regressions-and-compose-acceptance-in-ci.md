@@ -9,7 +9,7 @@ hitl: false
 risk: low
 tracker_id: "189"
 remote: "https://github.com/mgd43b/plotroom/issues/189"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Cover Epic 1 local regressions and Compose acceptance in CI
