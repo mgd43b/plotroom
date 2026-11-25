@@ -31,6 +31,7 @@ from plotroom.app.config import load_config
 from plotroom.app.daemon_start import (
     LOG_FILE_NAME,
     DaemonLocation,
+    LogCheckpoint,
     daemon_env,
     ensure_daemon,
     lock_owner,
@@ -208,9 +209,9 @@ def test_a_logged_traceback_adds_its_last_line_and_bare_output_stands_in_when_no
     log = tmp_path / LOG_FILE_NAME
     entry = {"level": "error", "msg": "serve failed", "exc": "Traceback...\nOSError: bind failed"}
     log.write_text(json.dumps(entry) + "\n", encoding="utf-8")
-    assert logged_reason(log, 0) == "serve failed: OSError: bind failed"
+    assert logged_reason(log) == "serve failed: OSError: bind failed"
     log.write_text("Traceback (most recent call last):\nModuleNotFoundError: no uvicorn\n", "utf-8")
-    assert logged_reason(log, 0) == "ModuleNotFoundError: no uvicorn"
+    assert logged_reason(log) == "ModuleNotFoundError: no uvicorn"
 
 
 def test_the_last_logged_error_after_an_offset_is_the_reason(tmp_path: Path) -> None:
@@ -222,9 +223,12 @@ def test_the_last_logged_error_after_an_offset_is_the_reason(tmp_path: Path) -> 
         + json.dumps({"level": "error", "msg": "data directory is locked", "reason": "pid 7"})
         + "\n"
     )
-    log.write_text(old + new, encoding="utf-8")
-    assert logged_reason(log, len(old)) == "data directory is locked: pid 7"
-    assert logged_reason(tmp_path / "missing.log", 0) is None
+    log.write_text(old, encoding="utf-8")
+    checkpoint = LogCheckpoint.capture(log, 0)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(new)
+    assert logged_reason(log, checkpoint) == "data directory is locked: pid 7"
+    assert logged_reason(tmp_path / "missing.log") is None
 
 
 def test_the_daemon_command_names_an_absolute_log_file(tmp_path: Path) -> None:
@@ -241,12 +245,10 @@ def test_the_reason_is_read_from_the_start_of_a_file_that_rolled_since_the_offse
     log = tmp_path / LOG_FILE_NAME
     before = json.dumps({"level": "error", "msg": "old failure", "pad": "x" * 100}) + "\n"
     log.write_text(before, encoding="utf-8")
-    offset = log.stat().st_size
-    log.write_text(  # rolled: the old file is `.1` now, and the new one is smaller than the offset
-        json.dumps({"level": "error", "msg": "new failure"}) + "\n", encoding="utf-8"
-    )
-    assert log.stat().st_size < offset
-    assert logged_reason(log, offset) == "new failure"
+    checkpoint = LogCheckpoint.capture(log, 1)
+    log.rename(log.with_name(f"{log.name}.1"))
+    log.write_text(json.dumps({"level": "error", "msg": "new failure"}) + "\n", encoding="utf-8")
+    assert logged_reason(log, checkpoint) == "new failure"
 
 
 # --- the readiness probe ------------------------------------------------------------------
@@ -1199,6 +1201,52 @@ async def test_the_rotation_settings_in_the_config_reach_a_daemon_started_on_dem
         every_line_is_json(data_dir / name)
 
 
+async def test_a_startup_failure_is_read_across_real_log_rotation(
+    tmp_path: Path,
+    data_dir: Path,
+) -> None:
+    path = write_config(tmp_path, log_max_bytes=320, log_backups=2)
+    config = load_config(path, {})
+    log = data_dir / LOG_FILE_NAME
+    await asyncio.to_thread(data_dir.mkdir, exist_ok=True)
+    log.write_text('{"level":"error","msg":"older attempt"}\n', encoding="utf-8")
+    script = dedent("""
+        import logging, sys
+        from pathlib import Path
+        from plotroom.app.logging import setup_logging
+
+        setup_logging(file=Path(sys.argv[1]), max_bytes=320, backups=2)
+        if sys.argv[2] == "error":
+            logging.error("current startup failure", extra={"reason": "fixture reason"})
+        logging.info("rotate: %s", "x" * 320)
+        sys.exit(1)
+    """)
+
+    async def start(mode: str) -> str:
+        with pytest.raises(UpstreamStartError) as caught:
+            await ensure_daemon(
+                DaemonLocation(config),
+                path,
+                env=child_env(),
+                command=[sys.executable, "-c", script, str(log), mode],
+            )
+        return str(caught.value)
+
+    reason = await start("error")
+    first_backup = log.with_name(f"{log.name}.1")
+    assert any(
+        entry["msg"] == "current startup failure" for entry in every_line_is_json(first_backup)
+    )
+    assert all(entry["level"] == "info" for entry in every_line_is_json(log))
+    assert reason == "plotroom serve could not start: current startup failure: fixture reason"
+
+    assert await start("no-error") == "plotroom serve could not start: exited with code 1"
+    assert any(
+        entry["msg"] == "current startup failure"
+        for entry in every_line_is_json(log.with_name(f"{log.name}.2"))
+    )
+
+
 async def test_the_rotation_settings_reach_the_daemon_from_the_environment(
     tmp_path: Path, data_dir: Path
 ) -> None:
@@ -1239,7 +1287,7 @@ def test_output_written_before_logging_is_set_up_stays_readable_in_the_log_file(
     child = start_daemon([sys.executable, "-c", script], child_env(), tmp_path / "data", log)
     assert child.wait(timeout=WAIT) == 0
     assert log.read_text(encoding="utf-8").splitlines() == ["early trouble", "early output"]
-    assert logged_reason(log, 0) == "early output"
+    assert logged_reason(log) == "early output"
 
 
 def test_a_second_serve_that_loses_the_lock_never_writes_through_the_winners_log_file(
