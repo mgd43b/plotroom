@@ -67,6 +67,6 @@ title = "End-to-end suite over the epic's Done when"
 description = "One suite runs the epic's import checks against a real daemon with fixture ledger and triggers files; the working-day check is recorded in the epic's Notes."
 verify = "The suite passes in CI, one test per Done-when line except the working day, which is checked in the epic's Notes."
 covers = ["R1", "R2"]
-after = [5]
+after = [5, 3]
 hitl = false
 risk = "low"
