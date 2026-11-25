@@ -35,3 +35,5 @@ private one-off token Job. Keep the existing defaults, token design, and schedul
   round trip, and Compose regression passed. The full Python suites passed 1,088 tests each.
 - This plan records the fixture wiring. Actual Claude Code and Codex acceptance remains with
   the separate verifier after merge.
+
+- The opening review identified unnecessary CI development dependencies. The Helm bridge smoke uses runtime dependencies only.

@@ -111,5 +111,5 @@ jobs:
             --context "kind-$cluster" --namespace plotroom-ci --release plotroom --image-tag helm-ci
           python3 deploy/helm/backup_smoke.py --kubeconfig "$KUBECONFIG" \
             --context "kind-$cluster" --namespace backup-ci --release backups --image-tag helm-ci
-          uv run --locked python -m deploy.helm.bridge_smoke --kubeconfig "$KUBECONFIG" \
+          uv run --locked --no-dev python -m deploy.helm.bridge_smoke --kubeconfig "$KUBECONFIG" \
             --context "kind-$cluster" --namespace bridge-ci --release bridge --image-tag helm-ci
