@@ -9,6 +9,7 @@ responses are relayed as they arrive. Stdout carries protocol only; logs go to s
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import ipaddress
 import json
 import logging
@@ -186,6 +187,7 @@ class StdioProxy:
         self._stdin_fd = _pipe_fd(self._stdin) if stdin is None else None
         self._input_ready = asyncio.Event()
         self._stdout = stdout if stdout is not None else sys.stdout.buffer
+        self._stdout_fd = _pipe_fd(self._stdout) if stdout is None else None
         self._http = http
         self._https_bearer_transport: httpx.AsyncHTTPTransport | None = None
         if (
@@ -267,6 +269,11 @@ class StdioProxy:
         # named FIFO can signal readability while its reader is still open.
         loop = asyncio.get_running_loop()
         output_fd = _pipe_fd(self._stdout, anonymous_only=sys.platform == "darwin")
+        if (
+            output_fd is not None
+            and fcntl.fcntl(output_fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_WRONLY
+        ):
+            output_fd = None  # a read/write FIFO can become readable from our own output
 
         def output_closed() -> None:
             assert output_fd is not None
@@ -548,8 +555,15 @@ class StdioProxy:
 
     def _write_blocking(self, payload: bytes) -> None:
         """Runs off the event loop: a client that stops reading must not stall forwarding."""
-        self._stdout.write(payload + b"\n")
-        self._stdout.flush()
+        line = payload + b"\n"
+        if (fd := self._stdout_fd) is None:
+            self._stdout.write(line)
+            self._stdout.flush()
+            return
+        # A failed buffered flush can leave data for interpreter shutdown to retry.
+        remaining = memoryview(line)
+        while remaining:
+            remaining = remaining[os.write(fd, remaining) :]
 
 
 class EndpointError(ValueError):

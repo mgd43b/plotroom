@@ -6,10 +6,13 @@ Every wait is on state the server itself reports (``SlowState``), never on a sle
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
 import subprocess
 import sys
 from collections.abc import AsyncGenerator
+from textwrap import dedent
 
 import pytest
 
@@ -114,11 +117,15 @@ async def test_closing_stdout_ends_the_proxy_while_stdin_is_still_open(
     try:
         # Split a message across pipe reads and exceed the default asyncio line limit.
         prefix = b" " * (128 * 1024)
-        await asyncio.to_thread(stdin.write, prefix)
         first = modern_call(1, "fast", {"label": "before disconnect"})
-        stdin.write(json.dumps(first).encode() + b"\n")
-        stdin.flush()
+
+        def send_first() -> None:
+            stdin.write(prefix)
+            stdin.write(json.dumps(first).encode() + b"\n")
+            stdin.flush()
+
         async with asyncio.timeout(POLL_TIMEOUT):
+            await asyncio.to_thread(send_first)
             answer = json.loads(await asyncio.to_thread(stdout.readline))
         assert answer["id"] == 1
         assert answer["result"]["isError"] is False
@@ -157,3 +164,57 @@ async def test_stdin_eof_drains_the_final_unterminated_message(
     finally:
         await proxy.close()
     assert proxy.process.returncode == 0
+
+
+async def test_disconnecting_during_a_blocked_stdout_write_exits_cleanly(
+    slow: tuple[SlowState, str],
+) -> None:
+    _, url = slow
+    script = dedent("""
+        import sys
+        from plotroom.adapters.mcp.proxy import StdioProxy
+        from plotroom.app.cli import main
+
+        write = StdioProxy._write_blocking
+
+        def mark_write(proxy, payload):
+            print("writing response", file=sys.stderr, flush=True)
+            write(proxy, payload)
+
+        StdioProxy._write_blocking = mark_write
+        raise SystemExit(main(sys.argv[1:]))
+    """)
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "rb") as reader, os.fdopen(write_fd, "wb") as writer:
+        os.set_blocking(write_fd, False)
+        with contextlib.suppress(BlockingIOError):
+            while True:
+                os.write(write_fd, b"x" * 4096)
+        os.set_blocking(write_fd, True)
+        child = await asyncio.to_thread(
+            subprocess.Popen,
+            [sys.executable, "-c", script, "connect", "--stdio", "--url", url],
+            stdin=subprocess.PIPE,
+            stdout=writer,
+            stderr=subprocess.PIPE,
+            env=child_env(),
+        )
+        writer.close()
+        assert child.stdin is not None
+        assert child.stderr is not None
+        stdin, stderr = child.stdin, child.stderr
+        try:
+            stdin.write(json.dumps(modern_call(1, "fast", {"label": "blocked"})).encode() + b"\n")
+            stdin.flush()
+            async with asyncio.timeout(POLL_TIMEOUT):
+                assert await asyncio.to_thread(stderr.readline) == b"writing response\n"
+            reader.close()  # the child has entered its write path and stdin stays open
+            assert await asyncio.to_thread(child.wait, timeout=5) == 0
+            assert not stdin.closed
+            assert b"BrokenPipeError" not in stderr.read()
+        finally:
+            if child.poll() is None:
+                child.kill()
+            await asyncio.to_thread(child.wait, timeout=5)
+            stdin.close()
+            stderr.close()
