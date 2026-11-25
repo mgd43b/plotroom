@@ -405,7 +405,12 @@ async def test_concurrent_local_tokens_stay_scoped_to_their_instances(
         first, second = await asyncio.gather(
             asyncio.to_thread(alpha.issue, "demo", "clerk"),
             asyncio.to_thread(beta.issue, "demo", "orchestrator"),
+            return_exceptions=True,
         )
+    if isinstance(first, BaseException):
+        raise first
+    if isinstance(second, BaseException):
+        raise second
     assert contended.is_set(), "both issuers must reach the shared registry lock"
     for registry, own, other, role in (
         (alpha, first, second, "clerk"),

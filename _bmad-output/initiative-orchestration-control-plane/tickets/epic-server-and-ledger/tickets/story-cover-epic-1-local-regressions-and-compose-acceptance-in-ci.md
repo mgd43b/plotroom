@@ -29,6 +29,7 @@ Add the three remaining specified local regressions from the refactor sweep and 
 
 ## References
 
+- Built: https://github.com/mgd43b/plotroom/pull/190
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-server-and-ledger/epic-server-and-ledger.md
 - https://github.com/mgd43b/plotroom/issues/26
 - https://github.com/mgd43b/plotroom/issues/27

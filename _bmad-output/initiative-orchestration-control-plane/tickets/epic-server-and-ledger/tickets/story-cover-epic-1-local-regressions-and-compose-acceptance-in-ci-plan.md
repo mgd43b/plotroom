@@ -3,7 +3,7 @@ title: Cover Epic 1 local regressions and Compose acceptance in CI
 type: chore
 ticket: 25
 created: '2026-11-24'
-status: in-review
+status: built
 baseline_revision: 'c239c33f67c5fce2d1911f6a60c14387e5722ed2'
 route: full
 route_source: auto
@@ -61,6 +61,16 @@ The second pass identified a remaining registry gap. The regression now checks
 that each issuer reads and writes within a single shared lock acquisition and that
 the kernel lock is held at both steps.
 
+The opening automatic Kodus review found one low-severity test cleanup issue.
+Both issuer threads now finish before the test restores its instrumentation.
+Any issuer exception still fails the test.
+
 ## Verification
 
 Run the focused tests, the locked Python 3.14 and 3.15 suites, and the image and Compose smoke with a unique local project. Verify the exact PR head in CI and repeat the Compose acceptance after merge.
+
+The focused suite passed 110 tests. The full locked suites passed 1,091 on each
+of Python 3.14 and 3.15. The revised shutdown and registry cases passed on both
+versions after independent review, as did Ruff, Pyright and the dependency check.
+The locally built Docker image passed project readiness, bearer reuse, durable
+decision and bridge delivery checks. The named fixture volume was removed.
