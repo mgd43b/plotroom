@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import ssl
+import sys
 import threading
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -1206,6 +1208,34 @@ async def test_a_vanished_client_stops_every_pending_call() -> None:
     )
     await asyncio.wait_for(proxy.run(), timeout=30)
     assert canceled == [2]
+
+
+async def test_buffered_stdio_messages_give_forwarding_tasks_a_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[int] = []
+
+    async def handle(http_request: httpx.Request) -> httpx.Response:
+        observed.append(json.loads(http_request.content)["params"]["marker"])
+        return httpx.Response(202)
+
+    read_fd, write_fd = os.pipe()
+    with (
+        os.fdopen(read_fd, "r", encoding="utf-8") as reader,
+        os.fdopen(write_fd, "wb") as writer,
+        monkeypatch.context() as patch,
+    ):
+        for marker in range(25):
+            notification = request("notifications/fixture", None, {"marker": marker})
+            ending = b"\n" if marker < 24 else b""
+            writer.write(json.dumps(notification).encode() + ending)
+        writer.close()
+        patch.setattr(sys, "stdin", reader)
+        async with client_for(handle) as http:
+            proxy = StdioProxy("http://daemon/mcp", stdout=Output(), http=http, max_pending=1)
+            await proxy.run()
+
+    assert observed == list(range(25))
 
 
 async def test_requests_refused_together_share_one_restart() -> None:

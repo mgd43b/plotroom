@@ -15,8 +15,8 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
@@ -116,36 +116,108 @@ async def probe_status(endpoint: LocalEndpoint, *, within: float = _PROBE_TIMEOU
         return None
 
 
-def logged_reason(log_path: Path, since: int) -> str | None:
-    """Why the daemon failed, from what it wrote to ``log_path`` after byte offset ``since``.
+def _log_paths(log_path: Path, backups: int) -> list[Path]:
+    """Return the retained files in age order, followed by the active log."""
+    numbered: list[tuple[int, Path]] = []
+    if backups:
+        prefix = log_path.name + "."
+        for path in log_path.parent.iterdir():
+            suffix = path.name.removeprefix(prefix)
+            if suffix != path.name and suffix.isascii() and suffix.isdecimal():
+                number = int(suffix)
+                if 1 <= number <= backups and suffix == str(number):
+                    numbered.append((number, path))
+    return [path for _, path in sorted(numbered, reverse=True)] + [log_path]
 
-    The last error it logged, with the last line of its traceback when it logged one; failing that,
-    the last line of output that is not a log line (an import error, a bare traceback).
-    """
+
+def _log_fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:
+    # Renaming a backup does not change these fields; a reused inode alone is not a match.
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+@dataclass(frozen=True)
+class LogCheckpoint:
+    active: os.stat_result | None
+    archived: frozenset[tuple[int, int, int, int]]
+    backups: int
+
+    @classmethod
+    def capture(cls, log_path: Path, backups: int) -> LogCheckpoint:
+        archived: set[tuple[int, int, int, int]] = set()
+        try:
+            active = log_path.stat()
+        except FileNotFoundError:
+            active = None
+        try:
+            for path in _log_paths(log_path, backups)[:-1]:
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISREG(info.st_mode):
+                    archived.add(_log_fingerprint(info))
+        except OSError:
+            # Incomplete backup metadata cannot establish which archives are old.
+            # Keep the active-file diagnostic and allow the daemon to start.
+            backups = 0
+        return cls(active, frozenset(archived), backups)
+
+
+def _startup_lines(log_path: Path, checkpoint: LogCheckpoint) -> Iterator[str]:
     try:
-        with log_path.open("rb") as handle:
-            # a file smaller than the offset was rolled since: all of it is newer
-            handle.seek(since if since <= os.fstat(handle.fileno()).st_size else 0)
-            text = handle.read().decode("utf-8", errors="replace")
+        paths = _log_paths(log_path, checkpoint.backups)
     except OSError:
-        return None
+        paths = [log_path]
+    for path in paths:
+        try:
+            flags = os.O_RDONLY | os.O_NONBLOCK
+            if path != log_path:
+                flags |= os.O_NOFOLLOW
+            fd = os.open(path, flags)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or _log_fingerprint(info) in checkpoint.archived:
+                    continue
+                with os.fdopen(fd, "rb", closefd=False) as handle:
+                    active = checkpoint.active
+                    # The original active file may now be a backup. Skip its old prefix even
+                    # there; a different active inode starts at byte zero regardless of its size.
+                    if (
+                        active is not None
+                        and os.path.samestat(info, active)
+                        and info.st_size >= active.st_size
+                    ):
+                        handle.seek(active.st_size)
+                    for line in handle:
+                        yield line.decode("utf-8", errors="replace")
+            finally:
+                os.close(fd)
+        except OSError:
+            continue
+
+
+def logged_reason(log_path: Path, checkpoint: LogCheckpoint | None = None) -> str | None:
+    """Return the last current error, or the last plain output line if no error was logged."""
     reason: str | None = None
     plain: str | None = None
-    for line in text.splitlines():
-        try:
-            entry: Any = json.loads(line)
-        except ValueError:
-            plain = line.strip() or plain
-            continue
-        if not isinstance(entry, dict):
-            continue
-        fields = cast("dict[str, Any]", entry)
-        if fields.get("level") in ("error", "critical"):
-            parts = [str(fields[key]) for key in ("msg", "reason") if fields.get(key)]
-            trace = str(fields.get("exc") or "").strip().splitlines()
-            if trace:
-                parts.append(trace[-1])
-            reason = ": ".join(parts) or reason
+    try:
+        for line in _startup_lines(log_path, checkpoint or LogCheckpoint(None, frozenset(), 0)):
+            try:
+                entry: Any = json.loads(line)
+            except ValueError:
+                plain = line.strip() or plain
+                continue
+            if not isinstance(entry, dict):
+                continue
+            fields = cast("dict[str, Any]", entry)
+            if fields.get("level") in ("error", "critical"):
+                parts = [str(fields[key]) for key in ("msg", "reason") if fields.get(key)]
+                trace = str(fields.get("exc") or "").strip().splitlines()
+                if trace:
+                    parts.append(trace[-1])
+                reason = ": ".join(parts) or reason
+    except OSError:
+        return None
     found = reason or plain
     return found[:400] if found else None
 
@@ -320,8 +392,10 @@ async def ensure_daemon(
     reason: str | None = None
     while True:
         await asyncio.to_thread(location.prepare)
-        offset = log_path.stat().st_size if log_path.exists() else 0
         try:
+            checkpoint = await asyncio.to_thread(
+                LogCheckpoint.capture, log_path, config.log_backups
+            )
             child = await asyncio.to_thread(
                 start_daemon, argv, child_env, config.data_dir, log_path
             )
@@ -341,7 +415,7 @@ async def ensure_daemon(
             if code is not None:
                 if not exited:  # read the log once per child, off the event loop
                     exited = True
-                    reason = await asyncio.to_thread(logged_reason, log_path, offset)
+                    reason = await asyncio.to_thread(logged_reason, log_path, checkpoint)
                     if code != EXIT_LOCKED:
                         why = reason or f"exited with code {code}"
                         raise UpstreamStartError(f"plotroom serve could not start: {why}")

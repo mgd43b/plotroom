@@ -6,10 +6,19 @@ Every wait is on state the server itself reports (``SlowState``), never on a sle
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import os
+import pty
+import subprocess
+import sys
 from collections.abc import AsyncGenerator
+from textwrap import dedent
+from typing import Any
 
 import pytest
 
+from conftest import child_env
 from rawproxy import ERAS, connected, modern_call, spawn_proxy
 from slow_server import POLL_TIMEOUT, SlowState, serving_slow
 
@@ -69,20 +78,24 @@ async def test_canceling_a_slow_call_ends_it_on_the_server_and_relays_nothing_fo
     assert state.finished == ["survivor"]
 
 
-async def test_closing_stdin_ends_the_proxy_even_with_a_listen_stream_open(
-    slow: tuple[SlowState, str],
-) -> None:
-    """Claude Code opens ``subscriptions/listen`` and never closes it; the proxy must still exit."""
-    _, url = slow
-    proxy = await spawn_proxy("--url", url)
+def listen_request() -> dict[str, Any]:
     listen = modern_call(1, "tools/call", {})
     listen["method"] = "subscriptions/listen"
     listen["params"] = {
         "notifications": {"toolsListChanged": True},
         "_meta": listen["params"]["_meta"],
     }
+    return listen
+
+
+async def test_closing_stdin_ends_the_proxy_even_with_a_listen_stream_open(
+    slow: tuple[SlowState, str],
+) -> None:
+    """Claude Code opens ``subscriptions/listen`` and never closes it; the proxy must still exit."""
+    _, url = slow
+    proxy = await spawn_proxy("--url", url)
     try:
-        proxy.send(listen)
+        proxy.send(listen_request())
         async with asyncio.timeout(POLL_TIMEOUT):
             while not any("subscriptionId" in str(m) for m in proxy.messages):
                 proxy.changed.clear()
@@ -91,3 +104,227 @@ async def test_closing_stdin_ends_the_proxy_even_with_a_listen_stream_open(
         # waits for the process to exit, which a held-open stream would prevent, and kills it if not
         await proxy.close()
     assert proxy.process.returncode == 0
+
+
+async def test_closing_stdout_ends_the_proxy_while_stdin_is_still_open(
+    slow: tuple[SlowState, str],
+) -> None:
+    state, url = slow
+    child = await asyncio.to_thread(
+        subprocess.Popen,
+        [sys.executable, "-m", "plotroom", "connect", "--stdio", "--url", url],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env=child_env(),
+    )
+    assert child.stdin is not None
+    assert child.stdout is not None
+    stdin, stdout = child.stdin, child.stdout
+    try:
+        # Split a message across pipe reads and exceed the default asyncio line limit.
+        prefix = b" " * (128 * 1024)
+        first = modern_call(1, "fast", {"label": "before disconnect"})
+
+        def send_first() -> None:
+            stdin.write(prefix)
+            stdin.write(json.dumps(first).encode() + b"\n")
+            stdin.flush()
+
+        async with asyncio.timeout(POLL_TIMEOUT):
+            await asyncio.to_thread(send_first)
+            answer = json.loads(await asyncio.to_thread(stdout.readline))
+        assert answer["id"] == 1
+        assert answer["result"]["isError"] is False
+        assert answer["result"]["content"] == [{"type": "text", "text": "before disconnect"}]
+
+        second = modern_call(2, "slow", {"label": "pending at disconnect"})
+        stdin.write(json.dumps(second).encode() + b"\n")
+        stdin.flush()
+        await state.until("started", "pending at disconnect")
+        stdout.close()
+        # Keep our write end open and send nothing until after the process has exited.
+        assert await asyncio.to_thread(child.wait, timeout=5) == 0
+        assert not stdin.closed
+        await state.until("canceled", "pending at disconnect")
+    finally:
+        if child.poll() is None:
+            child.kill()
+        await asyncio.to_thread(child.wait, timeout=5)
+        stdin.close()
+        stdout.close()
+
+
+async def test_closing_stdout_ends_the_proxy_while_terminal_stdin_is_open(
+    slow: tuple[SlowState, str],
+) -> None:
+    _, url = slow
+    master_fd, slave_fd = pty.openpty()
+    try:
+        child = await asyncio.to_thread(
+            subprocess.Popen,
+            [sys.executable, "-m", "plotroom", "connect", "--stdio", "--url", url],
+            stdin=slave_fd,
+            stdout=subprocess.PIPE,
+            env=child_env(),
+        )
+        assert child.stdout is not None
+        stdout = child.stdout
+        try:
+            first = modern_call(1, "fast", {"label": "from terminal"})
+            os.write(master_fd, json.dumps(first).encode() + b"\n")
+            async with asyncio.timeout(POLL_TIMEOUT):
+                answer = json.loads(await asyncio.to_thread(stdout.readline))
+            assert answer["result"]["content"] == [{"type": "text", "text": "from terminal"}]
+            stdout.close()  # the separate terminal master stays open
+            assert await asyncio.to_thread(child.wait, timeout=5) == 0
+        finally:
+            if child.poll() is None:
+                child.kill()
+            await asyncio.to_thread(child.wait, timeout=5)
+            stdout.close()
+    finally:
+        os.close(slave_fd)
+        os.close(master_fd)
+
+
+async def test_stdin_eof_drains_the_final_unterminated_message(
+    slow: tuple[SlowState, str],
+) -> None:
+    _, url = slow
+    proxy = await spawn_proxy("--url", url)
+    try:
+        stdin = proxy.process.stdin
+        assert stdin is not None
+        stdin.write(json.dumps(modern_call(1, "fast", {"label": "final line"})).encode())
+        await stdin.drain()
+        stdin.close()
+        answer = await proxy.answer(1)
+        assert answer["result"]["content"] == [{"type": "text", "text": "final line"}]
+    finally:
+        await proxy.close()
+    assert proxy.process.returncode == 0
+
+
+@pytest.mark.parametrize("outcome", ["disconnect", "resume", "stdin-eof", "partial-eof"])
+async def test_a_full_stdout_pipe_handles_client_shutdown_and_resumption(
+    slow: tuple[SlowState, str], outcome: str
+) -> None:
+    _, url = slow
+    script = dedent("""
+        import asyncio, os, sys
+        from plotroom.adapters.mcp.proxy import StdioProxy
+        from plotroom.app.cli import main
+
+        outcome, padding_bytes = sys.argv[1], int(sys.argv[2])
+        if outcome == "partial-eof":
+            emit = StdioProxy._emit
+
+            async def emit_large(proxy, message):
+                await emit(proxy, {**message, "fixture_padding": "p" * padding_bytes})
+
+            StdioProxy._emit = emit_large
+            finish_pipe_writes = StdioProxy._finish_pipe_writes
+
+            async def mark_partial_drain(proxy):
+                wait = asyncio.wait
+
+                async def mark_wait(tasks, **options):
+                    if proxy._partial_write in tasks:
+                        print("draining partial line", file=sys.stderr, flush=True)
+                    return await wait(tasks, **options)
+
+                asyncio.wait = mark_wait
+                try:
+                    await finish_pipe_writes(proxy)
+                finally:
+                    asyncio.wait = wait
+
+            StdioProxy._finish_pipe_writes = mark_partial_drain
+
+        raw_write = os.write
+
+        def report_full():
+            print("stdout full", file=sys.stderr, flush=True)
+
+        def mark_full(fd, data):
+            try:
+                return raw_write(fd, data)
+            except BlockingIOError:
+                if fd == sys.stdout.fileno():
+                    asyncio.get_running_loop().call_soon(report_full)
+                raise
+
+        os.write = mark_full
+        raise SystemExit(main(sys.argv[3:]))
+    """)
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "rb") as reader, os.fdopen(write_fd, "wb") as writer:
+        os.set_blocking(write_fd, False)
+        queued = 0
+        for padding in (b"x" * 4096, b"x"):
+            with contextlib.suppress(BlockingIOError):
+                while True:
+                    queued += os.write(write_fd, padding)
+        blocking = outcome in ("disconnect", "partial-eof")
+        os.set_blocking(write_fd, blocking)
+        padding_bytes = max(256 * 1024, queued * 4)
+        child = await asyncio.to_thread(
+            subprocess.Popen,
+            [
+                sys.executable,
+                "-c",
+                script,
+                outcome,
+                str(padding_bytes),
+                "connect",
+                "--stdio",
+                "--url",
+                url,
+            ],
+            stdin=subprocess.PIPE,
+            stdout=writer,
+            stderr=subprocess.PIPE,
+            env=child_env(),
+        )
+        assert child.stdin is not None
+        assert child.stderr is not None
+        stdin, stderr = child.stdin, child.stderr
+        try:
+            message = (
+                listen_request()
+                if outcome in ("stdin-eof", "partial-eof")
+                else modern_call(1, "fast", {"label": "blocked"})
+            )
+            stdin.write(json.dumps(message).encode() + b"\n")
+            stdin.flush()
+            async with asyncio.timeout(POLL_TIMEOUT):
+                assert await asyncio.to_thread(stderr.readline) == b"stdout full\n"
+                assert os.get_blocking(write_fd) is blocking
+                writer.close()
+                if outcome == "disconnect":
+                    reader.close()  # the child entered its write path and stdin stays open
+                elif outcome in ("resume", "partial-eof"):
+                    assert await asyncio.to_thread(reader.read, queued) == b"x" * queued
+                    if outcome == "partial-eof":
+                        assert await asyncio.to_thread(stderr.readline) == b"stdout full\n"
+                        stdin.close()
+                        assert (
+                            await asyncio.to_thread(stderr.readline) == b"draining partial line\n"
+                        )
+                        answer = json.loads(await asyncio.to_thread(reader.readline))
+                        assert answer["fixture_padding"] == "p" * padding_bytes
+                    else:
+                        answer = json.loads(await asyncio.to_thread(reader.readline))
+                        assert answer["result"]["content"] == [{"type": "text", "text": "blocked"}]
+                        stdin.close()
+                else:
+                    stdin.close()  # stdout stays full and its read end stays open
+            assert await asyncio.to_thread(child.wait, timeout=5) == 0
+            assert stdin.closed == (outcome != "disconnect")
+            assert b"BrokenPipeError" not in stderr.read()
+        finally:
+            if child.poll() is None:
+                child.kill()
+            await asyncio.to_thread(child.wait, timeout=5)
+            stdin.close()
+            stderr.close()

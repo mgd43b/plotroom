@@ -9,16 +9,19 @@ responses are relayed as they arrive. Stdout carries protocol only; logs go to s
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import ipaddress
 import json
 import logging
+import os
 import re
 import socket
 import ssl
+import stat
 import struct
 import sys
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping
+from contextlib import aclosing, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO, Protocol, cast
 from urllib.parse import urlsplit, urlunsplit
@@ -32,6 +35,7 @@ log = logging.getLogger("plotroom.proxy")
 JSONRPC_INTERNAL_ERROR = -32603
 LISTEN_METHOD = "subscriptions/listen"  # 2026 era: a request whose stream ends only when canceled
 DEFAULT_MAX_PENDING = 256
+_PARTIAL_LINE_DRAIN_SECONDS = 1.0
 _BASE_HEADERS = {
     "content-type": "application/json",
     "accept": "application/json, text/event-stream",
@@ -144,6 +148,41 @@ def _error_response(request_id: Any, message: str) -> dict[str, Any]:
     }
 
 
+def _pipe_fd(stream: BinaryIO, *, anonymous_only: bool = False) -> int | None:
+    try:
+        fd = stream.fileno()
+        info = os.fstat(fd)
+        if stat.S_ISFIFO(info.st_mode) and (not anonymous_only or info.st_nlink == 0):
+            return fd
+        return None
+    except OSError, ValueError:
+        return None
+
+
+def _input_fd(stream: BinaryIO) -> int | None:
+    try:
+        fd = stream.fileno()
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or os.isatty(fd):
+            return fd
+    except OSError, ValueError:
+        pass
+    return None
+
+
+@contextmanager
+def _nonblocking(fd: int) -> Generator[None]:
+    # Do not share a changed status flag with the launcher while waiting for readiness.
+    blocking = os.get_blocking(fd)
+    if blocking:
+        os.set_blocking(fd, False)
+    try:
+        yield
+    finally:
+        if blocking:
+            os.set_blocking(fd, True)
+
+
 class StdioProxy:
     """Relays newline-delimited JSON-RPC between a client's stdio and the daemon's HTTP endpoint."""
 
@@ -168,8 +207,13 @@ class StdioProxy:
         self._max_pending = max_pending
         self._tasks: set[asyncio.Task[None]] = set()
         self._orphaned_writes: set[asyncio.Future[None]] = set()
+        self._partial_write: asyncio.Future[None] | None = None
         self._stdin = stdin if stdin is not None else sys.stdin.buffer
+        # Built-in process input has no earlier buffered reads. Injected streams retain readline().
+        self._stdin_fd = _input_fd(self._stdin) if stdin is None else None
+        self._input_ready = asyncio.Event()
         self._stdout = stdout if stdout is not None else sys.stdout.buffer
+        self._stdout_fd = _pipe_fd(self._stdout) if stdout is None else None
         self._http = http
         self._https_bearer_transport: httpx.AsyncHTTPTransport | None = None
         if (
@@ -193,8 +237,56 @@ class StdioProxy:
         self._starting: asyncio.Task[_Endpoint | None] | None = None
         self._ready = ensure is None
 
+    async def _input_lines(self) -> AsyncGenerator[bytes]:
+        fd = self._stdin_fd
+        if fd is None:
+            while not self._gone and (line := await asyncio.to_thread(self._stdin.readline)):
+                yield line
+            return
+
+        loop = asyncio.get_running_loop()
+        try:
+            loop.add_reader(fd, self._input_ready.set)
+            pending = bytearray()
+            turn = asyncio.Event()
+
+            async def let_forwarding_run() -> None:
+                # Give forwarding tasks and their done callbacks a turn.
+                loop.call_soon(turn.set)
+                await turn.wait()
+                turn.clear()
+
+            while not self._gone:
+                await self._input_ready.wait()
+                self._input_ready.clear()
+                if self._gone:
+                    break
+                try:
+                    with _nonblocking(fd):
+                        chunk = os.read(fd, 64 * 1024)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    if pending:
+                        await let_forwarding_run()
+                        if not self._gone:
+                            yield bytes(pending)  # readline also returns an unterminated line
+                    break
+                first, *rest = chunk.split(b"\n")
+                pending.extend(first)
+                if rest:
+                    yield bytes(pending)
+                    for line in rest[:-1]:
+                        await let_forwarding_run()
+                        if self._gone:
+                            return
+                        yield line
+                    pending = bytearray(rest[-1])
+        finally:
+            loop.remove_reader(fd)
+
     async def run(self) -> None:
-        """Read messages until stdin closes, then let in-flight calls finish."""
+        """Drain in-flight calls on input EOF and abort them if stdout disconnects."""
         owned = self._http is None
         http = self._http or httpx.AsyncClient(
             transport=self._https_bearer_transport,
@@ -202,28 +294,47 @@ class StdioProxy:
             trust_env=self._bearer is None,
         )
         tasks = self._tasks
+        # The selector reports an EOF/error on a pipe's write end when the peer closes it
+        # (the same read-side watch used by asyncio's Unix write-pipe transport). On macOS a
+        # named FIFO can signal readability while its reader is still open.
+        loop = asyncio.get_running_loop()
+        output_fd = _pipe_fd(self._stdout, anonymous_only=sys.platform == "darwin")
+        if (
+            output_fd is not None
+            and fcntl.fcntl(output_fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_WRONLY
+        ):
+            output_fd = None  # a read/write FIFO can become readable from our own output
+
+        def output_closed() -> None:
+            assert output_fd is not None
+            loop.remove_reader(output_fd)
+            self._client_gone()
+
         try:
-            while line := await asyncio.to_thread(self._stdin.readline):
-                body = line.strip()
-                if not body:
-                    continue
-                try:
-                    message: Any = json.loads(body)
-                except ValueError:  # bad JSON or invalid UTF-8
-                    log.error("dropped a line that is not JSON")
-                    continue
-                if not isinstance(message, dict):
-                    log.error("dropped a message that is not a JSON object")
-                    continue
-                if self._gone:
-                    break
-                if self._over_limit(message):  # pyright: ignore[reportUnknownArgumentType]
-                    self._reject_busy(message)  # pyright: ignore[reportUnknownArgumentType]
-                    continue
-                task = self._dispatch(http, body, message)  # pyright: ignore[reportUnknownArgumentType]
-                if task is not None:
-                    tasks.add(task)
-                    task.add_done_callback(tasks.discard)
+            if output_fd is not None:
+                loop.add_reader(output_fd, output_closed)
+            async with aclosing(self._input_lines()) as lines:
+                async for line in lines:
+                    body = line.strip()
+                    if not body:
+                        continue
+                    try:
+                        message: Any = json.loads(body)
+                    except ValueError:  # bad JSON or invalid UTF-8
+                        log.error("dropped a line that is not JSON")
+                        continue
+                    if not isinstance(message, dict):
+                        log.error("dropped a message that is not a JSON object")
+                        continue
+                    if self._gone:
+                        break
+                    if self._over_limit(message):  # pyright: ignore[reportUnknownArgumentType]
+                        self._reject_busy(message)  # pyright: ignore[reportUnknownArgumentType]
+                        continue
+                    task = self._dispatch(http, body, message)  # pyright: ignore[reportUnknownArgumentType]
+                    if task is not None:
+                        tasks.add(task)
+                        task.add_done_callback(tasks.discard)
             # stdin closed: the client is shutting down. A listen stream has no end of its own, so
             # it would hold this process open forever; every other call may still be answered.
             for stream in self._streams:
@@ -231,8 +342,31 @@ class StdioProxy:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
         finally:
-            if owned:
-                await http.aclose()
+            if output_fd is not None:
+                loop.remove_reader(output_fd)
+            try:
+                if self._stdout_fd is not None:
+                    await self._finish_pipe_writes()
+            finally:
+                if owned:
+                    await http.aclose()
+
+    async def _finish_pipe_writes(self) -> None:
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+
+        # After EOF, ordinary replies have drained. Drop unused canceled writes, but
+        # let a line already on the wire finish if the reader is still consuming it.
+        partial = self._partial_write
+        for write in self._orphaned_writes:
+            if write is not partial:
+                write.cancel()
+        if partial is not None and not self._gone:
+            await asyncio.wait({partial}, timeout=_PARTIAL_LINE_DRAIN_SECONDS)
+        for write in self._orphaned_writes:
+            write.cancel()
+        await asyncio.gather(*self._orphaned_writes, return_exceptions=True)
 
     def _over_limit(self, message: Mapping[str, Any]) -> bool:
         """Too much work is pending; a cancel still gets through, since it frees work."""
@@ -427,6 +561,7 @@ class StdioProxy:
     def _client_gone(self) -> None:
         """Nobody reads stdout any more: abort every call, so the server stops working for them."""
         self._gone = True
+        self._input_ready.set()
         for task in list(self._tasks):
             task.cancel()
 
@@ -450,8 +585,8 @@ class StdioProxy:
         await self._write(json.dumps(message, separators=(",", ":")).encode())
 
     async def _write(self, payload: bytes) -> None:
-        # Shielded: a cancelled caller must not release the lock while the thread still writes.
-        # The write it leaves behind still counts toward the pending limit until it finishes.
+        # A canceled caller must not release the lock while its protocol line is still being
+        # written. The write it leaves behind counts toward the pending limit until it finishes.
         write = asyncio.ensure_future(self._locked_write(payload))
         try:
             await asyncio.shield(write)
@@ -464,14 +599,39 @@ class StdioProxy:
     async def _locked_write(self, payload: bytes) -> None:
         async with self._write_lock:
             try:
-                await asyncio.to_thread(self._write_blocking, payload)
+                if (fd := self._stdout_fd) is None:
+                    await asyncio.to_thread(self._write_blocking, payload)
+                else:
+                    await self._write_pipe(fd, payload + b"\n")
             except BrokenPipeError:
                 log.error("stdout closed; the client is gone")
                 self._client_gone()
-                raise
+
+    async def _write_pipe(self, fd: int, line: bytes) -> None:
+        # Write directly so an interrupted flush cannot leave bytes for Python to retry at exit.
+        loop = asyncio.get_running_loop()
+        ready = asyncio.Event()
+        remaining = memoryview(line)
+        try:
+            while remaining:
+                try:
+                    with _nonblocking(fd):
+                        written = os.write(fd, remaining)
+                    remaining = remaining[written:]
+                    if remaining:
+                        self._partial_write = asyncio.current_task()
+                except BlockingIOError:
+                    loop.add_writer(fd, ready.set)
+                    try:
+                        await ready.wait()
+                        ready.clear()
+                    finally:
+                        loop.remove_writer(fd)
+        finally:
+            self._partial_write = None
 
     def _write_blocking(self, payload: bytes) -> None:
-        """Runs off the event loop: a client that stops reading must not stall forwarding."""
+        """Runs off the event loop for streams outside the process pipe path."""
         self._stdout.write(payload + b"\n")
         self._stdout.flush()
 
