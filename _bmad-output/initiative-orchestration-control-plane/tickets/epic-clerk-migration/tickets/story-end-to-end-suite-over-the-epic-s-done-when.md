@@ -4,7 +4,7 @@ type: story
 title: "End-to-end suite over the epic's Done when"
 parent: epic-clerk-migration
 covers: [R1, R2]
-after: [5]
+after: [5, 3]
 hitl: false
 risk: low
 tracker_id: "113"

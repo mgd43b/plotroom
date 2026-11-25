@@ -269,8 +269,8 @@ type = "story"
 title = "End-to-end suite over the epic's Done when"
 description = "One suite runs every Done-when check of this epic against a real daemon, locally and in the container, and runs in CI."
 verify = "The suite passes in CI against a local daemon and the compose stack, one test per Done-when line."
-covers = ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R11"]
-after = [12, 10]
+covers = ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11"]
+after = [12, 10, 11]
 hitl = false
 risk = "low"
 

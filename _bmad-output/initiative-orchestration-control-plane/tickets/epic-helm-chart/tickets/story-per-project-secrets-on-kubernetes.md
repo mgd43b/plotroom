@@ -4,7 +4,7 @@ type: story
 title: "Per-project secrets on Kubernetes"
 parent: epic-helm-chart
 covers: [R1]
-after: [1, 2.6]
+after: [1, 2.6, 2.2]
 hitl: false
 risk: medium
 tracker_id: "122"

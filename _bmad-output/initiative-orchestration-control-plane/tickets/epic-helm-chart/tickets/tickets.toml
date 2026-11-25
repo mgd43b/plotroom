@@ -18,7 +18,7 @@ title = "Per-project secrets on Kubernetes"
 description = "The chart mounts per-project secrets (GitHub App key, PAT, embedder key) from Kubernetes Secrets as the secret files plotroom reads, and never renders a secret value into the ConfigMap."
 verify = "A kind install with a Secret for an App key polls the test repository with the App, and helm template output contains no secret value."
 covers = ["R1"]
-after = [1, "2.6"]
+after = [1, "2.6", "2.2"]
 hitl = false
 risk = "medium"
 
