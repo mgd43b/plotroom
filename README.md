@@ -23,7 +23,8 @@ Plotroom moves that state out of the conversation and into a ledger every sessio
   orchestrator before the work collides.
 - **One attention queue.** `next()` ranks what needs the orchestrator: overlaps, lanes waiting on
   someone, PRs ready to merge, stale questions to the human, actions nobody owns. `wait()` blocks
-  until something changes, so agents don't poll.
+  until something changes or its timeout passes, so agents don't poll. On a timeout it returns
+  just a cursor; call `wait()` again with that cursor to keep watching.
 - **Merge readiness you can check.** `merge_gate(pr)` judges a PR at its exact head: its checks,
   open review threads, main's CI, a stale base and closing keywords. A refusal goes to the lane
   that owns the PR. A person or a clerk session does the merge.
@@ -37,8 +38,9 @@ Plotroom moves that state out of the conversation and into a ledger every sessio
 - **Triggers.** `trigger` fires once, or every time, a condition holds (a PR merges, or main goes
   green with its images built). It can message a worker, notify the orchestrator, mark a lane or
   propose archiving it.
-- **Spend caps.** `budget_open` registers a run's cap. Plotroom raises items at 50% and 80% and
-  stops the lane at 100%.
+- **Spend caps.** `budget_open` registers a run's cap. As a usage meter reports the run's spend,
+  Plotroom raises items at 50% and 80% of the cap and, at 100%, sends the lane a stop request and
+  tells the orchestrator. The first provider meter is still to come (see Status).
 - **Search.** `search` covers messages, turn reports, decisions, asks, issue comments and PR bodies,
   with full-text search by default and search by meaning when you configure an embedding endpoint.
 
@@ -50,16 +52,18 @@ instances serve MCP over HTTP. Workers on a Switchboard relay reach it through `
 An orchestrator starts two lanes, and both workers decide to touch the same fixture:
 
 ```text
-orchestrator  lane_start(lane="api",   worker="agent",  branch="feat/api",   ...)
-orchestrator  lane_start(lane="tests", worker="tester", branch="feat/tests", ...)
-agent         claim(lane="api",   globs=["src/api/**", "tests/fixtures/user.json"], reason="API change")
-tester        claim(lane="tests", globs=["tests/fixtures/*.json"],               reason="test update")
+orchestrator  lane_start(lane="api",   worker="agent",  branch="feat/api",   work_items=[], request_id="r1")
+orchestrator  lane_start(lane="tests", worker="tester", branch="feat/tests", work_items=[], request_id="r2")
+agent         claim(lane="api",   globs=["src/api/**", "tests/fixtures/user.json"], reason="API change",  request_id="r3")
+tester        claim(lane="tests", globs=["tests/fixtures/*.json"],               reason="test update", request_id="r4")
 
 orchestrator  next()
-              → { "kind": "claim_overlap", "subject_ref": ["api", "tests"], "state": "open", ... }
+              → { "ok": true, "data": { "items": [
+                  { "kind": "claim_overlap", "subject_ref": "[\"api\", \"tests\"]", "state": "open",
+                    "context": { "lanes": ["api", "tests"], "claims": [...], ... }, ... } ] } }
 ```
 
-The orchestrator settles who owns the fixture before either PR exists. If the agent's chat is
+Every command takes a `request_id`, so a retried call is recorded once. The orchestrator settles who owns the fixture before either PR exists. If the agent's chat is
 compacted or replaced, `snapshot()` still shows its lane, its claims and what it is waiting on.
 
 Every token is bound to one project and one role: `orchestrator`, `clerk`, `worker:<name>`,
@@ -113,17 +117,23 @@ data_dir = "plotroom-data"
 [projects.example.workers.agent]
 ```
 
-Start the daemon from the checkout, issue a token for each role, and point each MCP client at the
-stdio proxy:
+Start the daemon from the checkout. It runs in the foreground:
 
 ```sh
 uv run plotroom serve --config ../plotroom.toml
+```
+
+In a second terminal, from the same checkout, issue a token for each role:
+
+```sh
 uv run plotroom token issue --config ../plotroom.toml --project example --role orchestrator
 uv run plotroom token issue --config ../plotroom.toml --project example --role worker:agent
 ```
 
-Each client runs `uv run plotroom connect --stdio --config ../plotroom.toml --token-id <id>`, with
-the `token_id` issued for its role.
+Point each MCP client at the stdio proxy, with the checkout as the server command's working
+directory (or an absolute path to `--config`):
+`uv run plotroom connect --stdio --config ../plotroom.toml --token-id <id>`. Use the `token_id`
+issued for that client's role.
 
 - [Running Plotroom](docs/running.md): the local daemon, Docker Compose, the Helm chart on kind, and
   the Switchboard bridge.
