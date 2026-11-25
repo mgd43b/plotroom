@@ -70,6 +70,33 @@ async def test_a_retry_returns_the_first_result_and_runs_nothing(parts: Parts) -
     assert store.dump() == before
 
 
+async def test_withdrawn_writer_rule_refuses_receipt_replay(
+    parts: Parts, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger, store, fixture, _ = parts
+    first = await ledger.execute("orchestrator", "record_note", "req-1", NOTE)
+    assert not first.replayed
+    assert [event.kind for event in await ledger.events_after(0)] == [
+        "fixture.noted",
+        "core.record_note",
+    ]
+    before = store.dump()
+    rules = fixture.catalog.writer_rules
+    previous_rule_for = rules.rule_for
+
+    def rule_for(operation: str, family: str) -> WriterRule | None:
+        if (operation, family) == ("record_note", "orchestrator"):
+            return None
+        return previous_rule_for(operation, family)
+
+    monkeypatch.setattr(rules, "rule_for", rule_for)
+    with pytest.raises(LedgerError) as denied:
+        await ledger.execute("orchestrator", "record_note", "req-1", NOTE)
+    assert denied.value.code == "forbidden"
+    assert fixture.calls == ["n1"]
+    assert store.dump() == before
+
+
 async def test_the_role_is_part_of_the_key(parts: Parts) -> None:
     ledger, _, fixture, _ = parts
     await ledger.execute("orchestrator", "record_note", "req-1", NOTE)

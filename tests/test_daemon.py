@@ -404,18 +404,28 @@ async def test_cancelling_during_uvicorns_own_shutdown_waits_for_it_and_keeps_th
     publication = read_listener(config.data_dir)
     assert publication is not None
     assert publication.local_socket is not None
-    daemon.stop()  # uvicorn starts its graceful shutdown
-    await asyncio.wait_for(in_shutdown.wait(), timeout=30)
-    assert not await asyncio.to_thread(Path(publication.local_socket).parent.exists)
-    task.cancel()
-    task.cancel()  # a second cancel must not cut the shutdown short either
-    await asyncio.sleep(0)
-    assert not task.done(), "the daemon must wait for the shutdown to finish"
-    with pytest.raises(LockError):  # the directory is still owned
-        await Daemon(config).run()
-    finish.set()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=30)
+    port_file = config.data_dir / PORT_FILE_NAME
+    cancel_requested = False
+    try:
+        assert await asyncio.to_thread(port_file.is_file)
+        daemon.stop()  # uvicorn starts its graceful shutdown
+        await asyncio.wait_for(in_shutdown.wait(), timeout=30)
+        assert not await asyncio.to_thread(port_file.exists)
+        assert not await asyncio.to_thread(Path(publication.local_socket).parent.exists)
+        cancel_requested = True
+        task.cancel()
+        task.cancel()  # a second cancel must not cut the shutdown short either
+        await asyncio.sleep(0)
+        assert not task.done(), "the daemon must wait for the shutdown to finish"
+        with pytest.raises(LockError):  # the directory is still owned
+            await Daemon(config).run()
+    finally:
+        finish.set()
+        if cancel_requested:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=30)
+        else:
+            await stop(daemon, task)
     assert calls == 1
     again = Daemon(config)  # and it is free once the shutdown has completed
     task2, _ = await run_daemon(again)

@@ -4,17 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import fcntl
 import hashlib
 import json
 import os
 import stat
+from collections.abc import Generator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+from threading import Barrier, Event
 from typing import Any
 
 import httpx
 import pytest
 
 from conftest import Child, authenticated_client
+from plotroom.app import tokens as token_store
 from plotroom.app.cli import EXIT_CONFIG, EXIT_FAILURE, main
 from plotroom.app.lock import LOCK_FILE_NAME
 from plotroom.app.tokens import (
@@ -344,6 +350,79 @@ async def test_concurrent_token_writes_do_not_lose_credentials(tmp_path: Path) -
     assert set(entries) == {token.token_id for token in issued}
     assert select_local_token(tmp_path, issued[0].token_id) == issued[0].bearer
     assert select_local_token(tmp_path, issued[1].token_id) == issued[1].bearer
+
+
+async def test_concurrent_local_tokens_stay_scoped_to_their_instances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alpha, beta = TokenRegistry(tmp_path / "alpha"), TokenRegistry(tmp_path / "beta")
+    local = local_token_path()
+    contended = Event()
+    start = Barrier(2, action=contended.set)
+    operations: ContextVar[list[str] | None] = ContextVar("registry_operations", default=None)
+    lock = token_store._locked  # pyright: ignore[reportPrivateUsage]
+    read = token_store._read_local  # pyright: ignore[reportPrivateUsage]
+    write = token_store._write  # pyright: ignore[reportPrivateUsage]
+
+    @contextmanager
+    def contend(path: Path) -> Generator[None]:
+        if path != local:
+            with lock(path):
+                yield
+            return
+        start.wait(timeout=10)
+        with lock(path):
+            trace: list[str] = []
+            current = operations.set(trace)
+            try:
+                yield
+                assert trace == ["read", "write"]
+            finally:
+                operations.reset(current)
+
+    def record(operation: str) -> None:
+        trace = operations.get()
+        assert trace is not None, f"shared registry {operation} ran outside the lock"
+        # A separate file description must contend with the writer's kernel lock.
+        with local.with_suffix(".lock").open("rb") as handle, pytest.raises(BlockingIOError):
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        trace.append(operation)
+
+    def read_while_locked(path: Path) -> dict[str, dict[str, str]]:
+        if path == local:
+            record("read")
+        return read(path)
+
+    def write_while_locked(path: Path, records: dict[str, Any]) -> None:
+        if path == local:
+            record("write")
+        write(path, records)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(token_store, "_locked", contend)
+        patch.setattr(token_store, "_read_local", read_while_locked)
+        patch.setattr(token_store, "_write", write_while_locked)
+        first, second = await asyncio.gather(
+            asyncio.to_thread(alpha.issue, "demo", "clerk"),
+            asyncio.to_thread(beta.issue, "demo", "orchestrator"),
+            return_exceptions=True,
+        )
+    if isinstance(first, BaseException):
+        raise first
+    if isinstance(second, BaseException):
+        raise second
+    assert contended.is_set(), "both issuers must reach the shared registry lock"
+    for registry, own, other, role in (
+        (alpha, first, second, "clerk"),
+        (beta, second, first, "orchestrator"),
+    ):
+        directory = registry.path.parent
+        assert select_local_token(directory, None) == own.bearer
+        assert select_local_token(directory, own.token_id) == own.bearer
+        assert await registry.authenticate(own.bearer) == Identity("demo", role)
+        assert await registry.authenticate(other.bearer) is None
+        with pytest.raises(TokenError, match="no local token"):
+            select_local_token(directory, other.token_id)
 
 
 async def test_invalid_instance_file_fails_closed_and_recovers_on_replacement(
