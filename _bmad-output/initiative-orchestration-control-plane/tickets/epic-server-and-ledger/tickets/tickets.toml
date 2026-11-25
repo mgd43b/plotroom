@@ -241,6 +241,18 @@ hitl = false
 risk = "medium"
 
 [[entry]]
+id = 25
+type = "story"
+title = "Cover Epic 1 local regressions and Compose acceptance in CI"
+description = "Add the three remaining specified local regressions from the refactor sweep and carry existing real-daemon and verified Compose acceptance into CI. Use the completed Compose story and its local image harness. The first release, deferred sweep findings, and the full post-release suite retain their existing gates."
+verify = "During paused HTTP shutdown the port file is gone and the lock is held. Concurrent local-token updates for separate daemon instances preserve both records. Receipt replay after writer-rule withdrawal is refused without a new write. A real local daemon exposes and acknowledges a failed action. CI verifies project readiness, the same bearer, and the persisted fixture event across a Compose service restart on the same volume. Both Python checks and the image job pass."
+covers = ["R1", "R2", "R3", "R6", "R7", "R8", "R11", "R12"]
+after = [10]
+hitl = false
+risk = "low"
+references = ["https://github.com/mgd43b/plotroom/issues/26", "https://github.com/mgd43b/plotroom/issues/27", "https://github.com/mgd43b/plotroom/pull/183"]
+
+[[entry]]
 id = 12
 type = "story"
 title = "Refactor sweep"
