@@ -50,13 +50,29 @@ jobs:
         env:
           RELEASE_PREVIEW_TOKEN: ${{ github.token }}
         run: |
-          token_file=$(mktemp "$RUNNER_TEMP/release-please-token.XXXXXX")
-          trap 'rm -f "$token_file"' EXIT
-          printf '%s' "$RELEASE_PREVIEW_TOKEN" > "$token_file"
+          preview_dir=$(mktemp -d "$RUNNER_TEMP/release-please-preview.XXXXXX")
+          trap 'rm -rf "$preview_dir"' EXIT
+          printf '%s' "$RELEASE_PREVIEW_TOKEN" > "$preview_dir/token"
           unset RELEASE_PREVIEW_TOKEN
-          # Neutralize modern and legacy Actions commands in commit-derived text.
+
+          validated_sha=$(git rev-parse --verify HEAD)
+          verify_main_tip() {
+            local remote_main
+            remote_main=$(git ls-remote --exit-code origin refs/heads/main) || return 1
+            if [[ "$remote_main" != "$validated_sha"$'\trefs/heads/main' ]]; then
+              echo 'Main moved after checkout. Run a new release preview.' >&2
+              return 1
+            fi
+          }
+
+          verify_main_tip
+          preview_status=0
           "$RUNNER_TEMP/release-please/node_modules/.bin/release-please" release-pr --dry-run \
             --repo-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --target-branch main \
             --config-file release-please-config.json \
             --manifest-file .release-please-manifest.json \
-            --token "$token_file" 2>&1 | tr -d '\r' | sed -e 's/##\[/# #[/g' -e 's/^/| /'
+            --token "$preview_dir/token" > "$preview_dir/output" 2>&1 || preview_status=$?
+          verify_main_tip
+          # Neutralize modern and legacy Actions commands in commit-derived text.
+          tr -d '\r' < "$preview_dir/output" | sed -e 's/##\[/# #[/g' -e 's/^/| /'
+          exit "$preview_status"
