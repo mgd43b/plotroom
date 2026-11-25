@@ -121,6 +121,7 @@ OPEN_TABLE = (
     "| PR | Owner (lane) | Kind | Channel | State | After merge |\n"
     "|---|---|---|---|---|---|\n"
 )
+OPEN_TABLE_WITH_CLOSING_HASHES = OPEN_TABLE.replace("Open PRs", "Open PRs ##")
 EMPTY_OPEN_ROW = "| NONE | | | | | |\n"
 NUMBERED_OPEN_ROW = "| #41 | fixture | codex | coordinator-only | waiting | Review output |\n"
 
@@ -162,6 +163,8 @@ async def test_empty_open_pr_marker_imports_and_replays(
         NUMBERED_OPEN_ROW + EMPTY_OPEN_ROW,
         EMPTY_OPEN_ROW + "\n" + OPEN_TABLE + NUMBERED_OPEN_ROW,
         NUMBERED_OPEN_ROW + "\n" + OPEN_TABLE + EMPTY_OPEN_ROW,
+        EMPTY_OPEN_ROW + "\n" + OPEN_TABLE_WITH_CLOSING_HASHES + NUMBERED_OPEN_ROW,
+        NUMBERED_OPEN_ROW + "\n" + OPEN_TABLE_WITH_CLOSING_HASHES + EMPTY_OPEN_ROW,
     ],
 )
 def test_refuses_ambiguous_empty_open_pr_marker(body: str) -> None:

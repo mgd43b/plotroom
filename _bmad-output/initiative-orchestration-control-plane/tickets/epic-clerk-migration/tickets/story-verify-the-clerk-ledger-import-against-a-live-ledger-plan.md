@@ -40,6 +40,10 @@ Classify the observed ledger structurally and verify the importer with synthetic
 
 - Independent quick review found no actionable issues in the parser or regressions. Thirteen supplemental synthetic parser checks covered standalone, malformed, repeated and mixed markers and existing numbered and pending forms.
 
+- Medium, opening Kodus review. A second Open PRs heading with ATX closing hashes escaped the empty-marker ambiguity guard. The guard now checks for markers under either heading form and synthetic fixtures prove both mixed cases.
+
+- Independent follow-up found the inverse marker placement while reviewing the first correction. The final guard covers either placement, and the follow-up verified 14 synthetic parser checks with legacy outcomes preserved.
+
 ## Verification
 
 - Given the verified table shape, when the importer reads the empty marker, then it produces zero typed PRs. A separate valid skip row still yields a skip advisory.
@@ -47,3 +51,4 @@ Classify the observed ledger structurally and verify the importer with synthetic
 - Recheck the frozen ledger with the parser locally and retain only the supported shape and aggregate result.
 - Run `uv run --locked python -m pytest -q tests/test_clerk_import.py tests/test_clerk_pilot.py`. Compare results of two synthetic CLI imports and persisted state in a disposable daemon.
 - The focused importer/pilot suite and disposable CLI re-check passed together, 33 tests.
+- After the review follow-up, 35 focused tests including both disposable CLI cases passed on each locked Python version.
