@@ -32,3 +32,4 @@ Verify: With two projects and a fixture orchestrator-only command, an orchestrat
 - Hands on from #15 (PRs #50, #92): event kinds and commands register in core/catalog.py build_catalog(); an event's source must equal its kind's prefix; a duplicate returns the stored event whatever its fields, only after role, kind and source pass; migration 0002 carries CHECK(seq > 0) and CHECK(json_valid(fields)), and the next revision's parent is 0002; Ledger.execute checks no role yet. This story adds command authorization to Ledger.execute.
 - Built: https://github.com/mgd43b/plotroom/pull/134
 - The real-client bare-401 results are recorded in the Server and ledger epic Notes.
+- An agent performed the independent real-client bare-401 observations in the Server and ledger epic Notes. [Merged evidence PR #181](https://github.com/mgd43b/plotroom/pull/181). Matt will decide whether to accept this evidence or repeat the check by hand.

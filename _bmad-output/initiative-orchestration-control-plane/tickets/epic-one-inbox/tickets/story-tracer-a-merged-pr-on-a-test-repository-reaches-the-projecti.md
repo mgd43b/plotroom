@@ -20,7 +20,7 @@ The thinnest path through the GitHub side: a credential provider with a fine-gra
 
 ## Requirements
 
-Verify: Against the test repository, opening and merging a PR produces each github.* event once, and snapshot() shows the open-PR count rise and fall while the projection shows the PR merged at its head SHA; a daemon started on demand by the stdio proxy polls with the PAT from its secret file.
+Verify: Against the test repository, opening and merging a PR produces each github.* event once, and snapshot() shows the open-PR count rise and fall while the projection shows the PR merged at its head SHA; a daemon started on demand by the stdio proxy polls with the PAT from its secret file. On the same authorized dedicated repository with its scoped PAT, re-verify #32's head changes, close/reopen and restart/cursor continuity. Compare #37's default-branch ticket-tree mirror against a checkout and confirm #52's single PR-merge notification and already-merged creation behavior. For #40, verify lane-report projection and read existing GitHub deployment records on the dedicated test repository. If no suitable deployment record exists, record the missing live sample. Deployment remains deferred. Retain #32's simulated rate-limit check and the original fixture and role checks. Record a public-safe result for each issue.
 
 ## References
 

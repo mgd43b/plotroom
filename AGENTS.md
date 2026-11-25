@@ -39,6 +39,7 @@ the clerk's settings and how this bootstrap ends. The rules every session follow
   issues. A lane builds its ticket with `bmad-build`.
 - **No closing keywords** (`close`, `fix`, `resolve` with an issue number) in PRs or commits;
   write `Refs #n`. An issue closes after its work is verified.
+- **Epic closure.** Verify the epic’s Requirements and Done-when evidence, run `bmad-retrospective`, and record its verdict and follow-up dispositions in the epic folder before closing the epic or marking its canonical status done. Child closure alone is insufficient.
 - **What stays with the human (mgd43b):** production, legal, price and scope decisions, logins and
   publishing setup only they have (PyPI, ghcr.io), and paid-run caps. Each ask is one short,
   standalone, latest comment on their issue, with options.
