@@ -1,0 +1,62 @@
+name: Release preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  preview:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.4.0
+        with:
+          version: "0.13.8"
+      - name: Check the release version and lockfile
+        run: |
+          uv lock --check
+          uv run --no-project --python 3.14 python - <<'PY'
+          import json
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          lock = tomllib.loads(Path("uv.lock").read_text())
+          manifest = json.loads(Path(".release-please-manifest.json").read_text())
+          config = json.loads(Path("release-please-config.json").read_text())["packages"]["."]
+          package, = (
+              package for package in lock["package"]
+              if package["name"] == project["name"]
+              and package["source"].get("editable") == "."
+          )
+          if config["release-type"] != "python" or config["package-name"] != project["name"]:
+              raise SystemExit("Release Please must target the root Python project")
+          if not manifest["."] == project["version"] == package["version"]:
+              raise SystemExit("Release manifest, pyproject.toml, and editable uv.lock versions differ")
+          PY
+      - name: Install pinned Release Please CLI
+        run: |
+          npm install --prefix "$RUNNER_TEMP/release-please" \
+            --no-save --no-package-lock --ignore-scripts --no-audit --no-fund release-please@17.6.0
+      - name: Preview the candidate release pull request
+        shell: bash
+        env:
+          RELEASE_PREVIEW_TOKEN: ${{ github.token }}
+        run: |
+          token_file=$(mktemp "$RUNNER_TEMP/release-please-token.XXXXXX")
+          trap 'rm -f "$token_file"' EXIT
+          printf '%s' "$RELEASE_PREVIEW_TOKEN" > "$token_file"
+          unset RELEASE_PREVIEW_TOKEN
+          # Neutralize modern and legacy Actions commands in commit-derived text.
+          "$RUNNER_TEMP/release-please/node_modules/.bin/release-please" release-pr --dry-run \
+            --repo-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --target-branch main \
+            --config-file release-please-config.json \
+            --manifest-file .release-please-manifest.json \
+            --token "$token_file" 2>&1 | tr -d '\r' | sed -e 's/##\[/# #[/g' -e 's/^/| /'

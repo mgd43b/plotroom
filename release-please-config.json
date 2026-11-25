@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/v17.6.0/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "package-name": "plotroom",
+      "include-component-in-tag": false,
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name.value == \"plotroom\" && @.source.editable.value == \".\")].version"
+        }
+      ]
+    }
+  }
+}
