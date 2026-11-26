@@ -380,6 +380,101 @@ async def test_conflict_survives_lost_response_and_restart(tmp_path: Path, after
         await store.close()
 
 
+async def test_pattern_owner_receives_one_conflict_item(tmp_path: Path) -> None:
+    port = FixtureWrite()
+    store, ledger, runtime = await setup(tmp_path, FixedClock(), port, lane=False)
+    lane = Lane("feature", "worker1", (), "delivery", branch_pattern="work/*")
+    try:
+        await ledger.run("system", lambda uow: uow.save_lane(lane))
+        await observe(ledger, branch="work/83")
+        assert (await store.read_merge_gate(REPO, 7)).lane == lane
+        assert await runtime.stage_branch_update(7)
+        assert await runtime.run_one_action()
+        assert not await runtime.run_one_action()
+        assert port.calls == [KEY]
+
+        [item] = (await ledger.read_board("worker:worker1"))[1]
+        assert item.kind == BRANCH_UPDATE_CONFLICT
+        assert (item.role, item.subject_ref, item.context["lane"]) == (
+            "worker:worker1",
+            KEY,
+            lane.id,
+        )
+        assert item.suggested_actions
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+@pytest.mark.parametrize(
+    ("change", "owner"),
+    [
+        ("unchanged", "pattern"),
+        ("exact", "exact"),
+        ("ambiguous_pattern", None),
+        ("ambiguous_exact", None),
+        ("archived", None),
+        ("moved", None),
+    ],
+)
+async def test_recovered_conflict_routes_to_an_unambiguous_owner(
+    tmp_path: Path, change: str, owner: str | None
+) -> None:
+    clock, port = FixedClock(), FixtureWrite(lose_response=True)
+    branch = "topic/17"
+    pattern = Lane("pattern", "worker1", (), "topic/primary", branch_pattern="topic/*")
+    archived = Lane("old", "worker3", (), branch, state="archived", branch_pattern="topic/*")
+    exact = Lane("exact", "worker2", (), branch)
+    changes = {
+        "exact": (exact,),
+        "ambiguous_pattern": (
+            Lane("other", "worker2", (), "topic/secondary", branch_pattern="topic/*"),
+        ),
+        "ambiguous_exact": (exact, Lane("other", "worker3", (), branch)),
+        "archived": (replace(pattern, state="archived"),),
+    }
+
+    store, ledger, runtime = await setup(tmp_path, clock, port, lane=False)
+    try:
+        await ledger.run("system", lambda uow: uow.save_lane(pattern))
+        await ledger.run("system", lambda uow: uow.save_lane(archived))
+        await observe(ledger, branch=branch)
+        assert (await store.read_merge_gate(REPO, 7)).lane == pattern
+        assert await runtime.stage_branch_update(7)
+        assert await runtime.run_one_action()
+        assert (await ledger.read_board("orchestrator"))[1] == []
+    finally:
+        await ledger.stop()
+        await store.close()
+
+    store, ledger, runtime = await setup(tmp_path, clock, port, lane=False)
+    try:
+        for lane in changes.get(change, ()):
+            await ledger.run("system", lambda uow, lane=lane: uow.save_lane(lane))
+        if change == "moved":
+            await observe(ledger, branch=branch, head=NEXT, version=2)
+        else:
+            await observe(ledger, branch=branch, main=NEXT, overlap=False)
+        assert await runtime.run_one_action()
+        assert not await runtime.run_one_action()
+        assert (port.calls, port.lookups) == ([KEY], [KEY])
+        [item] = (await ledger.read_board("orchestrator"))[1]
+        assert (item.kind, item.subject_ref, item.context["lane"]) == (
+            BRANCH_UPDATE_CONFLICT,
+            KEY,
+            owner,
+        )
+        role = {"pattern": "worker:worker1", "exact": "worker:worker2"}.get(owner or "")
+        assert item.role == (role or "orchestrator")
+        for worker_role in ("worker:worker1", "worker:worker2", "worker:worker3"):
+            assert (await ledger.read_board(worker_role))[1] == (
+                [item] if role == worker_role else []
+            )
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
 async def test_live_runtime_skips_fixture_queue_and_frozen_action_resumes(tmp_path: Path) -> None:
     clock, port = FixedClock(), FixtureWrite()
     store, ledger, fixture = await setup(tmp_path, clock, port, lane=False)
