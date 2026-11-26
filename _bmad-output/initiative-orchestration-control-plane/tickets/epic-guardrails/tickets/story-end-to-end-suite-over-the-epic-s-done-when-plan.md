@@ -32,6 +32,10 @@ Cover each of Epic 8's two Done-when lines through the real local daemon. Count 
 
 - Independent review confirmed both Done-when paths and the fixture boundaries. Added a pre-cap action check and verified newer spend and timestamp after restart so replay assertions cannot pass by dropping the sample.
 
+- Opening review added checks immediately below 50%, 80%, and 100%, and cancellation-safe test daemon startup. The helper regression blocks both cleanup tasks until the test verifies startup is still pending.
+
 ## Verification
 
 - The neighboring suite passed 74 tests on each locked Python version. The two final acceptance tests passed on both versions after the review additions. Ruff, Pyright, and the dependency check passed.
+
+- After opening review, 96 affected tests passed on each locked Python version. The final two Epic 8 tests and the startup cleanup regression also passed on both versions.

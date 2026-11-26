@@ -55,12 +55,65 @@ def bearer(config: Config, project: str = "demo", role: str = "orchestrator") ->
 async def run_daemon(daemon: Daemon) -> tuple[asyncio.Task[None], int]:
     task = asyncio.create_task(daemon.run())
     started = asyncio.create_task(daemon.wait_started())
-    done, _ = await asyncio.wait({task, started}, return_when=asyncio.FIRST_COMPLETED)
-    if task in done:
+    try:
+        done, _ = await asyncio.wait({task, started}, return_when=asyncio.FIRST_COMPLETED)
+        if task in done:
+            task.result()
+            pytest.fail("the daemon exited before it started serving")
+        return task, started.result()
+    except BaseException:
+        task.cancel()
         started.cancel()
-        task.result()
-        pytest.fail("the daemon exited before it started serving")
-    return task, started.result()
+        await asyncio.gather(task, started, return_exceptions=True)
+        raise
+
+
+async def test_run_daemon_cleans_up_interrupted_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    daemon = Daemon(make_config(tmp_path))
+    running, waiting = asyncio.Event(), asyncio.Event()
+    daemon_cleanup, readiness_cleanup, release = (asyncio.Event() for _ in range(3))
+    finished: set[str] = set()
+
+    async def run() -> None:
+        running.set()
+        try:
+            await asyncio.Future[None]()
+        finally:
+            daemon_cleanup.set()
+            await release.wait()
+            finished.add("daemon")
+
+    async def wait_started() -> int:
+        waiting.set()
+        try:
+            return await asyncio.Future[int]()
+        finally:
+            readiness_cleanup.set()
+            await release.wait()
+            finished.add("readiness")
+
+    monkeypatch.setattr(daemon, "run", run)
+    monkeypatch.setattr(daemon, "wait_started", wait_started)
+    launch = asyncio.create_task(run_daemon(daemon))
+    try:
+        async with asyncio.timeout(5):
+            await running.wait()
+            await waiting.wait()
+            launch.cancel()
+            await daemon_cleanup.wait()
+            await readiness_cleanup.wait()
+            assert not launch.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await launch
+        assert finished == {"daemon", "readiness"}
+    finally:
+        release.set()
+        if not launch.done():
+            launch.cancel()
+            await asyncio.gather(launch, return_exceptions=True)
 
 
 async def stop(daemon: Daemon, task: asyncio.Task[None]) -> None:

@@ -141,6 +141,13 @@ async def wait_for_stops(ledger: Ledger, keys: set[str]) -> None:
             await committed.wait()
 
 
+async def assert_no_stop(ledger: Ledger, drain: ToolCall, relay_state: Path) -> None:
+    assert await ledger.pending_action() is None
+    assert not any(event.kind == "core.action_done" for event in await ledger.events_after(0))
+    assert (await drain("wait", timeout=0))["item"] is None
+    assert not (relay_state / "send-requests.jsonl").exists()
+
+
 async def test_budget_warns_at_50_and_80_and_stops_at_100_once(
     guardrails: GuardrailsFixture,
 ) -> None:
@@ -165,6 +172,9 @@ async def test_budget_warns_at_50_and_80_and_stops_at_100_once(
             )
             ids[worker] = opened["id"]
         for percent in (50, 80, 100):
+            await guardrails.observe((percent - 1) / 100)
+            assert all(item["kind"] != "budget" for item in (await call("next"))["items"])
+            await assert_no_stop(ledger, drain, guardrails.relay_state)
             await guardrails.observe(percent / 100)
             items = (await call("next"))["items"]
             assert Counter(
@@ -174,12 +184,7 @@ async def test_budget_warns_at_50_and_80_and_stops_at_100_once(
                 if item["kind"] == "budget":
                     await call("ack", request_id=f"ack-{item['id']}", item=item["id"])
             if percent < 100:
-                assert await ledger.pending_action() is None
-                assert not any(
-                    event.kind == "core.action_done" for event in await ledger.events_after(0)
-                )
-                assert (await drain("wait", timeout=0))["item"] is None
-                assert not (guardrails.relay_state / "send-requests.jsonl").exists()
+                await assert_no_stop(ledger, drain, guardrails.relay_state)
         stop_keys = {worker: f"budget:{budget}:100" for worker, budget in ids.items()}
         lease = await receiver.drain_one(drain_tools(drain))
         assert lease["action_key"] == stop_keys["desktop"]
