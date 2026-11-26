@@ -102,6 +102,10 @@ async def wait_for[T](
             return result
     except TimeoutError:
         raise AcceptanceError(message) from None
+    except asyncio.CancelledError:
+        # Preserve the active witness when the enclosing stage budget expires.
+        note("observer-wait-interrupted", reason=message)
+        raise
 
 
 async def fire_ids(store: SqliteStore, identifier: str) -> list[str]:
@@ -642,6 +646,9 @@ def main() -> int:
         state_path.write_text(json.dumps(state), encoding="utf-8")
     except AcceptanceError as exc:
         note("observer-stopped", stage=args.stage, reason=str(exc))
+        return 1
+    except TimeoutError:
+        note("observer-stopped", stage=args.stage, reason="observer stage exceeded its time budget")
         return 1
     except Exception as exc:
         note("observer-stopped", stage=args.stage, reason=type(exc).__name__)

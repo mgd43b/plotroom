@@ -1,5 +1,6 @@
 """Offline scope and evidence checks for the manual GitHub fixture observer."""
 
+import asyncio
 import importlib
 import sys
 from pathlib import Path
@@ -96,3 +97,15 @@ def test_check_state_recurrence_is_valid_but_adjacent_duplicate_is_refused(modul
     module.validate_check_events([first, work, requeued, done])
     with pytest.raises(module.AcceptanceError, match="duplicated check facts"):
         module.validate_check_events([first, work, check_event(5, "in_progress")])
+
+
+async def test_outer_budget_preserves_the_active_witness(
+    module: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def awaiting_evidence() -> None:
+        await asyncio.Future()
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0):
+            await module.wait_for(awaiting_evidence, "fixture thread was not observed")
+    assert "fixture thread was not observed" in capsys.readouterr().out
