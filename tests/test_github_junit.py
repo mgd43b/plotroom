@@ -8,6 +8,7 @@ import zipfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import create_autospec
 
 import httpx
 import pytest
@@ -38,9 +39,17 @@ from plotroom.adapters.github.junit_xml import MAX_XML, junit_evidence
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.catalog import build_catalog
-from plotroom.core.github_projection import CHECKS
+from plotroom.core.github_projection import CHECKS, GitHubRecord, GitHubResource
 from plotroom.core.ledger import Ledger
-from plotroom.core.merge_flakes import FLAKE_EVENT, MAIN_FLAKE_EVENT
+from plotroom.core.merge_flakes import (
+    FLAKE_EVENT,
+    MAIN_FLAKE_EVENT,
+    main_pairs,
+    prior_check_failures,
+    record_main_flakes,
+    record_same_head,
+)
+from plotroom.core.unit_of_work import UnitOfWork
 from test_merge_flakes import (
     FAILED_MAIN,
     FIRST,
@@ -548,6 +557,77 @@ async def test_unavailable_junit_preserves_independent_pass_annotations(
     assert len(blob.downloads) == 1
 
 
+@pytest.mark.parametrize("partial_metadata", [False, True])
+async def test_truncated_delayed_annotations_cannot_reuse_stale_success_evidence(
+    blob: ArchiveServer, partial_metadata: bool
+) -> None:
+    fixture = JUnitFixture(blob, "annotations", single_check=True)
+    api = GitHubReadClient(blob.origin, REPO)
+    shortened = False
+    annotation_reads = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal annotation_reads
+        path = request.url.path.removeprefix(f"/repos/{REPO}")
+        if path == "/check-runs/102/annotations":
+            annotation_reads += 1
+            return httpx.Response(
+                200, json=[passed_test("tests/test_same.py", "module::test_same")]
+            )
+        response = fixture.handle(request)
+        if shortened and path == f"/commits/{FIRST}/check-runs":
+            payload: dict[str, Any] = response.json()
+            row: dict[str, Any] = payload["check_runs"][0]
+            row["output"]["annotations_count"] = 2
+            if partial_metadata:
+                del row["app"], row["check_suite"], row["head_sha"]
+            return httpx.Response(200, json=payload)
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        failed = await fetch_checks(api, client, "fixture", FIRST)
+        fixture.step = 1
+        verified = await fetch_checks(api, client, "fixture", FIRST, failed)
+        assert verified.records[0].details["junit_evidence"] is True
+        shortened = True
+        for _ in range(2):
+            verified = await fetch_checks(api, client, "fixture", FIRST, verified)
+            success = verified.records[0]
+            assert success.details["junit_state"] == "unavailable"
+            assert "passed_tests" not in success.details
+            assert "junit_evidence" not in success.details
+            if partial_metadata:
+                assert "app_id" not in success.details
+                assert "suite_id" not in success.details
+                assert success.details["junit_prior_identity"] == {
+                    "app_id": 8,
+                    "suite_id": RUNS[FIRST],
+                }
+
+    assert annotation_reads == 2
+    assert len(blob.downloads) == 1
+    success = verified.records[0]
+    (failure,) = prior_check_failures(verified)
+    runs = tuple(
+        GitHubRecord(
+            recorded.key,
+            "workflow_run",
+            {
+                "head_sha": FIRST,
+                "jobs": [{**recorded.fields, "check_run_id": recorded.fields["id"]}],
+            },
+            details={"workflow_id": 40},
+        )
+        for recorded in (success, failure)
+    )
+    uow = create_autospec(UnitOfWork, instance=True)
+    uow.find_event.return_value = None
+    await record_same_head(uow, REPO, verified)
+    (pair,) = main_pairs(runs, {FIRST: verified})
+    await record_main_flakes(uow, REPO, pair, None)
+    uow.append.assert_not_awaited()
+
+
 async def test_shared_junit_budget_defers_other_heads_until_next_poll(blob: ArchiveServer) -> None:
     fixture = JUnitFixture(blob, single_check=True)
     api = GitHubReadClient(blob.origin, REPO)
@@ -628,6 +708,56 @@ async def test_detail_poll_rotates_optional_work_past_expiring_misses(
         await store.close()
     assert attempted[:3] == [105, 104, 101]
     assert set(attempted) == {105, 104, 101, 103, *extra_ids}
+
+
+async def test_budget_retries_last_check_after_its_initial_miss(
+    blob: ArchiveServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = JUnitFixture(blob, single_check=True)
+    identifiers = tuple(range(110, 110 + 2 * (JUNIT_MISS_REFRESHES + 1)))
+    last = identifiers[-1]
+    attempts: list[int] = []
+    uploaded = False
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path != f"/repos/{REPO}/commits/{FIRST}/check-runs":
+            return fixture.handle(request)
+        checks: list[dict[str, Any]] = []
+        for identifier in identifiers:
+            row = check(identifier, f"job-{identifier}", "failure", FIRST, 0)
+            row["app"]["slug"] = "github-actions"
+            row["check_suite"]["id"] = RUNS[FIRST]
+            checks.append(row)
+        return httpx.Response(200, json={"check_runs": checks, "total_count": len(checks)})
+
+    async def evidence(
+        _reader: JUnitReader, fields: dict[str, Any], _suite: int, *, passed: bool
+    ) -> list[dict[str, str]] | None:
+        identifier = fields["id"]
+        attempts.append(identifier)
+        if identifier == last and uploaded:
+            return [{"path": "test.py", "test_id": "module::test_late", "excerpt": "failed"}]
+        return None
+
+    monkeypatch.setattr(JUnitReader, "evidence", evidence)
+    previous: GitHubResource | None = None
+    api = GitHubReadClient(blob.origin, REPO)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        for _ in range(3 * len(identifiers)):
+            previous = await fetch_checks(
+                api, client, "fixture", FIRST, previous, junit_budget=JUnitBudget(attempts_left=1)
+            )
+            latest = previous.records[-1].details
+            if latest.get("junit_evidence") is True:
+                assert latest["annotations"][0]["test_id"] == "module::test_late"
+                break
+            if latest.get("junit_miss_remaining") == JUNIT_MISS_REFRESHES:
+                assert latest["annotations"] == []
+                uploaded = True
+        else:
+            pytest.fail("The delayed report never received a retry slot")
+    assert attempts[: len(identifiers)] == list(identifiers)
+    assert attempts.count(last) == 2
 
 
 TESTCASE = '<testcase classname="module" name="test" file="tests/test.py"/>'

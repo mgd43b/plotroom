@@ -81,12 +81,19 @@ def _same_check(failure: GitHubRecord, success: GitHubRecord) -> bool:
     app = failure.details.get("app_id")
     suite = failure.details.get("suite_id")
     same_head = failure.fields["head_sha"] == success.fields["head_sha"]
+    prior: dict[str, int] = success.details.get("junit_prior_identity", {}) if same_head else {}
     return failure.fields["name"] == success.fields["name"] and (
         failure.key == success.key
         or (
             app is not None
-            and app == success.details.get("app_id")
-            and (not same_head or (suite is not None and suite == success.details.get("suite_id")))
+            and app == success.details.get("app_id", prior.get("app_id"))
+            and (
+                not same_head
+                or (
+                    suite is not None
+                    and suite == success.details.get("suite_id", prior.get("suite_id"))
+                )
+            )
         )
     )
 
