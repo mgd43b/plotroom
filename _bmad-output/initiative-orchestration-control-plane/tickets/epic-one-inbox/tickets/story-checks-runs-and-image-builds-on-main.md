@@ -26,3 +26,13 @@ Verify: A CI run on a PR and on main produces one event per check state change, 
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
 - Built: https://github.com/mgd43b/plotroom/pull/147
+
+## Notes
+
+### Live fixture observations (2026-11-26)
+
+- Plotroom’s observer passed on main `1db8153cc26422e39aca82c13f7835974d595d42`. It observed four check events for fixture PR #2 at head `3b130ec9573e8ac6829bc81af85c346fb79bdeb8` and two for fixture main at `9a6ce8a89a15046c18dbfa5d7d2af88bb0edbc14`. An unchanged follow-up poll produced no new check events. The PR runner used synthetic merge `79600d84`. The named fixture jobs were observed at completion. Their queued and in-progress states were missed. Kody was observed transition from in progress to success. [Observer run](https://github.com/mgd43b/plotroom/actions/runs/45859522091) · [PR checks](https://github.com/mgd43b/plotroom-test/actions/runs/45859680348)
+- #34 observed one inline review thread opening and resolving, with none remaining unresolved. #56 observed one firing each for `pr_green`, `pr_threads_resolved`, and `issue_closed`. Fixture issue #3 was closed. [Review thread](https://github.com/mgd43b/plotroom-test/pull/2#discussion_r4711152479) · [Fixture issue](https://github.com/mgd43b/plotroom-test/issues/3)
+- #57 observed the owning lane’s report and refusal of the foreign lane. `run_finished` and `main_green_with_images` each fired once. The main verdict and successful image job were tied to the same fixture main tip. [Main CI](https://github.com/mgd43b/plotroom-test/actions/runs/45846161353) · [Image job](https://github.com/mgd43b/plotroom-test/actions/runs/45846161353/job/140000271767)
+- #63’s read-only gate returned `REFUSE` with `overlap_unreadable` at `2026-11-26T16:33:15.343042Z` on the exact PR head above. This run records the refusal. Its cause remains open for separate investigation. [Observer run](https://github.com/mgd43b/plotroom/actions/runs/45859522091)
+- **Pending:** #33 still needs an existing same-head rerun and #65 still needs qualifying recorded failure history. The fixture PR was left unmerged and closed, its issue was closed and thread resolved, and only the run-owned branch was cleaned up. Fixture main stayed unchanged. The observer produced zero artifacts. [Fixture PR](https://github.com/mgd43b/plotroom-test/pull/2)
