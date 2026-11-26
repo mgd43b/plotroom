@@ -12,6 +12,7 @@ import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable, LocalGitHubCredential
 from plotroom.adapters.github.ci import (
+    JUnitBudget,
     fetch_checks,
     fetch_comparison,
     fetch_default_branch_head,
@@ -290,12 +291,19 @@ class GitHubDetailPoller:
             targets.setdefault(pull.head_sha, []).append(pull.number)
         checks: dict[str, GitHubResource] = {}
         recoveries = main_recovery_check_ids(history)
+        junit_budget = JUnitBudget()
         for sha, numbers in targets.items():
             result = await self._refresh(
                 CHECKS,
                 sha,
                 lambda previous, sha=sha: fetch_checks(
-                    api, client, token, sha, previous, recovery_check_ids=recoveries.get(sha, ())
+                    api,
+                    client,
+                    token,
+                    sha,
+                    previous,
+                    recovery_check_ids=recoveries.get(sha, ()),
+                    junit_budget=junit_budget,
                 ),
                 pulls=tuple(numbers),
             )

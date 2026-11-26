@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import create_autospec
 
@@ -17,7 +18,14 @@ from plotroom.core.catalog import build_catalog
 from plotroom.core.github import PullRequest
 from plotroom.core.github_projection import GitHubRecord, GitHubResource
 from plotroom.core.ledger import Ledger
-from plotroom.core.merge_flakes import FLAKE_EVENT, MAIN_FLAKE_EVENT, record_pull_flakes
+from plotroom.core.merge_flakes import (
+    FLAKE_EVENT,
+    MAIN_FLAKE_EVENT,
+    MainPair,
+    record_main_flakes,
+    record_pull_flakes,
+    record_same_head,
+)
 from plotroom.core.unit_of_work import UnitOfWork
 from test_github_details import API, FIRST, LATER, MAIN_SHA, NOW, REPO, Fixture, status
 
@@ -334,3 +342,62 @@ async def test_pr_flake_writer_refuses_an_updated_pull_with_the_same_version() -
     )
     await record_pull_flakes(uow, REPO, observed, checks, files)
     uow.append.assert_not_awaited()
+
+
+SAME_HEAD_RECOVERIES: list[tuple[bool, tuple[dict[str, Any], ...], int | None]] = [
+    (True, ({},), None),
+    (True, ({"passed_tests": []},), None),
+    (True, ({"passed_tests": [{"path": "test.py", "test_id": "different"}]},), None),
+    (
+        True,
+        (
+            {"junit_evidence": True, "passed_tests": []},
+            {"passed_tests": [{"path": "test.py", "test_id": "test"}]},
+        ),
+        103,
+    ),
+    (False, ({},), 102),
+]
+
+
+@pytest.mark.parametrize(("junit_failure", "passes", "expected_id"), SAME_HEAD_RECOVERIES)
+async def test_same_head_structured_recovery_evaluates_later_test_results(
+    junit_failure: bool, passes: tuple[dict[str, Any], ...], expected_id: int | None
+) -> None:
+    failure = GitHubRecord(
+        "101",
+        "check_run",
+        {**status(101, "test", "failure"), "head_sha": FIRST},
+        details={
+            "app_id": 8,
+            "suite_id": 7,
+            "completed_at": 1,
+            "junit_evidence": junit_failure,
+            "annotations": [{"path": "test.py", "test_id": "test", "excerpt": "failed"}],
+        },
+    )
+    successes = tuple(
+        GitHubRecord(
+            str(identifier),
+            "check_run",
+            {**status(identifier, "test", "success"), "head_sha": FIRST},
+            details={"app_id": 8, "suite_id": 7, "completed_at": 2, **details},
+        )
+        for identifier, details in enumerate(passes, 102)
+    )
+    checks = GitHubResource(
+        successes,
+        attributes={
+            "prior_failures": {failure.key: {"fields": failure.fields, "details": failure.details}}
+        },
+    )
+    uow = create_autospec(UnitOfWork, instance=True)
+    uow.find_event.return_value = None
+    uow.append.return_value = SimpleNamespace(created=False)
+    await record_same_head(uow, REPO, checks)
+    if expected_id is None:
+        await record_main_flakes(uow, REPO, MainPair(failure, successes[0]), None)
+        uow.append.assert_not_awaited()
+    else:
+        uow.append.assert_awaited_once()
+        assert uow.append.await_args.args[0].fields["success_check_id"] == expected_id

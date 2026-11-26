@@ -19,7 +19,12 @@ from plotroom.adapters.github import (
     LocalGitHubCredential,
     PullRequestFetcher,
 )
-from plotroom.adapters.github.ci import JUNIT_MISS_REFRESHES, fetch_checks
+from plotroom.adapters.github.ci import (
+    JUNIT_MISS_REFRESHES,
+    JUNIT_UNAVAILABLE_REFRESHES,
+    JUnitBudget,
+    fetch_checks,
+)
 from plotroom.adapters.github.details import GitHubDetailPoller
 from plotroom.adapters.github.junit import (
     MAX_ARCHIVE,
@@ -29,6 +34,7 @@ from plotroom.adapters.github.junit_xml import MAX_XML, junit_evidence
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.catalog import build_catalog
+from plotroom.core.github_projection import CHECKS
 from plotroom.core.ledger import Ledger
 from plotroom.core.merge_flakes import FLAKE_EVENT, MAIN_FLAKE_EVENT
 from test_merge_flakes import (
@@ -39,6 +45,7 @@ from test_merge_flakes import (
     FlakeFixture,
     annotation,
     check,
+    passed_test,
     status,
 )
 
@@ -193,7 +200,10 @@ class JUnitFixture(FlakeFixture):
             "expired": self.junit_fault == "expired",
             "digest": "sha256:"
             + (
-                "0" * 64 if self.junit_fault == "wrong_digest" else hashlib.sha256(body).hexdigest()
+                "0" * 64
+                if self.junit_fault == "wrong_digest"
+                or (self.junit_fault == "partial_pass_unavailable" and identifier == 105)
+                else hashlib.sha256(body).hexdigest()
             ),
             "archive_download_url": "https://unused.invalid/signed-location",
             "workflow_run": {
@@ -221,9 +231,12 @@ class JUnitFixture(FlakeFixture):
             checks: list[dict[str, Any]] = []
             for identifier in ids:
                 _, name, conclusion, _ = RESULTS[identifier]
-                with_annotations = (
-                    self.junit_fault in {"annotations", "generic_annotation"} and identifier == 101
-                )
+                with_annotations = (identifier, self.junit_fault) in {
+                    (101, "annotations"),
+                    (101, "generic_annotation"),
+                    (105, "partial_pass"),
+                    (105, "partial_pass_unavailable"),
+                }
                 check_row = check(identifier, name, conclusion, sha, int(with_annotations))
                 check_row["check_suite"]["id"] = RUNS[sha]
                 if self.junit_fault != "legacy":
@@ -294,6 +307,8 @@ class JUnitFixture(FlakeFixture):
         if path == "/check-runs/101/annotations":
             title = "" if self.junit_fault == "generic_annotation" else "module::test_same"
             return httpx.Response(200, json=[annotation("tests/test_same.py", title)])
+        if path == "/check-runs/105/annotations":
+            return httpx.Response(200, json=[passed_test("tests/test_other.py", "test_other")])
         if path == "/pulls/4/files":
             return httpx.Response(
                 200, json=[{"filename": "tests/test_same.py", "status": "modified"}]
@@ -308,7 +323,9 @@ class JUnitFixture(FlakeFixture):
         )
 
 
-@pytest.mark.parametrize("fault", ["", "skipped_success", "skipped_same_head", "fork"])
+@pytest.mark.parametrize(
+    "fault", ["", "skipped_success", "skipped_same_head", "fork", "partial_pass"]
+)
 async def test_poll_junit_patterns_survive_restart(
     tmp_path: Path, blob: ArchiveServer, caplog: pytest.LogCaptureFixture, fault: str
 ) -> None:
@@ -351,6 +368,14 @@ async def test_poll_junit_patterns_survive_restart(
                     await details.poll(client)
                     fixture.step = 1
                 await details.poll(client)
+                if fault == "partial_pass":
+                    main_checks = await ledger.github_resource(REPO, CHECKS, MAIN_SHA)
+                    assert main_checks is not None
+                    recovered = next(check for check in main_checks.records if check.key == "105")
+                    assert recovered.details["passed_tests"] == [
+                        {"path": "tests/test_other.py", "test_id": "test_other"},
+                        {"path": "tests/test_main.py", "test_id": "module::test_main"},
+                    ]
                 _, items = await ledger.read_next("clerk", 0, 100)
                 flakes = [item for item in items if item.kind == "flake_candidate"]
                 assert len(flakes) == (0 if restart else len(expected))
@@ -483,6 +508,10 @@ async def test_verified_misses_expire_and_malformed_report_projects_unknown(
         invalid = await fetch_checks(api, client, "fixture", FIRST, absent)
         assert "annotations" not in invalid.records[0].details
         blob.bodies[101] = valid
+        for _ in range(JUNIT_UNAVAILABLE_REFRESHES):
+            invalid = await fetch_checks(api, client, "fixture", FIRST, invalid)
+            assert "annotations" not in invalid.records[0].details
+            assert len(blob.downloads) == 1
         available = await fetch_checks(api, client, "fixture", FIRST, invalid)
         assert available.records[0].details["junit_evidence"] is True
         assert available.records[0].details["annotations"][0]["test_id"] == "module::test_same"
@@ -498,6 +527,44 @@ async def test_green_check_without_relevant_failures_skips_junit(blob: ArchiveSe
     assert result.records[0].details["passed_tests"] == []
     assert not fixture.lookups
     assert not blob.downloads
+
+
+async def test_unavailable_junit_preserves_independent_pass_annotations(
+    blob: ArchiveServer,
+) -> None:
+    fixture = JUnitFixture(blob, "partial_pass_unavailable", single_check=True)
+    api = GitHubReadClient(blob.origin, REPO)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handle)) as client:
+        observed = await fetch_checks(api, client, "fixture", MAIN_SHA, recovery_check_ids=(105,))
+    assert observed.records[0].details["passed_tests"] == [
+        {"path": "tests/test_other.py", "test_id": "test_other"},
+    ]
+    assert "junit_evidence" not in observed.records[0].details
+    assert len(blob.downloads) == 1
+
+
+async def test_shared_junit_budget_defers_other_heads_until_next_poll(blob: ArchiveServer) -> None:
+    fixture = JUnitFixture(blob, single_check=True)
+    api = GitHubReadClient(blob.origin, REPO)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handle)) as client:
+        budget = JUnitBudget(attempts_left=1)
+        read = await fetch_checks(api, client, "fixture", FIRST, junit_budget=budget)
+        deferred = await fetch_checks(api, client, "fixture", FAILED_MAIN, junit_budget=budget)
+        assert read.records[0].details["junit_evidence"] is True
+        assert deferred.complete
+        assert "annotations" not in deferred.records[0].details
+        assert len(blob.downloads) == 1
+        assert "suite/200" not in fixture.lookups
+
+        budget = JUnitBudget(attempts_left=1)
+        cached = await fetch_checks(api, client, "fixture", FIRST, read, junit_budget=budget)
+        assert cached.records[0].details["junit_evidence"] is True
+        assert budget.attempts_left == 1
+        resumed = await fetch_checks(
+            api, client, "fixture", FAILED_MAIN, deferred, junit_budget=budget
+        )
+        assert resumed.records[0].details["junit_evidence"] is True
+    assert [httpx.URL(target).path for target in blob.downloads] == ["/blob/101", "/blob/104"]
 
 
 TESTCASE = '<testcase classname="module" name="test" file="tests/test.py"/>'

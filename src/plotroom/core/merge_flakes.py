@@ -146,7 +146,12 @@ def _candidates(
         )
     passed_tests = (
         {(test["path"], test["test_id"]) for test in success.details.get("passed_tests", [])}
-        if success is not None and (not same_head or success.details.get("junit_evidence") is True)
+        if success is not None
+        and (
+            not same_head
+            or failure.details.get("junit_evidence") is True
+            or success.details.get("junit_evidence") is True
+        )
         else None
     )
     result: list[Candidate] = []
@@ -205,13 +210,13 @@ async def record_same_head(uow: UnitOfWork, repository: str, checks: GitHubResou
         return
     successes = [check for check in checks.records if _is_success(check)]
     for failure in prior_check_failures(checks):
-        success = next(
-            (check for check in successes if same_head_recovery(failure, check)),
-            None,
-        )
-        if success is not None:
-            candidates, _ = _candidates(failure, success)
+        for success in successes:
+            if not same_head_recovery(failure, success):
+                continue
+            candidates, fully_proven = _candidates(failure, success)
             await _record_candidates(uow, repository, candidates)
+            if fully_proven:
+                break
 
 
 async def record_pull_flakes(
