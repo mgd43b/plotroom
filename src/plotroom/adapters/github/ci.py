@@ -1,6 +1,8 @@
 """Check runs by commit and workflow attempts on the default branch."""
 
-from dataclasses import replace
+import asyncio
+from collections.abc import Collection
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
@@ -8,6 +10,7 @@ from urllib.parse import quote
 import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable
+from plotroom.adapters.github.junit import JUnitReader
 from plotroom.adapters.github.read import (
     GitHubNotFound,
     GitHubReadClient,
@@ -18,14 +21,41 @@ from plotroom.adapters.github.read import (
     string,
 )
 from plotroom.core.github_projection import MAIN_CI_WINDOW, GitHubRecord, GitHubResource
-from plotroom.core.merge_flakes import is_failure
+from plotroom.core.merge_flakes import (
+    has_test_identity,
+    is_failure,
+    prior_check_failures,
+    same_head_recovery,
+)
 
 MAX_EXCERPT = 500
 MAX_FAILURE_HISTORY = 100
+JUNIT_MISS_REFRESHES = 4
+JUNIT_UNAVAILABLE_REFRESHES = 2
+MAX_JUNIT_LOOKUP_SECONDS = 4.0
 PENDING_WORKFLOW_STATUSES = frozenset(
     {"expected", "in_progress", "pending", "queued", "requested", "waiting"}
 )
 TEST_PASSED = "plotroom:test-outcome=passed"
+JUNIT_IDENTITY = ("app_id", "suite_id")
+
+
+@dataclass
+class JUnitBudget:
+    """Bound uncached optional lookup time and work within a detail poll."""
+
+    attempts_left: int = 8
+    seconds_left: float = 8.0
+
+    @property
+    def exhausted(self) -> bool:
+        return self.attempts_left <= 0 or self.seconds_left <= 0
+
+    def claim(self) -> float | None:
+        if self.exhausted:
+            return None
+        self.attempts_left -= 1
+        return min(self.seconds_left, MAX_JUNIT_LOOKUP_SECONDS)
 
 
 def _status(row: Row) -> dict[str, Any]:
@@ -43,14 +73,52 @@ def _state(fields: Row) -> str:
     return f"{fields['status']}/{fields.get('conclusion', '')}"
 
 
+def _retain_junit_identity(check: GitHubRecord, cached: GitHubRecord | None, app_slug: Any) -> bool:
+    """Keep the identity of an exact check with temporarily incomplete metadata."""
+    details = check.details
+    if (
+        cached is None
+        or cached.fields != check.fields
+        or details.get("completed_at") is None
+        or cached.details.get("junit_eligible") is not True
+        or app_slug not in (None, "github-actions")
+    ):
+        return False
+    prior: Row = cached.details.get("junit_prior_identity", cached.details)
+    if any(
+        key not in prior or details.get(key, prior[key]) != prior[key] for key in JUNIT_IDENTITY
+    ):
+        return False
+    details["junit_prior_identity"] = {key: prior[key] for key in JUNIT_IDENTITY}
+    return True
+
+
+def _junit_waiting_polls(cached: GitHubRecord | None) -> int:
+    value = cached.details.get("junit_deferred_polls") if cached is not None else None
+    return value if type(value) is int and value > 0 else 0
+
+
+def _junit_visit_order(cached: GitHubRecord | None) -> tuple[int, int]:
+    state = cached.details.get("junit_state") if cached is not None else None
+    tier = {"deferred": 0, "retry_deferred": 1}.get(state, 2) if isinstance(state, str) else 2
+    return tier, -_junit_waiting_polls(cached)
+
+
 async def fetch_checks(
     api: GitHubReadClient,
     client: httpx.AsyncClient,
     token: str,
     sha: str,
     previous: GitHubResource | None = None,
+    *,
+    include_junit: bool = True,
+    recovery_check_ids: Collection[int] = (),
+    junit_budget: JUnitBudget | None = None,
+    allow_junit_lookup: bool = True,
 ) -> GitHubResource:
     checks: list[GitHubRecord] = []
+    junit = JUnitReader(api, client, token) if include_junit else None
+    junit_pending: list[tuple[GitHubRecord, GitHubRecord | None, str, bool, bool]] = []
     prior = (
         {
             (record.fields["id"], record.details.get("completed_at")): record
@@ -74,10 +142,13 @@ async def fetch_checks(
         details: Row = {"pull_numbers": pulls}
         if row.get("html_url"):
             details["run_url"] = string(row["html_url"])
-        if row.get("app") is not None:
-            details["app_id"] = number(obj(row["app"])["id"])
-        if row.get("check_suite") is not None:
-            details["suite_id"] = number(obj(row["check_suite"])["id"])
+        app = obj(row["app"]) if row.get("app") is not None else None
+        app_slug = app.get("slug") if app is not None else None
+        if app is not None and app.get("id") is not None:
+            details["app_id"] = number(app["id"])
+        suite = obj(row["check_suite"]) if row.get("check_suite") is not None else None
+        if suite is not None and suite.get("id") is not None:
+            details["suite_id"] = number(suite["id"])
         if row.get("completed_at") is not None:
             timestamp = datetime.fromisoformat(string(row["completed_at"]))
             if timestamp.utcoffset() is None:
@@ -87,16 +158,32 @@ async def fetch_checks(
             str(fields["id"]), "check_run", fields, details=details, fact=_state(fields)
         )
         passed = fields["status"] == "completed" and fields.get("conclusion") == "success"
-        if (is_failure(check) or passed) and row.get("output") is not None:
-            count = obj(row["output"]).get("annotations_count")
+        if is_failure(check) or passed:
             cached = prior.get((fields["id"], details.get("completed_at")))
             evidence = "passed_tests" if passed else "annotations"
+            actions_check = junit is not None and app_slug == "github-actions"
+            has_junit_metadata = (
+                actions_check
+                and all(key in details for key in JUNIT_IDENTITY)
+                and row.get("head_sha") == sha
+            )
+            prior_junit_identity = (
+                junit is not None
+                and not has_junit_metadata
+                and _retain_junit_identity(check, cached, app_slug)
+            )
+            if has_junit_metadata or prior_junit_identity:
+                details["junit_eligible"] = True
+            output = row.get("output")
+            count = obj(output).get("annotations_count") if isinstance(output, dict) else None
             # A known zero is an evidence result. An unavailable, malformed or
             # truncated annotation read leaves the field unset and cannot fall back.
             if type(count) is int and 0 <= count <= 300:
                 if (
                     cached
                     and cached.details.get("annotation_count") == count
+                    and not cached.details.get("junit_evidence")
+                    and not prior_junit_identity
                     and evidence in cached.details
                 ):
                     details[evidence] = cached.details[evidence]
@@ -112,9 +199,48 @@ async def fetch_checks(
                         pass
                 if evidence in details:
                     details["annotation_count"] = count
+            if passed and (has_junit_metadata or prior_junit_identity):
+                can_read = has_junit_metadata and evidence in details
+                junit_pending.append((check, cached, evidence, passed, can_read))
+            elif (
+                not passed
+                and (actions_check or prior_junit_identity)
+                and evidence in details
+                and not any(
+                    has_test_identity(entry["path"], entry["test_id"])
+                    for entry in details[evidence]
+                )
+            ):
+                junit_pending.append((check, cached, evidence, False, has_junit_metadata))
         checks.append(check)
     if len({check.key for check in checks}) != len(checks):
         raise ValueError("GitHub returned duplicate check IDs")
+    if junit_pending and junit is not None:
+        budget = junit_budget if junit_budget is not None else JUnitBudget()
+        failures = [
+            *(prior_check_failures(previous) if previous is not None else ()),
+            *(check for check in checks if is_failure(check)),
+        ]
+        # Give waiting first reads and retries a turn before newly expired cooldowns.
+        junit_pending.sort(key=lambda entry: _junit_visit_order(entry[1]))
+        for check, cached, evidence, passed, can_read in junit_pending:
+            if (
+                not passed
+                or check.fields["id"] in recovery_check_ids
+                or any(same_head_recovery(failure, check) for failure in failures)
+            ):
+                if not can_read:
+                    _unverified_junit(check.details, evidence, passed=passed, state="unavailable")
+                    continue
+                await _read_junit(
+                    junit,
+                    budget,
+                    check,
+                    cached,
+                    evidence,
+                    passed=passed,
+                    allow_lookup=allow_junit_lookup,
+                )
     history = dict(previous.attributes.get("prior_failures", {})) if previous else {}
     for check in checks:
         if is_failure(check):
@@ -125,6 +251,107 @@ async def fetch_checks(
         sorted(history.items(), key=lambda item: item[1]["fields"]["id"])[-MAX_FAILURE_HISTORY:]
     )
     return GitHubResource(tuple(checks), attributes={"prior_failures": history})
+
+
+async def _read_junit(
+    reader: JUnitReader,
+    budget: JUnitBudget,
+    check: GitHubRecord,
+    cached: GitHubRecord | None,
+    evidence: str,
+    *,
+    passed: bool,
+    allow_lookup: bool,
+) -> None:
+    details = check.details
+    pass_annotations: list[Row] = details[evidence] if passed else []
+    previously_attempted = False
+    if (
+        cached is not None
+        and cached.fields == check.fields
+        and details.get("completed_at") is not None
+        and all(
+            cached.details.get(key) == details[key]
+            for key in ("app_id", "suite_id", "annotation_count")
+        )
+    ):
+        if (
+            cached.details.get("junit_evidence") is True
+            and evidence in cached.details
+            and cached.details.get("junit_pass_annotations", []) == pass_annotations
+        ):
+            details[evidence] = cached.details[evidence]
+            details["junit_evidence"] = True
+            if pass_annotations:
+                details["junit_pass_annotations"] = pass_annotations
+            return
+        remaining = cached.details.get("junit_miss_remaining")
+        if type(remaining) is int and 0 < remaining <= JUNIT_MISS_REFRESHES:
+            details["junit_miss_remaining"] = remaining - 1
+            return
+        remaining = cached.details.get("junit_unavailable_remaining")
+        if type(remaining) is int and 0 < remaining <= JUNIT_UNAVAILABLE_REFRESHES:
+            details["junit_unavailable_remaining"] = remaining - 1
+            _unverified_junit(details, evidence, passed=passed, state="unavailable")
+            return
+        previously_attempted = (
+            cached.details.get("junit_evidence") is True
+            or "junit_miss_remaining" in cached.details
+            or "junit_unavailable_remaining" in cached.details
+            or cached.details.get("junit_state") == "retry_deferred"
+        )
+    timeout = budget.claim() if allow_lookup else None
+    if timeout is None:
+        state = "retry_deferred" if previously_attempted else "deferred"
+        details["junit_deferred_polls"] = _junit_waiting_polls(cached) + 1
+        _unverified_junit(details, evidence, passed=passed, state=state)
+        return
+    clock = asyncio.get_running_loop().time
+    start = clock()
+    try:
+        async with asyncio.timeout(timeout):
+            report = await reader.evidence(check.fields, details["suite_id"], passed=passed)
+    except GitHubRateLimited:
+        raise
+    except (
+        GitHubUnavailable,
+        httpx.RequestError,
+        httpx.InvalidURL,
+        TimeoutError,
+        KeyError,
+        ValueError,
+        TypeError,
+    ):
+        details["junit_unavailable_remaining"] = JUNIT_UNAVAILABLE_REFRESHES
+        _unverified_junit(details, evidence, passed=passed, state="unavailable")
+        return
+    finally:
+        budget.seconds_left -= clock() - start
+    if report is None:
+        # Recheck after a few polls so a late upload still becomes evidence.
+        details["junit_miss_remaining"] = JUNIT_MISS_REFRESHES
+    else:
+        details[evidence] = _merged_passes(pass_annotations, report) if passed else report
+        details["junit_evidence"] = True
+        if pass_annotations:
+            details["junit_pass_annotations"] = pass_annotations
+
+
+def _unverified_junit(details: Row, evidence: str, *, passed: bool, state: str) -> None:
+    # Keep independently verified pass annotations. Deferred or unavailable
+    # JUnit cannot establish an empty failure report or an empty pass set.
+    details["junit_state"] = state
+    if not passed or not details.get(evidence):
+        details.pop(evidence, None)
+
+
+def _merged_passes(annotations: list[Row], report: list[Row]) -> list[Row]:
+    by_identity: dict[tuple[str, str], Row] = {}
+    for entry in [*annotations, *report]:
+        path, test_id = entry["path"], entry["test_id"]
+        if has_test_identity(path, test_id):
+            by_identity.setdefault((path, test_id), entry)
+    return list(by_identity.values())
 
 
 async def _annotations(

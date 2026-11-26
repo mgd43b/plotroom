@@ -81,6 +81,25 @@ notice annotation with the test ID as its title, the source file as its path,
 and the exact message `plotroom:test-outcome=passed`. This gives Plotroom
 evidence that the previously failing test ran and passed.
 
+A trusted GitHub Actions workflow in the configured repository can also publish
+one immutable artifact per job attempt with just `junit.xml` at the ZIP root.
+Name it `plotroom-junit-<run-id>-<attempt>-<job-name-hash>`, using
+`github.run_id`, `github.run_attempt` and the lowercase SHA-256 of the UTF-8
+job display name as GitHub lists it. Give matrix jobs distinct display names.
+Reserve each name for its own job and upload without overwriting artifacts.
+Plotroom verifies GitHub's run and job linkage and the archive digest. The
+workflow is responsible for ensuring that the named artifact came from that job.
+
+Use a UTF-8 report with repository-relative `file`, `classname` and `name`
+on every testcase. For pytest, use `--junitxml=junit.xml -o junit_family=xunit1`
+to include the file. Plotroom uses `classname::name` as the test ID. Use the
+same path and ID in annotations to match evidence from the two sources.
+The report limits are 1 MiB compressed, 4 MiB uncompressed and 5,000 testcases.
+At most 300 testcases may have failures or errors, matching the limit for
+structured check annotations.
+See GitHub's [workflow jobs](https://docs.github.com/en/rest/actions/workflow-jobs)
+and [workflow artifacts](https://docs.github.com/en/rest/actions/artifacts) APIs.
+
 ## Lane briefs
 
 The orchestrator can call `brief(work_item, worker)` for a configured worker.

@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import create_autospec
 
@@ -17,7 +18,15 @@ from plotroom.core.catalog import build_catalog
 from plotroom.core.github import PullRequest
 from plotroom.core.github_projection import GitHubRecord, GitHubResource
 from plotroom.core.ledger import Ledger
-from plotroom.core.merge_flakes import FLAKE_EVENT, MAIN_FLAKE_EVENT, record_pull_flakes
+from plotroom.core.merge_flakes import (
+    FLAKE_EVENT,
+    MAIN_FLAKE_EVENT,
+    MainPair,
+    main_pairs,
+    record_main_flakes,
+    record_pull_flakes,
+    record_same_head,
+)
 from plotroom.core.unit_of_work import UnitOfWork
 from test_github_details import API, FIRST, LATER, MAIN_SHA, NOW, REPO, Fixture, status
 
@@ -334,3 +343,146 @@ async def test_pr_flake_writer_refuses_an_updated_pull_with_the_same_version() -
     )
     await record_pull_flakes(uow, REPO, observed, checks, files)
     uow.append.assert_not_awaited()
+
+
+SAME_HEAD_RECOVERIES: list[tuple[bool, tuple[dict[str, Any], ...], int | None]] = [
+    (True, ({},), None),
+    (True, ({"passed_tests": []},), None),
+    (True, ({"passed_tests": [{"path": "test.py", "test_id": "different"}]},), None),
+    (False, ({"junit_state": "deferred"}, {}), None),
+    (False, ({"junit_miss_remaining": 2, "passed_tests": []},), 102),
+    (
+        False,
+        (
+            {"junit_evidence": True, "passed_tests": [{"path": "test.py", "test_id": "other"}]},
+            {"passed_tests": [{"path": "test.py", "test_id": "unrelated"}]},
+        ),
+        None,
+    ),
+    (
+        False,
+        (
+            {"junit_evidence": True, "passed_tests": [{"path": "test.py", "test_id": "other"}]},
+            {"passed_tests": [{"path": "test.py", "test_id": "test"}]},
+        ),
+        103,
+    ),
+    (
+        True,
+        (
+            {"junit_evidence": True, "passed_tests": []},
+            {"passed_tests": [{"path": "test.py", "test_id": "test"}]},
+        ),
+        103,
+    ),
+    (False, ({},), 102),
+]
+
+
+@pytest.mark.parametrize(("junit_failure", "passes", "expected_id"), SAME_HEAD_RECOVERIES)
+async def test_same_head_structured_recovery_evaluates_later_test_results(
+    junit_failure: bool, passes: tuple[dict[str, Any], ...], expected_id: int | None
+) -> None:
+    failure = GitHubRecord(
+        "101",
+        "check_run",
+        {**status(101, "test", "failure"), "head_sha": FIRST},
+        details={
+            "app_id": 8,
+            "suite_id": 7,
+            "completed_at": 1,
+            "junit_evidence": junit_failure,
+            "annotations": [{"path": "test.py", "test_id": "test", "excerpt": "failed"}],
+        },
+    )
+    successes = tuple(
+        GitHubRecord(
+            str(identifier),
+            "check_run",
+            {**status(identifier, "test", "success"), "head_sha": FIRST},
+            details={"app_id": 8, "suite_id": 7, "completed_at": 2, **details},
+        )
+        for identifier, details in enumerate(passes, 102)
+    )
+    checks = GitHubResource(
+        successes,
+        attributes={
+            "prior_failures": {failure.key: {"fields": failure.fields, "details": failure.details}}
+        },
+    )
+    uow = create_autospec(UnitOfWork, instance=True)
+    uow.find_event.return_value = None
+    uow.append.return_value = SimpleNamespace(created=False)
+    await record_same_head(uow, REPO, checks)
+    if expected_id is None:
+        uow.append.assert_not_awaited()
+    else:
+        uow.append.assert_awaited_once()
+        assert uow.append.await_args.args[0].fields["success_check_id"] == expected_id
+
+    runs = tuple(
+        GitHubRecord(
+            check.key,
+            "workflow_run",
+            {
+                "head_sha": FIRST,
+                "jobs": [{**check.fields, "check_run_id": check.fields["id"]}],
+            },
+            details={"workflow_id": 40},
+        )
+        for check in (*reversed(successes), failure)
+    )
+    uow.reset_mock()
+    pairs = main_pairs(runs, {FIRST: checks})
+    assert len(pairs) == len(successes)
+    for pair in pairs:
+        await record_main_flakes(uow, REPO, pair, None)
+    if expected_id is None:
+        uow.append.assert_not_awaited()
+    else:
+        candidate, proof = [call.args[0] for call in uow.append.await_args_list]
+        assert candidate.kind == FLAKE_EVENT
+        assert candidate.fields["success_check_id"] == expected_id
+        assert proof.kind == MAIN_FLAKE_EVENT
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_known_empty_failure_waits_for_successful_junit_resolution(legacy: bool) -> None:
+    failure = GitHubRecord(
+        "101",
+        "check_run",
+        {**status(101, "test", "failure"), "head_sha": FIRST},
+        details={"run_url": "https://example.test/run/101", "annotations": []},
+    )
+    # An observed transition on the same check ID is enough for check-only fallback.
+    success = GitHubRecord(
+        failure.key,
+        "check_run",
+        {**status(101, "test", "success"), "head_sha": FIRST},
+        details={"junit_state": "deferred"},
+    )
+    checks = GitHubResource(
+        (success,),
+        attributes={
+            "prior_failures": {failure.key: {"fields": failure.fields, "details": failure.details}}
+        },
+    )
+    uow = create_autospec(UnitOfWork, instance=True)
+    uow.append.return_value = SimpleNamespace(created=False)
+    await record_same_head(uow, REPO, checks)
+    await record_main_flakes(uow, REPO, MainPair(failure, success), None)
+    uow.append.assert_not_awaited()
+
+    resolved = replace(success, details={} if legacy else {"junit_miss_remaining": 4})
+    await record_same_head(uow, REPO, replace(checks, records=(resolved,)))
+    uow.append.assert_awaited_once()
+    candidate = uow.append.await_args.args[0]
+    assert candidate.kind == FLAKE_EVENT
+    assert "test_id" not in candidate.fields
+
+    uow.reset_mock()
+    await record_main_flakes(uow, REPO, MainPair(failure, resolved), None)
+    candidate, proof = [call.args[0] for call in uow.append.await_args_list]
+    assert candidate.kind == FLAKE_EVENT
+    assert "test_id" not in candidate.fields
+    assert proof.kind == MAIN_FLAKE_EVENT

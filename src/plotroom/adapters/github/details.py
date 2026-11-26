@@ -12,6 +12,7 @@ import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable, LocalGitHubCredential
 from plotroom.adapters.github.ci import (
+    JUnitBudget,
     fetch_checks,
     fetch_comparison,
     fetch_default_branch_head,
@@ -72,6 +73,7 @@ from plotroom.core.merge_flakes import (
     FLAKE_COMPARISONS,
     MainPair,
     main_pairs,
+    main_recovery_check_ids,
     main_runs,
     record_main_flakes,
     record_pull_flakes,
@@ -118,6 +120,7 @@ class GitHubDetailPoller:
         self.on_merge_evidence = on_merge_evidence
         self._comparison_cursor = 0
         self._ask_history_offset = 0
+        self._junit_offset = 0
 
     async def confirm_gate(self, snapshot: GateSnapshot) -> GateSnapshot | None:
         """Read authoritative evidence on demand for a pinned clerk recheck."""
@@ -158,7 +161,9 @@ class GitHubDetailPoller:
             attributes={"branch": branch, "head_sha": head},
             as_of=observed_at,
         )
-        checks = await fetch_checks(api, client, token, pull.head_sha, snapshot.checks)
+        checks = await fetch_checks(
+            api, client, token, pull.head_sha, snapshot.checks, include_junit=False
+        )
         labels = await fetch_labels(api, client, token, pull)
         threads = await fetch_threads(api, client, token, pull)
         text = await fetch_pull_text(api, client, token, pull)
@@ -286,15 +291,33 @@ class GitHubDetailPoller:
         for pull in pulls:
             targets.setdefault(pull.head_sha, []).append(pull.number)
         checks: dict[str, GitHubResource] = {}
-        for sha, numbers in targets.items():
+        recoveries = main_recovery_check_ids(history)
+        junit_budget = JUnitBudget()
+        junit_start = self._junit_offset % max(1, len(targets))
+        next_junit_start = 0
+        for index, (sha, numbers) in enumerate(targets.items()):
+            attempts_before = junit_budget.attempts_left
             result = await self._refresh(
                 CHECKS,
                 sha,
-                lambda previous, sha=sha: fetch_checks(api, client, token, sha, previous),
+                lambda previous, sha=sha, allow_lookup=index >= junit_start: fetch_checks(
+                    api,
+                    client,
+                    token,
+                    sha,
+                    previous,
+                    recovery_check_ids=recoveries.get(sha, ()),
+                    junit_budget=junit_budget,
+                    allow_junit_lookup=allow_lookup,
+                ),
                 pulls=tuple(numbers),
             )
             if result is not None:
                 checks[sha] = result
+            if junit_budget.attempts_left != attempts_before:
+                next_junit_start = index + 1
+        # Rotate optional work only. Required observations still run in their usual order.
+        self._junit_offset = next_junit_start if junit_budget.exhausted else 0
         for pull in pulls:
             complete = True
             files = None

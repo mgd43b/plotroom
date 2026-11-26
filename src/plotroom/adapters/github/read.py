@@ -60,6 +60,7 @@ class GitHubReadClient:
         params: Mapping[str, Any] | None = None,
         query: Row | None = None,
         etag: str | None = None,
+        artifact_redirect: bool = False,
     ) -> tuple[Any, httpx.Response]:
         headers = {
             "Authorization": f"Bearer {token}",
@@ -76,7 +77,9 @@ class GitHubReadClient:
             headers=headers,
             follow_redirects=False,
         ) as response:
-            if response.status_code == 304 and etag is not None:
+            if (response.status_code == 304 and etag is not None) or (
+                response.status_code == 302 and artifact_redirect
+            ):
                 return None, response
             body = bytearray()
             async for chunk in response.aiter_bytes():
@@ -112,6 +115,19 @@ class GitHubReadClient:
         if isinstance(value, list):
             return cast("list[Any]", value)
         return obj(value)
+
+    async def artifact_location(self, client: httpx.AsyncClient, token: str, artifact: int) -> str:
+        """Read a signed artifact location without following it with API credentials."""
+        _, response = await self._read(
+            client,
+            token,
+            f"{self.endpoint}/actions/artifacts/{number(artifact)}/zip",
+            artifact_redirect=True,
+        )
+        locations = response.headers.get_list("location")
+        if response.status_code != 302 or len(locations) != 1:
+            raise GitHubUnavailable("GitHub did not return one artifact download location")
+        return locations[0]
 
     async def page(
         self,
