@@ -1,0 +1,119 @@
+name: GitHub fixture observer
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Reviewed Plotroom main commit (full SHA)
+        type: string
+        required: true
+      fixture_base:
+        description: Current fixture main commit (full SHA)
+        type: string
+        required: true
+      fixture_head:
+        description: Prepared disposable fixture branch commit (full SHA)
+        type: string
+        required: true
+      branch:
+        description: Exact prepared fixture branch under plotroom-33/
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-fixture-acceptance
+  cancel-in-progress: false
+
+jobs:
+  fixture:
+    if: >-
+      github.server_url == 'https://github.com' &&
+      github.repository == 'mgd43b/plotroom' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'mgd43b' &&
+      github.triggering_actor == 'mgd43b' &&
+      github.run_attempt == '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UV_PYTHON: "3.14"
+      UV_PYTHON_PREFERENCE: only-managed
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify the reviewed source
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          test "$EXPECTED_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse --verify HEAD)" = "$EXPECTED_SHA"
+          git diff --quiet HEAD --
+          remote_main=$(git ls-remote --exit-code https://github.com/mgd43b/plotroom.git refs/heads/main)
+          test "$remote_main" = "$EXPECTED_SHA"$'\trefs/heads/main'
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: "0.13.8"
+          require-checksums: true
+          enable-cache: false
+      - name: Install locked dependencies
+        run: uv sync --locked --no-dev
+      - name: Arm PR trigger
+        id: arm
+        shell: bash
+        env:
+          FIXTURE_BASE: ${{ inputs.fixture_base }}
+          FIXTURE_HEAD: ${{ inputs.fixture_head }}
+          FIXTURE_BRANCH: ${{ inputs.branch }}
+          FIXTURE_PAT: ${{ secrets.PLOTROOM_GITHUB_FIXTURE_GITHUB_TOKEN }}
+        run: |
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$FIXTURE_BASE" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$FIXTURE_HEAD" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$FIXTURE_BRANCH" =~ ^plotroom-33/[a-z0-9-]+$ ]] || exit 1
+          test -n "$FIXTURE_PAT"
+          umask 077
+          fixture_dir="$RUNNER_TEMP/plotroom-fixture-observer-$GITHUB_RUN_ID"
+          mkdir -- "$fixture_dir"
+          printf 'owned=true\n' >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$FIXTURE_PAT" > "$fixture_dir/github-token"
+          unset FIXTURE_PAT PLOTROOM_GITHUB_FIXTURE_GITHUB_TOKEN
+          uv run --locked --offline --no-dev python scripts/github_fixture_observer.py arm-pr \
+            --directory "$fixture_dir" --base "$FIXTURE_BASE" --head "$FIXTURE_HEAD" \
+            --branch "$FIXTURE_BRANCH"
+      - name: Observe PR and arm thread
+        shell: bash
+        run: |
+          uv run --locked --offline --no-dev python scripts/github_fixture_observer.py arm-thread \
+            --directory "$RUNNER_TEMP/plotroom-fixture-observer-$GITHUB_RUN_ID"
+      - name: Arm issue
+        shell: bash
+        run: |
+          uv run --locked --offline --no-dev python scripts/github_fixture_observer.py arm-issue \
+            --directory "$RUNNER_TEMP/plotroom-fixture-observer-$GITHUB_RUN_ID"
+      - name: Record outcomes
+        shell: bash
+        run: |
+          uv run --locked --offline --no-dev python scripts/github_fixture_observer.py record \
+            --directory "$RUNNER_TEMP/plotroom-fixture-observer-$GITHUB_RUN_ID"
+      - name: Verify retirement
+        shell: bash
+        run: |
+          uv run --locked --offline --no-dev python scripts/github_fixture_observer.py retire \
+            --directory "$RUNNER_TEMP/plotroom-fixture-observer-$GITHUB_RUN_ID"
+      - name: Clean observer
+        if: always() && steps.arm.outputs.owned == 'true'
+        shell: bash
+        run: |
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          fixture_dir="$RUNNER_TEMP/plotroom-fixture-observer-$GITHUB_RUN_ID"
+          trap 'rm -rf -- "$fixture_dir"' EXIT
+          uv run --locked --offline --no-dev python scripts/github_fixture_observer.py cleanup \
+            --directory "$fixture_dir"
