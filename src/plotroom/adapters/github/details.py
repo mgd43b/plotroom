@@ -72,6 +72,7 @@ from plotroom.core.merge_flakes import (
     FLAKE_COMPARISONS,
     MainPair,
     main_pairs,
+    main_recovery_check_ids,
     main_runs,
     record_main_flakes,
     record_pull_flakes,
@@ -158,7 +159,9 @@ class GitHubDetailPoller:
             attributes={"branch": branch, "head_sha": head},
             as_of=observed_at,
         )
-        checks = await fetch_checks(api, client, token, pull.head_sha, snapshot.checks)
+        checks = await fetch_checks(
+            api, client, token, pull.head_sha, snapshot.checks, include_junit=False
+        )
         labels = await fetch_labels(api, client, token, pull)
         threads = await fetch_threads(api, client, token, pull)
         text = await fetch_pull_text(api, client, token, pull)
@@ -286,11 +289,14 @@ class GitHubDetailPoller:
         for pull in pulls:
             targets.setdefault(pull.head_sha, []).append(pull.number)
         checks: dict[str, GitHubResource] = {}
+        recoveries = main_recovery_check_ids(history)
         for sha, numbers in targets.items():
             result = await self._refresh(
                 CHECKS,
                 sha,
-                lambda previous, sha=sha: fetch_checks(api, client, token, sha, previous),
+                lambda previous, sha=sha: fetch_checks(
+                    api, client, token, sha, previous, recovery_check_ids=recoveries.get(sha, ())
+                ),
                 pulls=tuple(numbers),
             )
             if result is not None:

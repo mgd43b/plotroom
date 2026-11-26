@@ -1,5 +1,6 @@
 """Check runs by commit and workflow attempts on the default branch."""
 
+from collections.abc import Collection
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -8,6 +9,7 @@ from urllib.parse import quote
 import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable
+from plotroom.adapters.github.junit import JUnitReader
 from plotroom.adapters.github.read import (
     GitHubNotFound,
     GitHubReadClient,
@@ -18,10 +20,16 @@ from plotroom.adapters.github.read import (
     string,
 )
 from plotroom.core.github_projection import MAIN_CI_WINDOW, GitHubRecord, GitHubResource
-from plotroom.core.merge_flakes import is_failure
+from plotroom.core.merge_flakes import (
+    has_test_identity,
+    is_failure,
+    prior_check_failures,
+    same_head_recovery,
+)
 
 MAX_EXCERPT = 500
 MAX_FAILURE_HISTORY = 100
+JUNIT_MISS_REFRESHES = 4
 PENDING_WORKFLOW_STATUSES = frozenset(
     {"expected", "in_progress", "pending", "queued", "requested", "waiting"}
 )
@@ -49,8 +57,13 @@ async def fetch_checks(
     token: str,
     sha: str,
     previous: GitHubResource | None = None,
+    *,
+    include_junit: bool = True,
+    recovery_check_ids: Collection[int] = (),
 ) -> GitHubResource:
     checks: list[GitHubRecord] = []
+    junit = JUnitReader(api, client, token) if include_junit else None
+    junit_pending: list[tuple[GitHubRecord, GitHubRecord | None, str, bool]] = []
     prior = (
         {
             (record.fields["id"], record.details.get("completed_at")): record
@@ -74,8 +87,9 @@ async def fetch_checks(
         details: Row = {"pull_numbers": pulls}
         if row.get("html_url"):
             details["run_url"] = string(row["html_url"])
-        if row.get("app") is not None:
-            details["app_id"] = number(obj(row["app"])["id"])
+        app = obj(row["app"]) if row.get("app") is not None else None
+        if app is not None:
+            details["app_id"] = number(app["id"])
         if row.get("check_suite") is not None:
             details["suite_id"] = number(obj(row["check_suite"])["id"])
         if row.get("completed_at") is not None:
@@ -97,6 +111,7 @@ async def fetch_checks(
                 if (
                     cached
                     and cached.details.get("annotation_count") == count
+                    and not cached.details.get("junit_evidence")
                     and evidence in cached.details
                 ):
                     details[evidence] = cached.details[evidence]
@@ -112,9 +127,34 @@ async def fetch_checks(
                         pass
                 if evidence in details:
                     details["annotation_count"] = count
+                if (
+                    junit is not None
+                    and evidence in details
+                    and not any(
+                        has_test_identity(entry["path"], entry["test_id"])
+                        for entry in details[evidence]
+                    )
+                    and app is not None
+                    and app.get("slug") == "github-actions"
+                    and "suite_id" in details
+                    and row.get("head_sha") == sha
+                ):
+                    junit_pending.append((check, cached, evidence, passed))
         checks.append(check)
     if len({check.key for check in checks}) != len(checks):
         raise ValueError("GitHub returned duplicate check IDs")
+    if junit_pending and junit is not None:
+        failures = [
+            *(prior_check_failures(previous) if previous is not None else ()),
+            *(check for check in checks if is_failure(check)),
+        ]
+        for check, cached, evidence, passed in junit_pending:
+            if (
+                not passed
+                or check.fields["id"] in recovery_check_ids
+                or any(same_head_recovery(failure, check) for failure in failures)
+            ):
+                await _read_junit(junit, check, cached, evidence, passed=passed)
     history = dict(previous.attributes.get("prior_failures", {})) if previous else {}
     for check in checks:
         if is_failure(check):
@@ -125,6 +165,56 @@ async def fetch_checks(
         sorted(history.items(), key=lambda item: item[1]["fields"]["id"])[-MAX_FAILURE_HISTORY:]
     )
     return GitHubResource(tuple(checks), attributes={"prior_failures": history})
+
+
+async def _read_junit(
+    reader: JUnitReader,
+    check: GitHubRecord,
+    cached: GitHubRecord | None,
+    evidence: str,
+    *,
+    passed: bool,
+) -> None:
+    details = check.details
+    if (
+        cached is not None
+        and cached.fields == check.fields
+        and details.get("completed_at") is not None
+        and all(
+            cached.details.get(key) == details[key]
+            for key in ("app_id", "suite_id", "annotation_count")
+        )
+    ):
+        if cached.details.get("junit_evidence") is True and evidence in cached.details:
+            details[evidence] = cached.details[evidence]
+            details["junit_evidence"] = True
+            return
+        remaining = cached.details.get("junit_miss_remaining")
+        if type(remaining) is int and 0 < remaining <= JUNIT_MISS_REFRESHES:
+            details["junit_miss_remaining"] = remaining - 1
+            return
+    try:
+        report = await reader.evidence(check.fields, details["suite_id"], passed=passed)
+    except GitHubRateLimited:
+        raise
+    except (
+        GitHubUnavailable,
+        httpx.RequestError,
+        httpx.InvalidURL,
+        TimeoutError,
+        KeyError,
+        ValueError,
+        TypeError,
+    ):
+        # An uncertain report must not be interpreted as an empty annotation set.
+        del details[evidence]
+        return
+    if report is None:
+        # Recheck after a few polls so a late upload still becomes evidence.
+        details["junit_miss_remaining"] = JUNIT_MISS_REFRESHES
+    else:
+        details[evidence] = report
+        details["junit_evidence"] = True
 
 
 async def _annotations(

@@ -69,7 +69,7 @@ async def main_check_is_flake(
     )
 
 
-def _failures(checks: GitHubResource) -> tuple[GitHubRecord, ...]:
+def prior_check_failures(checks: GitHubResource) -> tuple[GitHubRecord, ...]:
     return tuple(
         GitHubRecord(key, "check_run", row["fields"], details=row["details"])
         for key, row in checks.attributes.get("prior_failures", {}).items()
@@ -100,8 +100,16 @@ def _later_check(failure: GitHubRecord, success: GitHubRecord) -> bool:
     return success.key == failure.key
 
 
-def _concrete_path(path: str) -> bool:
-    return bool(path) and all(part not in {"", ".", ".."} for part in path.split("/"))
+def same_head_recovery(failure: GitHubRecord, success: GitHubRecord) -> bool:
+    return (
+        failure.fields["head_sha"] == success.fields["head_sha"]
+        and _same_check(failure, success)
+        and _later_check(failure, success)
+    )
+
+
+def has_test_identity(path: str, test_id: str) -> bool:
+    return bool(path and test_id) and all(part not in {"", ".", ".."} for part in path.split("/"))
 
 
 @dataclass(frozen=True)
@@ -138,13 +146,13 @@ def _candidates(
         )
     passed_tests = (
         {(test["path"], test["test_id"]) for test in success.details.get("passed_tests", [])}
-        if success is not None and not same_head
+        if success is not None and (not same_head or success.details.get("junit_evidence") is True)
         else None
     )
     result: list[Candidate] = []
     for annotation in annotations:
         path = annotation["path"]
-        if not _concrete_path(path) or not annotation["test_id"]:
+        if not has_test_identity(path, annotation["test_id"]):
             continue
         if not same_head and (changed_paths is None or path in changed_paths):
             continue
@@ -196,13 +204,9 @@ async def record_same_head(uow: UnitOfWork, repository: str, checks: GitHubResou
     if not checks.complete:
         return
     successes = [check for check in checks.records if _is_success(check)]
-    for failure in _failures(checks):
+    for failure in prior_check_failures(checks):
         success = next(
-            (
-                check
-                for check in successes
-                if _same_check(failure, check) and _later_check(failure, check)
-            ),
+            (check for check in successes if same_head_recovery(failure, check)),
             None,
         )
         if success is not None:
@@ -280,6 +284,23 @@ def _unique_job_links(run: GitHubRecord, conclusions: set[str]) -> dict[str, int
     }
 
 
+def main_recovery_check_ids(runs: tuple[GitHubRecord, ...]) -> dict[str, set[int]]:
+    """Find successful main jobs with an earlier failed job in the same workflow."""
+    earlier_failures: dict[int, set[str]] = {}
+    recoveries: dict[str, set[int]] = {}
+    for run in reversed(runs):
+        names = earlier_failures.setdefault(run.details["workflow_id"], set())
+        matching = {
+            identifier
+            for name, identifier in _unique_job_links(run, {"success"}).items()
+            if name in names
+        }
+        if matching:
+            recoveries.setdefault(run.fields["head_sha"], set()).update(matching)
+        names.update(_unique_job_links(run, FAILURES))
+    return recoveries
+
+
 @dataclass(frozen=True)
 class MainPair:
     failure: GitHubRecord
@@ -302,7 +323,7 @@ def main_pairs(
         observed = checks.get(run.fields["head_sha"])
         if observed is None or not observed.complete:
             continue
-        failures = {row.fields["id"]: row for row in _failures(observed)}
+        failures = {row.fields["id"]: row for row in prior_check_failures(observed)}
         failed_jobs = _unique_job_links(run, FAILURES)
         for newer in runs[:index]:
             if newer.details["workflow_id"] != run.details["workflow_id"]:
