@@ -273,7 +273,7 @@ async def stop_daemon(data: Path) -> None:
                 await asyncio.sleep(0.2)
 
 
-def make_config(root: Path) -> Path:
+def make_config(root: Path, *, poll_seconds: int = 8) -> Path:
     config = root / "fixture.toml"
     config.write_text(
         f"""
@@ -289,7 +289,7 @@ bmad_installation = {json.dumps(str(SOURCE))}
 [projects.{PROJECT}.github]
 repository = "{REPO}"
 token_file = "github-token"
-poll_seconds = 8
+poll_seconds = {poll_seconds}
 ci_workflow = "{WORKFLOW}"
 image_jobs = ["Fixture image build"]
 min_checks = 2
