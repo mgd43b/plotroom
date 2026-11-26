@@ -9,7 +9,7 @@ hitl: true
 risk: high
 tracker_id: "102"
 remote: "https://github.com/mgd43b/plotroom/issues/102"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # First provider usage adapter (OpenRouter)
