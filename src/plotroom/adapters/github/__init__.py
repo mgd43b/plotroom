@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import httpx
 
+from plotroom._secret_file import read_secret_file
 from plotroom.core.events import format_time
 from plotroom.core.github import DETAILS, PULL_REQUESTS, FetchRetry, ObservedPull, apply_pull_poll
 from plotroom.core.ledger import Ledger
@@ -85,9 +86,7 @@ class LocalGitHubCredential:
         candidate = self._env.get(self._name, "").strip()
         if not candidate and self._file is not None:
             try:
-                candidate = (
-                    await asyncio.to_thread(self._file.read_text, encoding="utf-8")
-                ).strip()
+                candidate = await read_secret_file(self._file)
             except OSError, UnicodeError:
                 raise GitHubUnavailable(
                     f"cannot read the configured GitHub token file ({self._name})"

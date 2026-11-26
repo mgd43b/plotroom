@@ -3,6 +3,7 @@
 import math
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from fractions import Fraction
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from plotroom.core.unit_of_work import UnitOfWork
 
 type KeyScope = Literal["staging", "production"]
+OPENROUTER_PROVIDER = "openrouter"
 _PROVIDER = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 BUDGET_ARGS = (
     FieldSpec("run", "str"),
@@ -54,7 +56,9 @@ class Budget:
         return asdict(self)
 
 
-async def budget_open(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
+async def budget_open(
+    uow: UnitOfWork, args: dict[str, Any], *, openrouter_bindings: Mapping[str, str] | None = None
+) -> dict[str, Any]:
     run: str = args["run"]
     lane: str = args["lane"]
     provider: str = args["provider"]
@@ -63,6 +67,11 @@ async def budget_open(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
     validate_identity(lane, "lane")
     if _PROVIDER.fullmatch(provider) is None:
         raise LedgerError("invalid", "provider must be a named meter")
+    binding = None
+    if provider == OPENROUTER_PROVIDER:
+        binding = openrouter_bindings.get(run) if openrouter_bindings is not None else None
+        if binding is None:
+            raise LedgerError("invalid", "the run needs a configured OpenRouter key binding")
     if key_scope != "staging" and key_scope != "production":
         raise LedgerError("invalid", "key_scope must be staging or production")
     try:
@@ -76,6 +85,8 @@ async def budget_open(uow: UnitOfWork, args: dict[str, Any]) -> dict[str, Any]:
         raise LedgerError("conflict", "a budget requires a current lane")
     if await uow.find_budget(run) is not None:
         raise LedgerError("conflict", "this run already has a budget")
+    if binding is not None and not await uow.reserve_openrouter_key(binding, run):
+        raise LedgerError("conflict", "the OpenRouter key is already reserved for a budget")
     budget = Budget(f"bud_{uuid.uuid7()}", run, lane, cap, provider, key_scope)
     await uow.insert_budget(budget)
     return budget.render()
@@ -97,6 +108,14 @@ async def record_budget_observations(
         if budget is None or budget.provider != reading.meter:
             continue
         if budget.as_of is not None and reading.as_of <= datetime.fromisoformat(budget.as_of):
+            continue
+        # The current-key endpoint has no provider watermark. A repeated or lower counter
+        # cannot establish newer spend for this fixed, non-resetting key.
+        if (
+            budget.provider == OPENROUTER_PROVIDER
+            and budget.as_of is not None
+            and reading.spent_usd <= budget.spent_usd
+        ):
             continue
         as_of = reading.as_of.isoformat(timespec="microseconds").replace("+00:00", "Z")
         budget = replace(budget, spent_usd=reading.spent_usd, as_of=as_of)

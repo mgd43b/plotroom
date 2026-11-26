@@ -445,6 +445,10 @@ class SqliteStore:
         async with self._engine.connect() as connection:
             return await triggers_sql.list_triggers(connection, lane)
 
+    async def read_openrouter_budgets(self) -> list[tuple[str, float, str]]:
+        async with self._engine.connect() as connection:
+            return await budgets_sql.read_openrouter_budgets(connection)
+
     async def read_budgets(self, run: str | None) -> list[Budget]:
         async with self._engine.connect() as connection:
             return await budgets_sql.read_budgets(connection, run)

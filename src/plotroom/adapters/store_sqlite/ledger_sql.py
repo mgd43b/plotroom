@@ -342,6 +342,9 @@ class SqliteTransaction:
     async def insert_budget(self, budget: Budget) -> None:
         await budgets_sql.insert_budget(self._live(), budget)
 
+    async def reserve_openrouter_key(self, reservation: str, run: str) -> bool:
+        return await budgets_sql.reserve_openrouter_key(self._live(), reservation, run)
+
     async def update_budget_spend(self, budget: Budget) -> None:
         await budgets_sql.update_budget_spend(self._live(), budget)
 

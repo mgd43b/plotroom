@@ -117,6 +117,7 @@ def build_catalog(
     delivery_routes: Mapping[str, DeliveryRoute] | None = None,
     image_jobs: tuple[str, ...] = (),
     lane_idle_minutes: int = 15,
+    openrouter_bindings: Mapping[str, str] | None = None,
 ) -> Catalog:
     """Every kind and command the server knows."""
     events = EventRegistry()
@@ -130,7 +131,12 @@ def build_catalog(
         read_roles={BRIEF: frozenset({"orchestrator"})},
     )
     catalog.commands.register(
-        Command("budget_open", BUDGET_ARGS, budget_open), rules=(WriterRule("orchestrator"),)
+        Command(
+            "budget_open",
+            BUDGET_ARGS,
+            partial(budget_open, openrouter_bindings=openrouter_bindings),
+        ),
+        rules=(WriterRule("orchestrator"),),
     )
     events.register(EventKind(BUDGET_THRESHOLD, BUDGET_THRESHOLD_FIELDS, frozenset({"system"})))
     catalog.register_item(BUDGET_ITEM)

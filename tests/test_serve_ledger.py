@@ -32,6 +32,7 @@ def fixture_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
         image_jobs: tuple[str, ...] = (),
         lane_idle_minutes: int = 15,
         human_login: str | None = None,
+        openrouter_bindings: Mapping[str, str] | None = None,
     ) -> Catalog:
         return Fixture().catalog
 
