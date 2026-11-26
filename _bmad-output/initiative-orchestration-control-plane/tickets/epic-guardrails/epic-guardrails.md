@@ -11,6 +11,7 @@ companions:
 after: []
 refined: true
 risk: low
+status: done
 ---
 
 # Guardrails
@@ -55,3 +56,5 @@ Paid runs cannot overrun their caps unnoticed, and hands-on work is routed away 
 - Waits on epic-triggers, story by story, for: the trigger engine and send to workers.
 - Decision: 2026-11-22, build order 1 (the tracer, on a fixture meter), 2, 3 (the first real provider, the least certain, with a plan checkpoint), 4, 5, with a refactor sweep (6) and an end-to-end suite (7); the first provider and its reporting endpoint are confirmed against its current documentation at entry 3's plan checkpoint. Prerequisites are story by story, with no whole-epic gate.
 - Decision: 2026-11-22, from the set check: budgets name their run's lane and the first provider (entry 3, the least certain) is built second. The Anthropic-first selection was superseded on 2026-11-26 by OpenRouter. See #102 for the owner decision and current endpoint.
+- Decision, 2026-11-26, Matt in the Plotroom coordinator chat: “Align dependencies and close #8 (Recommended)”. The question was whether to align the native #1 and #2 blockers with the story-level plan and complete Guardrails after its retrospective lands, or wait for both parent epics.
+- Native mapping for Epic #8: #1’s next-item and action-runner inputs are preserved in #101’s links to #17 and #18. Its container input is preserved in #102’s link to #22. #105 retains the #17 and #19 next-item and lane dependencies. #2’s secret-file reader is preserved in #102’s link to #29. These consumed #1 and #2 inputs are completed story dependencies. Epic #8 has no whole-epic gate for either. Retain closed #3 as a historical native link. #104 retains #52 for the trigger engine, and #103 retains #59 and #60 for worker delivery. The initiative declares all three sets of inputs for BMad validation.
