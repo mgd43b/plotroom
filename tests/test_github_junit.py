@@ -628,6 +628,56 @@ async def test_truncated_delayed_annotations_cannot_reuse_stale_success_evidence
     uow.append.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "case", ["missing_suite", "missing_app_id", "prior", "other_app", "structured"]
+)
+async def test_partial_actions_failure_metadata_preserves_evidence_certainty(
+    blob: ArchiveServer, case: str
+) -> None:
+    fixture = JUnitFixture(
+        blob, "annotations" if case == "structured" else "missing", single_check=True
+    )
+    partial = case != "prior"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        response = fixture.handle(request)
+        if not partial or request.url.path != f"/repos/{REPO}/commits/{FIRST}/check-runs":
+            return response
+        payload: dict[str, Any] = response.json()
+        row: dict[str, Any] = payload["check_runs"][0]
+        if case == "missing_app_id":
+            del row["app"]["id"]
+        elif case == "prior":
+            del row["app"], row["check_suite"], row["head_sha"]
+        else:
+            del row["check_suite"]
+            if case == "other_app":
+                row["app"]["slug"] = "some-other-app"
+        return httpx.Response(200, json=payload)
+
+    api = GitHubReadClient(blob.origin, REPO)
+    previous = None
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        if case == "prior":
+            previous = await fetch_checks(api, client, "fixture", FIRST)
+            assert previous.records[0].details["annotations"] == []
+            partial = True
+        lookups = fixture.lookups.copy()
+        observed = await fetch_checks(api, client, "fixture", FIRST, previous)
+    details = observed.records[0].details
+    if case == "other_app":
+        assert details["annotations"] == []
+        assert "junit_state" not in details
+    elif case == "structured":
+        assert details["annotations"][0]["test_id"] == "module::test_same"
+        assert "junit_state" not in details
+    else:
+        assert "annotations" not in details
+        assert details["junit_state"] == "unavailable"
+    assert fixture.lookups == lookups
+    assert not blob.downloads
+
+
 async def test_shared_junit_budget_defers_other_heads_until_next_poll(blob: ArchiveServer) -> None:
     fixture = JUnitFixture(blob, single_check=True)
     api = GitHubReadClient(blob.origin, REPO)
@@ -786,6 +836,35 @@ TESTCASE = '<testcase classname="module" name="test" file="tests/test.py"/>'
 def test_invalid_junit_never_becomes_an_empty_report(archive: bytes) -> None:
     with pytest.raises(ValueError, match=r"JUnit|UTF-8|utf-8"):
         junit_evidence(archive, passed=True)
+
+
+@pytest.mark.parametrize(
+    ("passed", "count", "error"),
+    [
+        (False, 0, "does not confirm"),
+        (False, 1, None),
+        (False, 300, None),
+        (False, 301, "too many failed testcases"),
+        (True, 1, None),
+        (True, 5000, None),
+        (True, 5001, "too many testcases"),
+    ],
+)
+def test_bounds_junit_failure_and_success_evidence(
+    passed: bool, count: int, error: str | None
+) -> None:
+    mark = ("<failure/>", "<error/>") if not passed else ("", "")
+    cases = "".join(
+        f'<testcase classname="module" name="test_{index}" file="test.py">'
+        f"{mark[index % 2]}</testcase>"
+        for index in range(count)
+    )
+    archive = zipped(f'<testsuite tests="{count}">{cases}</testsuite>')
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            junit_evidence(archive, passed=passed)
+    else:
+        assert len(junit_evidence(archive, passed=passed)) == count
 
 
 @pytest.mark.parametrize(

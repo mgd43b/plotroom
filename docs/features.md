@@ -95,6 +95,8 @@ on every testcase. For pytest, use `--junitxml=junit.xml -o junit_family=xunit1`
 to include the file. Plotroom uses `classname::name` as the test ID. Use the
 same path and ID in annotations to match evidence from the two sources.
 The report limits are 1 MiB compressed, 4 MiB uncompressed and 5,000 testcases.
+At most 300 testcases may have failures or errors, matching the limit for
+structured check annotations.
 See GitHub's [workflow jobs](https://docs.github.com/en/rest/actions/workflow-jobs)
 and [workflow artifacts](https://docs.github.com/en/rest/actions/artifacts) APIs.
 

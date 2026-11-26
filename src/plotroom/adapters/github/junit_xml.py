@@ -11,6 +11,7 @@ from plotroom.adapters.github.read import Row
 
 MAX_XML = 4 * 1024 * 1024
 MAX_TESTS = 5_000
+MAX_FAILED_TESTS = 300
 MAX_NODES = 20_000
 MAX_DEPTH = 32
 MAX_FIELD = 500
@@ -149,6 +150,8 @@ def junit_evidence(archive: bytes, *, passed: bool) -> list[Row]:
     failed = counts["failures"] + counts["errors"]
     if bool(failed) == passed:
         raise ValueError("JUnit report does not confirm its job result")
+    if failed > MAX_FAILED_TESTS:
+        raise ValueError("JUnit report has too many failed testcases")
     evidence: list[Row] = []
     for (path, test_id), outcome in cases.items():
         if passed and outcome is None:

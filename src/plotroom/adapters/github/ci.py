@@ -74,7 +74,7 @@ def _state(fields: Row) -> str:
 
 
 def _retain_junit_identity(check: GitHubRecord, cached: GitHubRecord | None, app_slug: Any) -> bool:
-    """Keep the identity of an exact success with temporarily incomplete metadata."""
+    """Keep the identity of an exact check with temporarily incomplete metadata."""
     details = check.details
     if (
         cached is None
@@ -161,19 +161,18 @@ async def fetch_checks(
         if is_failure(check) or passed:
             cached = prior.get((fields["id"], details.get("completed_at")))
             evidence = "passed_tests" if passed else "annotations"
+            actions_check = junit is not None and app_slug == "github-actions"
             has_junit_metadata = (
-                junit is not None
-                and app_slug == "github-actions"
+                actions_check
                 and all(key in details for key in JUNIT_IDENTITY)
                 and row.get("head_sha") == sha
             )
             prior_junit_identity = (
                 junit is not None
-                and passed
                 and not has_junit_metadata
                 and _retain_junit_identity(check, cached, app_slug)
             )
-            if passed and (has_junit_metadata or prior_junit_identity):
+            if has_junit_metadata or prior_junit_identity:
                 details["junit_eligible"] = True
             output = row.get("output")
             count = obj(output).get("annotations_count") if isinstance(output, dict) else None
@@ -204,14 +203,15 @@ async def fetch_checks(
                 can_read = has_junit_metadata and evidence in details
                 junit_pending.append((check, cached, evidence, passed, can_read))
             elif (
-                has_junit_metadata
+                not passed
+                and (actions_check or prior_junit_identity)
                 and evidence in details
                 and not any(
                     has_test_identity(entry["path"], entry["test_id"])
                     for entry in details[evidence]
                 )
             ):
-                junit_pending.append((check, cached, evidence, False, True))
+                junit_pending.append((check, cached, evidence, False, has_junit_metadata))
         checks.append(check)
     if len({check.key for check in checks}) != len(checks):
         raise ValueError("GitHub returned duplicate check IDs")

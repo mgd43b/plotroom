@@ -116,12 +116,16 @@ def same_head_recovery(failure: GitHubRecord, success: GitHubRecord) -> bool:
     )
 
 
-def _junit_recovery_evidence(check: GitHubRecord) -> bool:
-    return check.details.get("junit_evidence") is True or check.details.get("junit_state") in (
+def _junit_unresolved(check: GitHubRecord) -> bool:
+    return check.details.get("junit_state") in (
         "deferred",
         "retry_deferred",
         "unavailable",
     )
+
+
+def _junit_recovery_evidence(check: GitHubRecord) -> bool:
+    return check.details.get("junit_evidence") is True or _junit_unresolved(check)
 
 
 def _same_head_requires_test_pass(failure: GitHubRecord, successes: Iterable[GitHubRecord]) -> bool:
@@ -163,11 +167,14 @@ def _candidates(
     else:
         return (), False
     if not annotations:
-        return (
-            ((Candidate(failure, pattern, None, success, number),), True)
-            if same_head and failure.details.get("run_url")
-            else ((), False)
-        )
+        if (
+            success is None
+            or not same_head
+            or _junit_unresolved(success)
+            or not failure.details.get("run_url")
+        ):
+            return (), False
+        return (Candidate(failure, pattern, None, success, number),), True
     passed_tests = (
         {(test["path"], test["test_id"]) for test in success.details.get("passed_tests", [])}
         if success is not None
