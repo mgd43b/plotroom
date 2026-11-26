@@ -341,10 +341,13 @@ async def test_list_cancel_and_consistent_snapshot_counts(tmp_path: Path) -> Non
         )
         await project(ledger, observed(9, "merged", 1), observed(10, "open", 1))
         args = {"trigger_id": cancellation.result["id"]}
-        for role in (WORKER, "clerk", "drain"):
+        for role in (WORKER, "clerk", "drain", "bridge"):
             with pytest.raises(LedgerError) as denied:
                 await ledger.execute(role, "cancel", "cancel", args)
             assert denied.value.code == "forbidden"
+            [still_open] = await ledger.list_triggers(ORCHESTRATOR, "lane-b")
+            assert still_open["id"] == args["trigger_id"]
+            assert still_open["state"] == "open"
             with pytest.raises(LedgerError) as denied:
                 await ledger.list_triggers(role, None)
             assert denied.value.code == "forbidden"
