@@ -308,7 +308,10 @@ class GitHubIssuesWorkItems:
                 continue
             parent, milestone = scope
             epic = parent[0] if parent else None
-            if not met.issuperset(issue.blockers) or (epic and not done.issuperset(epic.blockers)):
+            if not met.issuperset(issue.blockers):
+                continue
+            # An epic's own children can block its acceptance without gating its work.
+            if epic and not done.issuperset(set(epic.blockers).difference(epic.children)):
                 continue
             order = (
                 milestone or 0,

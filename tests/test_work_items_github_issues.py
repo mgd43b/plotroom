@@ -217,3 +217,39 @@ async def test_issue_body_uses_ticket_types_and_effective_milestone(tmp_path: Pa
         assert await source.body(ref) is None
     unfiltered = GitHubIssuesWorkItems(read, STARTER, config, "owner/repo")
     assert await unfiltered.body("7") is None
+
+
+async def test_epic_acceptance_child_does_not_block_its_siblings(tmp_path: Path) -> None:
+    config = tmp_path / "ticketing-store-config.toml"
+    config.write_text('[tickets]\nstore = "github"\n', encoding="utf-8")
+    epic = issue(20, "epic", "in-progress", sub_issues=[12, 11, 13], blocked_by=[11, 30, 31])
+    acceptance = issue(11, "story", "backlog")
+    external_epic = issue(30, "epic", "in-progress", sub_issues=[31])
+    external_child = issue(31, "story", "review")
+    rows = (
+        {"resource": "milestone", "number": 1, "state": "open"},
+        epic,
+        acceptance,
+        issue(13, "story", "backlog", blocked_by=[11]),
+        issue(12, "story", "backlog"),
+        external_epic,
+        external_child,
+    )
+
+    async def read() -> tuple[dict[str, Any], ...]:
+        return rows
+
+    source = GitHubIssuesWorkItems(read, STARTER, config, "owner/repo")
+    assert await source.ready_items() == ()
+    external_child.update(state="closed", state_reason="completed")
+    assert await source.ready_items() == ()
+    external_child.update(state="open", state_reason=None)
+    external_epic.update(state="closed", state_reason="completed")
+    assert await source.ready_items() == ()
+    external_child.update(state="closed", state_reason="completed")
+
+    sibling = WorkItem("12", "Ticket 12")
+    assert await source.ready_items() == (sibling, WorkItem("11", "Ticket 11"))
+    acceptance["labels"] = ["story", "review"]
+    assert await source.ready_items() == (sibling, WorkItem("13", "Ticket 13"))
+    assert epic["blocked_by"] == [11, 30, 31]
