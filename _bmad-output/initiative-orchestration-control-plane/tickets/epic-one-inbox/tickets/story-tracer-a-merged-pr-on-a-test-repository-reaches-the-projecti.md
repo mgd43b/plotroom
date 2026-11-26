@@ -9,7 +9,7 @@ hitl: true
 risk: high
 tracker_id: "29"
 remote: "https://github.com/mgd43b/plotroom/issues/29"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Tracer: a merged PR on a test repository reaches the projection once
@@ -34,3 +34,11 @@ Verify: Against the test repository, opening and merging a PR produces each gith
 - Check beyond its criteria: a revoked or expired PAT stops polling with a clear error and an unavailable project, and its cursor is intact when a new PAT is configured.
 - Hands on from #15 (PRs #50, #92): event kinds and commands register in core/catalog.py build_catalog(); an event's source must equal its kind's prefix; a duplicate returns the stored event whatever its fields, only after role, kind and source pass; migration 0002 carries CHECK(seq > 0) and CHECK(json_valid(fields)), and the next revision's parent is 0002; Ledger.execute checks no role yet. An adapter's cursor write goes through UnitOfWork in the same transaction as its events.
 - Hands on: the secret-file reader to epic 8's provider usage adapter (entry 8.3).
+
+### Live fixture acceptance (2026-11-26)
+
+- On Plotroom main `b3bf813c57125ed46b9a280d718951597e4787eb`, the preflight verified that `plotroom connect --stdio` started a disposable daemon and returned a fresh snapshot using the scoped PAT from its configured file. The Checks read returned HTTP 200 on the fixture tip. The live acceptance run on that same revision passed. [Preflight](https://github.com/mgd43b/plotroom/actions/runs/45845547994) · [Acceptance](https://github.com/mgd43b/plotroom/actions/runs/45845942573)
+- Fixture PR #1 produced one `github.pr_opened` and one `github.pr_merged` event. The open-PR count went from zero to one and back to zero. The merged projection retained the PR head `6972a064`, distinct from fixture main’s merge `9a6ce8a89a15046c18dbfa5d7d2af88bb0edbc14`. [Fixture PR](https://github.com/mgd43b/plotroom-test/pull/1)
+- #32 verified the head change from `f5efe687` to `6972a064`, close and reopen transitions, and restart from the persisted cursor. The simulated rate-limit check passed locally. #37 matched local and remote ready refs at the exact default-branch commits, from `1.1` at `86ecdf31` to `1.1` and `1.2` after merge. #52 verified one notification from the trigger registered before merge and one from the trigger created after the merge was projected. [Acceptance](https://github.com/mgd43b/plotroom/actions/runs/45845942573)
+- #40 recorded one owning-lane `deploy_report` and refused the foreign-lane call. The live deployments read returned HTTP 200 with zero records. **The live deployment sample remains pending.** Deployment stays deferred. [Acceptance](https://github.com/mgd43b/plotroom/actions/runs/45845942573)
+- The fixture’s naturally triggered opening, update, reopen, and main CI runs passed. #33’s same-head rerun and qualifying flake-history evidence remain separate. [Opening](https://github.com/mgd43b/plotroom-test/actions/runs/45846026975) · [Update](https://github.com/mgd43b/plotroom-test/actions/runs/45846034453) · [Reopen](https://github.com/mgd43b/plotroom-test/actions/runs/45846111035) · [Main](https://github.com/mgd43b/plotroom-test/actions/runs/45846161353)
