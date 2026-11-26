@@ -8,7 +8,7 @@ hitl: false
 risk: low
 tracker_id: "106"
 remote: "https://github.com/mgd43b/plotroom/issues/106"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Refactor sweep
