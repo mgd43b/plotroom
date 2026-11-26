@@ -93,16 +93,26 @@ class OpenRouterUsageMeter:
         self._timeout = timeout
         self._transport = transport
 
-    async def observations(self) -> tuple[UsageObservation, ...]:
-        targets = await self._budgets()
-        if not targets:
-            return ()
-        async with httpx.AsyncClient(
+    async def verify_cap(self, run: str, cap_usd: float) -> bool:
+        binding = self._runs.get(run)
+        if binding is None:
+            return False
+        async with self._client() as client:
+            return await self._observe(client, run, cap_usd, binding.reservation) is not None
+
+    def _client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
             transport=self._transport,
             timeout=self._timeout,
             follow_redirects=False,
             trust_env=False,
-        ) as client:
+        )
+
+    async def observations(self) -> tuple[UsageObservation, ...]:
+        targets = await self._budgets()
+        if not targets:
+            return ()
+        async with self._client() as client:
             readings = await asyncio.gather(
                 *(self._observe(client, run, cap, reservation) for run, cap, reservation in targets)
             )

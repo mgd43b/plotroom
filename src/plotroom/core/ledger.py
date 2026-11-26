@@ -8,6 +8,7 @@ import math
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import partial
 from typing import Any
 
 from plotroom.core.actions import ACTION_PAGE_SIZE, Action, QueuedAction
@@ -312,7 +313,9 @@ class Ledger:
         kind = command_kind(command)
         upstream_id = f"{role}:{request_id}"
 
-        async def in_transaction(tx: Transaction) -> CommandResult:
+        async def in_transaction(
+            tx: Transaction, *, check_only: bool = False
+        ) -> CommandResult | None:
             uow = UnitOfWork(
                 tx,
                 self._catalog.events,
@@ -349,6 +352,8 @@ class Ledger:
                     )
             if receipt is not None:
                 return CommandResult(receipt["result"], True)
+            if check_only:
+                return None
             result = await registered.handler(uow, copy.deepcopy(target))
             if not isinstance(result, dict) or not is_json(result):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise TypeError(f"command {command!r} must return a JSON object")
@@ -377,7 +382,22 @@ class Ledger:
             await self._evaluate_triggers(tx)
             return CommandResult(result, False)
 
-        return await self._writer.submit(in_transaction)
+        if registered.preflight is not None:
+            replay = await self._writer.submit(partial(in_transaction, check_only=True))
+            if replay is not None:
+                return replay
+            assert snapshot is not None
+            try:
+                await registered.preflight(copy.deepcopy(snapshot))
+            except LedgerError:
+                # A concurrent request may have committed this receipt during preflight.
+                replay = await self._writer.submit(partial(in_transaction, check_only=True))
+                if replay is None:
+                    raise
+                return replay
+        committed = await self._writer.submit(in_transaction)
+        assert committed is not None
+        return committed
 
     async def head_seq(self) -> int:
         """The last allocated ``seq``. Reads committed state, not through the writer."""

@@ -70,6 +70,10 @@ Given a configured OpenRouter budget, a valid higher counter updates through the
 
 - Low, patched. A verified empty project file has no historical key reservation and no longer disables configured metering. Unreadable or nonempty unexpected schemas still fail closed.
 
+- Medium, patched. Archived lanes get a two-minute final polling window based on the durable archive receipt. Reservations outlive polling.
+- High, patched. Recoverable target read locks skip only the meter sample. Tests cover tick progress, fatal errors, and cancellation.
+- High, patched. Budget registration validates the mounted key and provider cap outside the writer transaction, after receipt and role checks. Failed verification leaves the key unreserved. Completed replays avoid another GET, and a concurrent committed receipt wins over a failed check.
+
 ## Verification
 
 - Locked Python 3.14 and 3.15 affected tests, Ruff, Pyright, and dependency check.

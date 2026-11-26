@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import AsyncGenerator, Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -445,9 +446,14 @@ class SqliteStore:
         async with self._engine.connect() as connection:
             return await triggers_sql.list_triggers(connection, lane)
 
-    async def read_openrouter_budgets(self) -> list[tuple[str, float, str]]:
-        async with self._engine.connect() as connection:
-            return await budgets_sql.read_openrouter_budgets(connection)
+    async def read_openrouter_budgets(self, now: datetime) -> list[tuple[str, float, str]]:
+        try:
+            async with self._engine.connect() as connection:
+                return await budgets_sql.read_openrouter_budgets(connection, now)
+        except DBAPIError as exc:
+            if retryable_search_write_error(exc) not in {"sqlite_busy", "sqlite_locked"}:
+                raise
+            raise OSError("OpenRouter budget targets temporarily unavailable") from None
 
     async def read_budgets(self, run: str | None) -> list[Budget]:
         async with self._engine.connect() as connection:

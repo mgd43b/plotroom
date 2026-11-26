@@ -3,7 +3,7 @@
 import math
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from fractions import Fraction
@@ -56,13 +56,41 @@ class Budget:
         return asdict(self)
 
 
+def _budget_cap(value: Any) -> float:
+    try:
+        cap = float(value)
+    except OverflowError:
+        cap = math.inf
+    if not math.isfinite(cap) or cap <= 0:
+        raise LedgerError("invalid", "cap_usd must be positive and finite")
+    return cap
+
+
+def _key_scope(value: str) -> KeyScope:
+    if value != "staging" and value != "production":
+        raise LedgerError("invalid", "key_scope must be staging or production")
+    return value
+
+
+async def validate_openrouter_budget(
+    args: dict[str, Any], *, check: Callable[[str, float], Awaitable[bool]]
+) -> None:
+    if args["provider"] == OPENROUTER_PROVIDER:
+        run: str = args["run"]
+        validate_identity(run, "run")
+        validate_identity(args["lane"], "lane")
+        _key_scope(args["key_scope"])
+        if not await check(run, _budget_cap(args["cap_usd"])):
+            raise LedgerError("invalid", "could not verify a capped OpenRouter key for this run")
+
+
 async def budget_open(
     uow: UnitOfWork, args: dict[str, Any], *, openrouter_bindings: Mapping[str, str] | None = None
 ) -> dict[str, Any]:
     run: str = args["run"]
     lane: str = args["lane"]
     provider: str = args["provider"]
-    key_scope: str = args["key_scope"]
+    key_scope = _key_scope(args["key_scope"])
     validate_identity(run, "run")
     validate_identity(lane, "lane")
     if _PROVIDER.fullmatch(provider) is None:
@@ -72,14 +100,7 @@ async def budget_open(
         binding = openrouter_bindings.get(run) if openrouter_bindings is not None else None
         if binding is None:
             raise LedgerError("invalid", "the run needs a configured OpenRouter key binding")
-    if key_scope != "staging" and key_scope != "production":
-        raise LedgerError("invalid", "key_scope must be staging or production")
-    try:
-        cap = float(args["cap_usd"])
-    except OverflowError:
-        cap = math.inf
-    if not math.isfinite(cap) or cap <= 0:
-        raise LedgerError("invalid", "cap_usd must be positive and finite")
+    cap = _budget_cap(args["cap_usd"])
     current = await uow.find_lane(lane)
     if current is None or current.state == "archived":
         raise LedgerError("conflict", "a budget requires a current lane")

@@ -458,6 +458,14 @@ class Daemon:
             for run, binding in self._config.openrouter_runs.get(project_id, {}).items()
             if binding.reservation not in self._blocked_openrouter_bindings
         }
+        router_meter = None
+        if openrouter_runs:
+            router_meter = OpenRouterUsageMeter(
+                openrouter_runs,
+                lambda: project.store.read_openrouter_budgets(self._clock.now()),
+                self._clock,
+                timeout=min(5.0, self._config.tick_seconds * 0.8),
+            )
         catalog = build_catalog(
             workers,
             github_repository=repository,
@@ -465,6 +473,7 @@ class Daemon:
             image_jobs=github.image_jobs if github is not None else (),
             lane_idle_minutes=self._config.lane_idle_minutes,
             human_login=human_login,
+            check_openrouter_cap=router_meter.verify_cap if router_meter is not None else None,
             openrouter_bindings={
                 run: binding.reservation for run, binding in openrouter_runs.items()
             },
@@ -583,14 +592,7 @@ class Daemon:
                     issue_source.milestone,
                 )
         project.work_items = work_items
-        usage_meter = self._usage_meters.get(project_id)
-        if usage_meter is None and openrouter_runs:
-            usage_meter = OpenRouterUsageMeter(
-                openrouter_runs,
-                project.store.read_openrouter_budgets,
-                self._clock,
-                timeout=min(5.0, self._config.tick_seconds * 0.8),
-            )
+        usage_meter = self._usage_meters.get(project_id, router_meter)
         project.runtime = ProjectRuntime(
             project.ledger,
             self._clock,

@@ -170,10 +170,13 @@ key dedicated to its original run.
 
 Open a budget for `run="trial"` with `provider="openrouter"`, the active lane,
 a `cap_usd` at least as high as the provider cap, and a `key_scope` of `staging`
-or `production`. The daemon reads lifetime `data.usage` in USD on the project tick.
+or `production`. Budget registration checks the mounted key and provider cap before reserving
+the key. The daemon reads lifetime `data.usage` in USD on the project tick.
 `budget_status(run="trial")` shows accepted spend and when Plotroom saw it.
 Provider accounting may lag. Equal, lower, incomplete, and BYOK readings preserve the previous
 spend and as-of. The provider key cap supplies the spend boundary during reporting delay.
+After a lane archives, its budgets can reconcile for two minutes. The key remains reserved
+when polling stops.
 [OpenRouter current-key API](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-key)
 
 - [Running Plotroom](docs/running.md): the local daemon, Docker Compose, the Helm chart on kind, and

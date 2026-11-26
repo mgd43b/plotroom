@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sqlite3
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -12,15 +13,20 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from conftest import authenticated_client, tool_json
 from fakes import FixedClock
 from plotroom.adapters.openrouter import OpenRouterRun, OpenRouterUsageMeter
+from plotroom.adapters.store_sqlite import SqliteStore, budgets_sql
 from plotroom.app import serve
 from plotroom.app.config import ConfigError, load_config
 from plotroom.app.runtime import ProjectRuntime
 from plotroom.app.serve import Daemon
+from plotroom.core.catalog import build_catalog
 from plotroom.core.events import LedgerError
+from plotroom.core.ledger import Ledger
 from test_daemon import bearer, run_daemon, stop
 
 FIXTURE_KEY = "sk-or-v1-fixture-usage-key"
@@ -181,9 +187,41 @@ async def test_daemon_polls_a_pinned_openrouter_key(
             )
             assert not missing["ok"]
             assert missing["error"]["code"] == "invalid"
-            assert tool_json(await client.call_tool("budget_open", {**args, "request_id": "open"}))[
-                "ok"
-            ]
+            before = calls
+            bad_scope = tool_json(
+                await client.call_tool(
+                    "budget_open", {**args, "key_scope": "wrong", "request_id": "bad-scope"}
+                )
+            )
+            assert "key_scope" in bad_scope["error"]["message"]
+            assert calls == before
+
+            key_file.write_text("sk-or-v1-unpinned")
+            before = calls
+            unpinned = tool_json(
+                await client.call_tool("budget_open", {**args, "request_id": "open"})
+            )
+            assert not unpinned["ok"]
+            assert calls == before
+            key_file.write_text(FIXTURE_KEY)
+            small = tool_json(
+                await client.call_tool("budget_open", {**args, "cap_usd": 1, "request_id": "open"})
+            )
+            assert not small["ok"]
+            assert small["error"]["code"] == "invalid"
+            assert await daemon.ledgers["demo"].budget_status("orchestrator", "trial") == []
+            opened = tool_json(
+                await client.call_tool("budget_open", {**args, "request_id": "open"})
+            )
+            assert opened["ok"]
+            count = calls
+            key_file.unlink()
+            assert (
+                tool_json(await client.call_tool("budget_open", {**args, "request_id": "open"}))
+                == opened
+            )
+            assert calls == count
+            key_file.write_text(FIXTURE_KEY)
             await tick()
             outcome = tool_json(await client.call_tool("budget_status", {"run": "trial"}))
             [record] = outcome["data"]["budgets"]
@@ -264,8 +302,54 @@ async def test_daemon_polls_a_pinned_openrouter_key(
         [fresh] = await ledger.budget_status("orchestrator", "trial")
         assert fresh["spent_usd"] == 0.01
         assert datetime.fromisoformat(fresh["as_of"]) == clock.now()
+
+        lock_error = sqlite3.OperationalError("synthetic database lock")
+        lock_error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+
+        async def locked(
+            _connection: AsyncConnection, _now: datetime
+        ) -> list[tuple[str, float, str]]:
+            raise OperationalError("synthetic read", {}, lock_error)
+
+        spend = 0.02
+        with monkeypatch.context() as patch:
+            patch.setattr(budgets_sql, "read_openrouter_budgets", locked)
+            head = await ledger.head_seq()
+            await tick()
+            assert any(event.kind == "core.tick" for event in await ledger.events_after(head))
+            assert await ledger.budget_status("orchestrator", "trial") == [fresh]
+        await tick()
+        [updated] = await ledger.budget_status("orchestrator", "trial")
+        assert updated["spent_usd"] == 0.02
+        await ledger.execute("orchestrator", "lane_archive", "archive", {"lane": "lane"})
     finally:
         await stop(restarted, task)
+
+    archived = Daemon(config, clock=clock)
+    task, _ = await run_daemon(archived)
+    try:
+        spend = 0.03
+        await tick()
+        [final] = await archived.ledgers["demo"].budget_status("orchestrator", "trial")
+        assert final["spent_usd"] == 0.03
+    finally:
+        await stop(archived, task)
+
+    clock.advance(120)
+    expired = Daemon(config, clock=clock)
+    task, _ = await run_daemon(expired)
+    try:
+        before = calls
+        await tick()
+        assert calls == before
+        ledger = expired.ledgers["demo"]
+        assert await ledger.budget_status("orchestrator", "trial") == [final]
+        reservation = config.openrouter_runs["demo"]["trial"].reservation
+        assert not await ledger.run(
+            "system", lambda uow: uow.reserve_openrouter_key(reservation, "other-run")
+        )
+    finally:
+        await stop(expired, task)
     assert FIXTURE_KEY not in caplog.text
     assert PIN not in caplog.text
     for database in config.data_dir.glob("*.db*"):
@@ -328,3 +412,86 @@ async def test_a_slow_openrouter_key_does_not_discard_other_runs(tmp_path: Path)
         [reading] = await meter.observations()
     assert reading.run == "healthy"
     assert reading.spent_usd == 0.0000033
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_openrouter_read_preserves_fatal_errors_and_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool
+) -> None:
+    corruption = sqlite3.OperationalError("synthetic corrupt database")
+    corruption.sqlite_errorcode = sqlite3.SQLITE_CORRUPT
+
+    async def fail(_connection: AsyncConnection, _now: datetime) -> list[tuple[str, float, str]]:
+        if cancelled:
+            raise asyncio.CancelledError
+        raise OperationalError("synthetic read", {}, corruption)
+
+    store = SqliteStore("demo", tmp_path)
+    monkeypatch.setattr(budgets_sql, "read_openrouter_budgets", fail)
+    try:
+        with pytest.raises(asyncio.CancelledError if cancelled else OperationalError):
+            await store.read_openrouter_budgets(FixedClock().now())
+    finally:
+        await store.close()
+
+
+async def test_concurrent_budget_open_can_replay_after_a_failed_check(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def check(_run: str, _cap: float) -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await release.wait()
+            return False
+        return True
+
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    catalog = build_catalog(
+        frozenset({"fixture"}),
+        openrouter_bindings={"trial": "reservation"},
+        check_openrouter_cap=check,
+    )
+    ledger = Ledger(store, catalog, FixedClock())
+    ledger.start()
+    pending: asyncio.Task[Any] | None = None
+    try:
+        await ledger.execute(
+            "orchestrator",
+            "lane_start",
+            "start",
+            {
+                "lane": "lane",
+                "worker": "fixture",
+                "branch": "work",
+                "work_items": [],
+            },
+        )
+        args = {
+            "run": "trial",
+            "lane": "lane",
+            "cap_usd": 5,
+            "provider": "openrouter",
+            "key_scope": "staging",
+        }
+        async with asyncio.timeout(3):
+            pending = asyncio.create_task(
+                ledger.execute("orchestrator", "budget_open", "open", args)
+            )
+            await started.wait()
+            committed = await ledger.execute("orchestrator", "budget_open", "open", args)
+            release.set()
+            replay = await pending
+        assert replay.replayed
+        assert replay.result == committed.result
+        assert calls == 2
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        await ledger.stop()
+        await store.close()

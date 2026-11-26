@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
 
@@ -24,6 +24,7 @@ from plotroom.core.budgets import (
     BUDGET_THRESHOLD,
     BUDGET_THRESHOLD_FIELDS,
     budget_open,
+    validate_openrouter_budget,
 )
 from plotroom.core.checklists import CHECKLIST_ARG, CHECKLIST_EMPTY, CHECKLIST_EMPTY_FIELDS
 from plotroom.core.claims import CLAIM_OVERLAP, PR_CLAIM_OVERLAP, TICKET_TREE_MOVE, claim, release
@@ -118,6 +119,7 @@ def build_catalog(
     image_jobs: tuple[str, ...] = (),
     lane_idle_minutes: int = 15,
     openrouter_bindings: Mapping[str, str] | None = None,
+    check_openrouter_cap: Callable[[str, float], Awaitable[bool]] | None = None,
 ) -> Catalog:
     """Every kind and command the server knows."""
     events = EventRegistry()
@@ -134,7 +136,15 @@ def build_catalog(
         Command(
             "budget_open",
             BUDGET_ARGS,
-            partial(budget_open, openrouter_bindings=openrouter_bindings),
+            partial(
+                budget_open,
+                openrouter_bindings=openrouter_bindings
+                if check_openrouter_cap is not None
+                else None,
+            ),
+            preflight=partial(validate_openrouter_budget, check=check_openrouter_cap)
+            if check_openrouter_cap is not None
+            else None,
         ),
         rules=(WriterRule("orchestrator"),),
     )

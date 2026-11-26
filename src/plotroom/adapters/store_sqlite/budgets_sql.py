@@ -4,12 +4,14 @@ import sqlite3
 from collections.abc import Mapping
 from contextlib import closing
 from dataclasses import asdict
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from plotroom.core.budgets import Budget
+from plotroom.core.events import format_time
 
 _BUDGET = text("SELECT * FROM budgets WHERE run = :run")
 _BUDGETS = text("SELECT * FROM budgets ORDER BY run")
@@ -25,7 +27,12 @@ _OPENROUTER_RESERVE = text("""
 _OPENROUTER_BUDGETS = text("""
     SELECT budgets.run, budgets.cap_usd, substr(project_meta.key, :start) AS reservation
     FROM budgets JOIN project_meta ON project_meta.value = budgets.run
+    JOIN lanes ON lanes.id = budgets.lane
     WHERE budgets.provider = 'openrouter' AND project_meta.key GLOB :pattern
+      AND (lanes.state != 'archived' OR budgets.lane IN (
+        SELECT json_extract(fields, '$.args.lane') FROM events
+        WHERE kind = 'core.lane_archive' AND observed_at > :archive_cutoff
+      ))
     ORDER BY budgets.run
 """)
 _UPDATE_SPEND = text("UPDATE budgets SET spent_usd = :spent_usd, as_of = :as_of WHERE id = :id")
@@ -58,10 +65,16 @@ async def reserve_openrouter_key(connection: AsyncConnection, reservation: str, 
     return inserted.scalar_one_or_none() is not None
 
 
-async def read_openrouter_budgets(connection: AsyncConnection) -> list[tuple[str, float, str]]:
+async def read_openrouter_budgets(
+    connection: AsyncConnection, now: datetime
+) -> list[tuple[str, float, str]]:
     rows = await connection.execute(
         _OPENROUTER_BUDGETS,
-        {"start": len(_OPENROUTER_PREFIX) + 1, "pattern": _OPENROUTER_PREFIX + "*"},
+        {
+            "start": len(_OPENROUTER_PREFIX) + 1,
+            "pattern": _OPENROUTER_PREFIX + "*",
+            "archive_cutoff": format_time(now - timedelta(minutes=2)),
+        },
     )
     return [(str(row.run), float(row.cap_usd), str(row.reservation)) for row in rows]
 
