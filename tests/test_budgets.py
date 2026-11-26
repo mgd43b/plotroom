@@ -175,6 +175,59 @@ async def test_cumulative_spend_warnings_and_replay(tmp_path: Path) -> None:
         assert retry.result == opened
 
 
+async def test_incomplete_reading_preserves_spend_and_allows_authoritative_correction(
+    tmp_path: Path,
+) -> None:
+    clock = FixedClock()
+    start = clock.now()
+    meter = FixtureUsageMeter()
+    async with open_ledger(tmp_path, clock) as ledger:
+        await start_lane(ledger)
+        opened = (await ledger.execute(ORCHESTRATOR, "budget_open", "open", BUDGET_ARGS)).result
+        runtime = ProjectRuntime(
+            ledger, clock, tick_seconds=60, action_attempts=2, usage_meter=meter
+        )
+
+        async def poll(*readings: UsageObservation) -> None:
+            meter.readings = readings
+            clock.advance(60)
+            assert await runtime.tick_if_due()
+
+        current_time = start + timedelta(seconds=10)
+        current = UsageObservation("fixture", "run", 0.08, current_time)
+        await poll(current)
+        partial_time = start + timedelta(seconds=50)
+        partial = UsageObservation("fixture", "run", 0.01, partial_time, complete=False)
+        await poll(partial)
+        assert await ledger.budget_status(ORCHESTRATOR, "run") == [
+            {**opened, "spent_usd": 0.08, "as_of": format_time(current_time)}
+        ]
+
+        # Completeness takes precedence over the timestamp, even within the same poll.
+        correction_time = start + timedelta(seconds=20)
+        correction = UsageObservation("fixture", "run", 0.02, correction_time)
+        unverified_cap = UsageObservation(
+            "fixture", "run", 0.1, start + timedelta(seconds=60), complete=False
+        )
+        await poll(partial, correction, unverified_cap)
+        assert await ledger.budget_status(ORCHESTRATOR, "run") == [
+            {**opened, "spent_usd": 0.02, "as_of": format_time(correction_time)}
+        ]
+
+        next_time = start + timedelta(seconds=30)
+        next_reading = UsageObservation("fixture", "run", 0.09, next_time)
+        await poll(next_reading)
+        assert await ledger.budget_status(ORCHESTRATOR, "run") == [
+            {**opened, "spent_usd": 0.09, "as_of": format_time(next_time)}
+        ]
+        assert [
+            event.fields["percent"]
+            for event in await ledger.events_after(0)
+            if event.kind == BUDGET_THRESHOLD
+        ] == [50, 80]
+        assert await ledger.pending_action() is None
+
+
 async def test_usage_meter_timeout_preserves_budget_and_tick_progress(tmp_path: Path) -> None:
     class StallingMeter(FixtureUsageMeter):
         stalled = False

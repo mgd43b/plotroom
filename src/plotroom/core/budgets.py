@@ -86,6 +86,8 @@ async def record_budget_observations(
 ) -> None:
     latest: dict[tuple[str, str], UsageObservation] = {}
     for reading in readings:
+        if not reading.complete:
+            continue
         pair = (reading.meter, reading.run)
         previous = latest.get(pair)
         if previous is None or reading.as_of > previous.as_of:

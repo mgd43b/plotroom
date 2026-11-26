@@ -8,10 +8,13 @@ from typing import Protocol
 
 @dataclass(frozen=True)
 class UsageObservation:
+    """Cumulative spend through as_of, eligible for the ledger when complete."""
+
     meter: str
     run: str
     spent_usd: float
     as_of: datetime
+    complete: bool = True
 
     def __post_init__(self) -> None:
         try:
@@ -28,5 +31,5 @@ class UsageObservation:
 
 class UsageMeter(Protocol):
     async def observations(self) -> tuple[UsageObservation, ...]:
-        """Return a snapshot of cumulative readings from the meter."""
+        """Return a snapshot of cumulative readings, marking incomplete samples explicitly."""
         ...
