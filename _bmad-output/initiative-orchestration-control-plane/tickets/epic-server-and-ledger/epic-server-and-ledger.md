@@ -81,3 +81,4 @@ An orchestrator can be restarted or compacted mid-run and rebuild the board from
   - Codex CLI 0.169.0 showed `failed (0 tools)` in `/mcp`. Initialization reported `unexpected server response: HTTP 401`. Opening `/mcp` triggered a second connection attempt.
   - Claude Code 2.1.325 marked the server failed in `/mcp`, retried with the legacy protocol, and logged `Dynamic Client Registration rejected (HTTP 401)`.
   - Both clients remained usable after the connection failed. Neither displayed a sign-in prompt during the check.
+- Native acceptance dependency: #25 supplies the CI-gated first PyPI wheel and GHCR image publication required by R10 and the final Done-when criterion.
