@@ -21,7 +21,7 @@ from plotroom.core.ledger import Ledger
 from plotroom.core.merge_flakes import (
     FLAKE_EVENT,
     MAIN_FLAKE_EVENT,
-    MainPair,
+    main_pairs,
     record_main_flakes,
     record_pull_flakes,
     record_same_head,
@@ -348,6 +348,24 @@ SAME_HEAD_RECOVERIES: list[tuple[bool, tuple[dict[str, Any], ...], int | None]] 
     (True, ({},), None),
     (True, ({"passed_tests": []},), None),
     (True, ({"passed_tests": [{"path": "test.py", "test_id": "different"}]},), None),
+    (False, ({"junit_state": "deferred"}, {}), None),
+    (False, ({"junit_miss_remaining": 2, "passed_tests": []},), 102),
+    (
+        False,
+        (
+            {"junit_evidence": True, "passed_tests": [{"path": "test.py", "test_id": "other"}]},
+            {"passed_tests": [{"path": "test.py", "test_id": "unrelated"}]},
+        ),
+        None,
+    ),
+    (
+        False,
+        (
+            {"junit_evidence": True, "passed_tests": [{"path": "test.py", "test_id": "other"}]},
+            {"passed_tests": [{"path": "test.py", "test_id": "test"}]},
+        ),
+        103,
+    ),
     (
         True,
         (
@@ -396,8 +414,32 @@ async def test_same_head_structured_recovery_evaluates_later_test_results(
     uow.append.return_value = SimpleNamespace(created=False)
     await record_same_head(uow, REPO, checks)
     if expected_id is None:
-        await record_main_flakes(uow, REPO, MainPair(failure, successes[0]), None)
         uow.append.assert_not_awaited()
     else:
         uow.append.assert_awaited_once()
         assert uow.append.await_args.args[0].fields["success_check_id"] == expected_id
+
+    runs = tuple(
+        GitHubRecord(
+            check.key,
+            "workflow_run",
+            {
+                "head_sha": FIRST,
+                "jobs": [{**check.fields, "check_run_id": check.fields["id"]}],
+            },
+            details={"workflow_id": 40},
+        )
+        for check in (*reversed(successes), failure)
+    )
+    uow.reset_mock()
+    pairs = main_pairs(runs, {FIRST: checks})
+    assert len(pairs) == len(successes)
+    for pair in pairs:
+        await record_main_flakes(uow, REPO, pair, None)
+    if expected_id is None:
+        uow.append.assert_not_awaited()
+    else:
+        candidate, proof = [call.args[0] for call in uow.append.await_args_list]
+        assert candidate.kind == FLAKE_EVENT
+        assert candidate.fields["success_check_id"] == expected_id
+        assert proof.kind == MAIN_FLAKE_EVENT

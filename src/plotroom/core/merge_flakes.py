@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -108,6 +109,21 @@ def same_head_recovery(failure: GitHubRecord, success: GitHubRecord) -> bool:
     )
 
 
+def _junit_recovery_evidence(check: GitHubRecord) -> bool:
+    return check.details.get("junit_evidence") is True or check.details.get("junit_state") in (
+        "deferred",
+        "retry_deferred",
+        "unavailable",
+    )
+
+
+def _same_head_requires_test_pass(failure: GitHubRecord, successes: Iterable[GitHubRecord]) -> bool:
+    return _junit_recovery_evidence(failure) or any(
+        _junit_recovery_evidence(success) and same_head_recovery(failure, success)
+        for success in successes
+    )
+
+
 def has_test_identity(path: str, test_id: str) -> bool:
     return bool(path and test_id) and all(part not in {"", ".", ".."} for part in path.split("/"))
 
@@ -127,6 +143,7 @@ def _candidates(
     *,
     number: int | None = None,
     changed_paths: set[str] | None = None,
+    require_test_pass: bool = False,
 ) -> tuple[tuple[Candidate, ...], bool]:
     annotations = failure.details.get("annotations")
     if annotations is None:
@@ -149,8 +166,9 @@ def _candidates(
         if success is not None
         and (
             not same_head
-            or failure.details.get("junit_evidence") is True
-            or success.details.get("junit_evidence") is True
+            or require_test_pass
+            or _junit_recovery_evidence(failure)
+            or _junit_recovery_evidence(success)
         )
         else None
     )
@@ -210,10 +228,13 @@ async def record_same_head(uow: UnitOfWork, repository: str, checks: GitHubResou
         return
     successes = [check for check in checks.records if _is_success(check)]
     for failure in prior_check_failures(checks):
+        require_test_pass = _same_head_requires_test_pass(failure, successes)
         for success in successes:
             if not same_head_recovery(failure, success):
                 continue
-            candidates, fully_proven = _candidates(failure, success)
+            candidates, fully_proven = _candidates(
+                failure, success, require_test_pass=require_test_pass
+            )
             await _record_candidates(uow, repository, candidates)
             if fully_proven:
                 break
@@ -310,6 +331,7 @@ def main_recovery_check_ids(runs: tuple[GitHubRecord, ...]) -> dict[str, set[int
 class MainPair:
     failure: GitHubRecord
     success: GitHubRecord
+    require_test_pass: bool = False
 
     @property
     def base(self) -> str:
@@ -350,7 +372,10 @@ def main_pairs(
                 ):
                     continue
                 if _same_check(failure, success) and _later_check(failure, success):
-                    pairs.append(MainPair(failure, success))
+                    require_test_pass = failure.fields["head_sha"] == success.fields[
+                        "head_sha"
+                    ] and _same_head_requires_test_pass(failure, successes.values())
+                    pairs.append(MainPair(failure, success, require_test_pass))
     return tuple(pairs)
 
 
@@ -362,7 +387,12 @@ async def record_main_flakes(
         if comparison is None or not comparison.complete:
             return
         paths = set(comparison.attributes["paths"])
-    candidates, fully_proven = _candidates(pair.failure, pair.success, changed_paths=paths)
+    candidates, fully_proven = _candidates(
+        pair.failure,
+        pair.success,
+        changed_paths=paths,
+        require_test_pass=pair.require_test_pass,
+    )
     await _record_candidates(uow, repository, candidates)
     if fully_proven:
         check_id = pair.failure.fields["id"]

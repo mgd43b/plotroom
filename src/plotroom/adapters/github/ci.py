@@ -46,8 +46,12 @@ class JUnitBudget:
     attempts_left: int = 8
     seconds_left: float = 8.0
 
+    @property
+    def exhausted(self) -> bool:
+        return self.attempts_left <= 0 or self.seconds_left <= 0
+
     def claim(self) -> float | None:
-        if self.attempts_left <= 0 or self.seconds_left <= 0:
+        if self.exhausted:
             return None
         self.attempts_left -= 1
         return min(self.seconds_left, MAX_JUNIT_LOOKUP_SECONDS)
@@ -78,6 +82,7 @@ async def fetch_checks(
     include_junit: bool = True,
     recovery_check_ids: Collection[int] = (),
     junit_budget: JUnitBudget | None = None,
+    allow_junit_lookup: bool = True,
 ) -> GitHubResource:
     checks: list[GitHubRecord] = []
     junit = JUnitReader(api, client, token) if include_junit else None
@@ -170,13 +175,25 @@ async def fetch_checks(
             *(prior_check_failures(previous) if previous is not None else ()),
             *(check for check in checks if is_failure(check)),
         ]
+        # Prefer checks that have never received an optional read to expired retries.
+        junit_pending.sort(
+            key=lambda entry: entry[1] is None or entry[1].details.get("junit_state") != "deferred"
+        )
         for check, cached, evidence, passed in junit_pending:
             if (
                 not passed
                 or check.fields["id"] in recovery_check_ids
                 or any(same_head_recovery(failure, check) for failure in failures)
             ):
-                await _read_junit(junit, budget, check, cached, evidence, passed=passed)
+                await _read_junit(
+                    junit,
+                    budget,
+                    check,
+                    cached,
+                    evidence,
+                    passed=passed,
+                    allow_lookup=allow_junit_lookup,
+                )
     history = dict(previous.attributes.get("prior_failures", {})) if previous else {}
     for check in checks:
         if is_failure(check):
@@ -197,9 +214,11 @@ async def _read_junit(
     evidence: str,
     *,
     passed: bool,
+    allow_lookup: bool,
 ) -> None:
     details = check.details
     pass_annotations: list[Row] = details[evidence] if passed else []
+    previously_attempted = False
     if (
         cached is not None
         and cached.fields == check.fields
@@ -226,11 +245,18 @@ async def _read_junit(
         remaining = cached.details.get("junit_unavailable_remaining")
         if type(remaining) is int and 0 < remaining <= JUNIT_UNAVAILABLE_REFRESHES:
             details["junit_unavailable_remaining"] = remaining - 1
-            _unverified_junit(details, evidence, passed=passed)
+            _unverified_junit(details, evidence, passed=passed, state="unavailable")
             return
-    timeout = budget.claim()
+        previously_attempted = (
+            cached.details.get("junit_evidence") is True
+            or "junit_miss_remaining" in cached.details
+            or "junit_unavailable_remaining" in cached.details
+            or cached.details.get("junit_state") == "retry_deferred"
+        )
+    timeout = budget.claim() if allow_lookup else None
     if timeout is None:
-        _unverified_junit(details, evidence, passed=passed)
+        state = "retry_deferred" if previously_attempted else "deferred"
+        _unverified_junit(details, evidence, passed=passed, state=state)
         return
     clock = asyncio.get_running_loop().time
     start = clock()
@@ -249,7 +275,7 @@ async def _read_junit(
         TypeError,
     ):
         details["junit_unavailable_remaining"] = JUNIT_UNAVAILABLE_REFRESHES
-        _unverified_junit(details, evidence, passed=passed)
+        _unverified_junit(details, evidence, passed=passed, state="unavailable")
         return
     finally:
         budget.seconds_left -= clock() - start
@@ -263,9 +289,10 @@ async def _read_junit(
             details["junit_pass_annotations"] = pass_annotations
 
 
-def _unverified_junit(details: Row, evidence: str, *, passed: bool) -> None:
+def _unverified_junit(details: Row, evidence: str, *, passed: bool, state: str) -> None:
     # Keep independently verified pass annotations. Deferred or unavailable
     # JUnit cannot establish an empty failure report or an empty pass set.
+    details["junit_state"] = state
     if not passed or not details[evidence]:
         del details[evidence]
 

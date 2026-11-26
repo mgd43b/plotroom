@@ -19,6 +19,9 @@ from plotroom.adapters.github import (
     LocalGitHubCredential,
     PullRequestFetcher,
 )
+from plotroom.adapters.github import (
+    details as details_adapter,
+)
 from plotroom.adapters.github.ci import (
     JUNIT_MISS_REFRESHES,
     JUNIT_UNAVAILABLE_REFRESHES,
@@ -28,6 +31,7 @@ from plotroom.adapters.github.ci import (
 from plotroom.adapters.github.details import GitHubDetailPoller
 from plotroom.adapters.github.junit import (
     MAX_ARCHIVE,
+    JUnitReader,
     _download_url,  # pyright: ignore[reportPrivateUsage]
 )
 from plotroom.adapters.github.junit_xml import MAX_XML, junit_evidence
@@ -540,6 +544,7 @@ async def test_unavailable_junit_preserves_independent_pass_annotations(
         {"path": "tests/test_other.py", "test_id": "test_other"},
     ]
     assert "junit_evidence" not in observed.records[0].details
+    assert observed.records[0].details["junit_state"] == "unavailable"
     assert len(blob.downloads) == 1
 
 
@@ -553,6 +558,7 @@ async def test_shared_junit_budget_defers_other_heads_until_next_poll(blob: Arch
         assert read.records[0].details["junit_evidence"] is True
         assert deferred.complete
         assert "annotations" not in deferred.records[0].details
+        assert deferred.records[0].details["junit_state"] == "deferred"
         assert len(blob.downloads) == 1
         assert "suite/200" not in fixture.lookups
 
@@ -565,6 +571,63 @@ async def test_shared_junit_budget_defers_other_heads_until_next_poll(blob: Arch
         )
         assert resumed.records[0].details["junit_evidence"] is True
     assert [httpx.URL(target).path for target in blob.downloads] == ["/blob/101", "/blob/104"]
+
+
+async def test_detail_poll_rotates_optional_work_past_expiring_misses(
+    tmp_path: Path, blob: ArchiveServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = JUnitFixture(blob)
+    extra_ids = tuple(range(110, 115))
+    refreshed: list[str] = []
+    attempted: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        response = fixture.handle(request)
+        path = request.url.path.removeprefix(f"/repos/{REPO}")
+        if path.endswith("/check-runs"):
+            sha = path.split("/")[2]
+            refreshed.append(sha)
+            if sha == FIRST:
+                original: list[dict[str, Any]] = response.json()["check_runs"]
+                for identifier in extra_ids:
+                    check_row = check(identifier, f"job-{identifier}", "failure", sha, 0)
+                    check_row["app"]["slug"] = "github-actions"
+                    check_row["check_suite"]["id"] = RUNS[sha]
+                    original.append(check_row)
+                return httpx.Response(
+                    200, json={"check_runs": original, "total_count": len(original)}
+                )
+        return response
+
+    async def absent(
+        _reader: JUnitReader, fields: dict[str, Any], _suite: int, *, passed: bool
+    ) -> None:
+        attempted.append(fields["id"])
+
+    monkeypatch.setattr(JUnitReader, "evidence", absent)
+    monkeypatch.setattr(details_adapter, "JUnitBudget", lambda: JUnitBudget(attempts_left=1))
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    clock = FixedClock()
+    ledger = Ledger(store, build_catalog(github_repository=REPO), clock, github_repository=REPO)
+    credential = LocalGitHubCredential("TOKEN", {"TOKEN": "fixture"}, None)
+    puller = GitHubPoller(ledger, clock, REPO, credential, PullRequestFetcher(blob.origin, REPO), 1)
+    details = GitHubDetailPoller(ledger, clock, GitHubReadClient(blob.origin, REPO), credential)
+    ledger.start()
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            await puller.poll(client)
+            for _ in range(3 * (JUNIT_MISS_REFRESHES + 1)):
+                refreshed.clear()
+                prior_attempts = len(attempted)
+                await details.poll(client)
+                assert refreshed == [MAIN_SHA, FAILED_MAIN, FIRST]
+                assert len(attempted) - prior_attempts <= 1
+    finally:
+        await ledger.stop()
+        await store.close()
+    assert attempted[:3] == [105, 104, 101]
+    assert set(attempted) == {105, 104, 101, 103, *extra_ids}
 
 
 TESTCASE = '<testcase classname="module" name="test" file="tests/test.py"/>'

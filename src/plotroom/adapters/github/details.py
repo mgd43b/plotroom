@@ -120,6 +120,7 @@ class GitHubDetailPoller:
         self.on_merge_evidence = on_merge_evidence
         self._comparison_cursor = 0
         self._ask_history_offset = 0
+        self._junit_offset = 0
 
     async def confirm_gate(self, snapshot: GateSnapshot) -> GateSnapshot | None:
         """Read authoritative evidence on demand for a pinned clerk recheck."""
@@ -292,11 +293,14 @@ class GitHubDetailPoller:
         checks: dict[str, GitHubResource] = {}
         recoveries = main_recovery_check_ids(history)
         junit_budget = JUnitBudget()
-        for sha, numbers in targets.items():
+        junit_start = self._junit_offset % max(1, len(targets))
+        next_junit_start = 0
+        for index, (sha, numbers) in enumerate(targets.items()):
+            attempts_before = junit_budget.attempts_left
             result = await self._refresh(
                 CHECKS,
                 sha,
-                lambda previous, sha=sha: fetch_checks(
+                lambda previous, sha=sha, allow_lookup=index >= junit_start: fetch_checks(
                     api,
                     client,
                     token,
@@ -304,11 +308,16 @@ class GitHubDetailPoller:
                     previous,
                     recovery_check_ids=recoveries.get(sha, ()),
                     junit_budget=junit_budget,
+                    allow_junit_lookup=allow_lookup,
                 ),
                 pulls=tuple(numbers),
             )
             if result is not None:
                 checks[sha] = result
+            if junit_budget.attempts_left != attempts_before:
+                next_junit_start = index + 1
+        # Rotate optional work only. Required observations still run in their usual order.
+        self._junit_offset = next_junit_start if junit_budget.exhausted else 0
         for pull in pulls:
             complete = True
             files = None
