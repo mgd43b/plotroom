@@ -70,7 +70,7 @@ The previous [Epic 7 retrospective](../epic-human-queue/epic-human-queue-retrosp
 
 The owner approved the tracker disposition. The three follow-up items remain deferred.
 
-1. **Owner and ticketer, closure policy.** The owner authorized the documented #8 native mapping and completion. Apply the tracker write-list only after the retrospective and canonical completion land with green exact-main CI.
+1. **Owner and ticketer, closure policy.** After the retrospective and canonical completion land with green exact-main CI and the coordinator releases the tracker sync, remove only the native blocker links from #8 to #1 and #2. Retain closed #3 and all child links. Mirror the approved Epic #8 Notes, remove only the backlog label, and mark #8 completed. Verify the resulting body, labels, state, and links.
 2. **Ticketer, traceability.** Carry the verified #208 and #209 backlinks for #102, #106, and #107 into an authorized metadata pass.
 3. **Guardrails test owner, proposed regressions.** Pin fail-closed startup with an unexpected inactive schema and worker authorization before configured provider preflight. Use synthetic mounted keys and assert zero authenticated reads on denied or unverified paths.
 4. **Owner and ticketer, deferred metering polish.** Decide whether to track unmetered-budget visibility and final archive reconciliation after missed polling windows. Keep hosted/in-flight recipient fencing with its existing handoff instead of duplicating it here.
