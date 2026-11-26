@@ -22,6 +22,9 @@ def steps() -> dict[str, str]:
     assert workflow["permissions"] == {"contents": "read"}
     dispatch = workflow["on"]["workflow_dispatch"]["inputs"]
     assert dispatch["phase"]["default"] == "preflight"
+    job_guard = workflow["jobs"]["fixture"]["if"]
+    assert "github.actor == 'mgd43b'" in job_guard
+    assert "github.triggering_actor == 'mgd43b'" in job_guard
     return {
         step["name"]: step["run"] for step in workflow["jobs"]["fixture"]["steps"] if "run" in step
     }
@@ -81,19 +84,21 @@ esac
 
 
 @pytest.mark.parametrize(
-    ("phase", "credential", "harness_exit", "expected"),
+    ("phase", "attempt", "credential", "harness_exit", "expected"),
     [
-        ("preflight", "synthetic", 0, 0),
-        ("acceptance", "synthetic", 0, 0),
-        ("unknown", "synthetic", 0, 2),
-        ("preflight", "", 0, 1),
-        ("preflight", "synthetic", 15, 15),
+        ("preflight", "1", "synthetic", 0, 0),
+        ("acceptance", "1", "synthetic", 0, 0),
+        ("acceptance", "2", "synthetic", 0, 1),
+        ("unknown", "1", "synthetic", 0, 2),
+        ("preflight", "1", "", 0, 1),
+        ("preflight", "1", "synthetic", 15, 15),
     ],
 )
 def test_workflow_confines_fixture_credential(
     steps: dict[str, str],
     tmp_path: Path,
     phase: str,
+    attempt: str,
     credential: str,
     harness_exit: int,
     expected: int,
@@ -132,6 +137,7 @@ sys.exit(int(os.environ["HARNESS_EXIT"]))
         tmp_path,
         RUNNER_TEMP=str(runner_temp),
         FIXTURE_PHASE=phase,
+        GITHUB_RUN_ATTEMPT=attempt,
         FIXTURE_PAT=credential,
         HARNESS_EXIT=str(harness_exit),
         **{OVERRIDE: "synthetic-override"},

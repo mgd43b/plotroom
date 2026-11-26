@@ -27,7 +27,9 @@ jobs:
     if: >-
       github.server_url == 'https://github.com' &&
       github.repository == 'mgd43b/plotroom' &&
-      github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'mgd43b' &&
+      github.triggering_actor == 'mgd43b'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -63,7 +65,8 @@ jobs:
           FIXTURE_PAT: ${{ secrets.PLOTROOM_GITHUB_FIXTURE_GITHUB_TOKEN }}
         run: |
           case "$FIXTURE_PHASE" in
-            preflight|acceptance) ;;
+            preflight) ;;
+            acceptance) test "$GITHUB_RUN_ATTEMPT" = 1 ;;
             *) exit 2 ;;
           esac
           test -n "$FIXTURE_PAT"

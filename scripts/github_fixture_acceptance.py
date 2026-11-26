@@ -82,6 +82,7 @@ class Provider:
         self.acceptance = acceptance
         self.preflight_passed = False
         self.denied: dict[str, int] = {}
+        self.partial: set[str] = set()
 
     async def request(
         self, method: str, path: str, *, optional: bool = False, **kwargs: Any
@@ -98,6 +99,10 @@ class Provider:
                 or (method == "PUT" and path in {"/contents/README.md", f"/contents/{STORY}"})
                 or (method == "PATCH" and re.fullmatch(r"/pulls/[1-9][0-9]*", path))
                 or (method == "PUT" and re.fullmatch(r"/pulls/[1-9][0-9]*/merge", path))
+                or (
+                    method == "DELETE"
+                    and re.fullmatch(r"/git/refs/heads/plotroom-fixture/[1-9][0-9]*", path)
+                )
             )
             require(allowed, "unapproved fixture mutation")
         response = await self.client.request(
@@ -112,9 +117,13 @@ class Provider:
             raise AcceptanceError(
                 f"fixture provider {method} failed with HTTP {response.status_code}"
             )
-        if method == "GET" and "next" in response.links:
-            raise AcceptanceError("fixture provider evidence exceeded one page")
-        return response.json()
+        if method == "GET":
+            self.partial.discard(path)
+            if "next" in response.links:
+                if not optional:
+                    raise AcceptanceError("fixture provider evidence exceeded one page")
+                self.partial.add(path)
+        return None if response.status_code == 204 else response.json()
 
     async def get(self, path: str, **kwargs: Any) -> Any:
         return await self.request("GET", path, **kwargs)
@@ -201,6 +210,7 @@ async def preflight(provider: Provider) -> tuple[str, int, dict[str, Any] | None
             http_status=provider.denied.get(endpoint, 200),
             count=len(rows) if rows is not None else None,
             available=rows is not None,
+            complete=rows is not None and endpoint not in provider.partial,
         )
 
     sample = None
@@ -208,7 +218,8 @@ async def preflight(provider: Provider) -> tuple[str, int, dict[str, Any] | None
     if deployments:
         deployment = deployments[0]
         number = positive_id(deployment["id"])
-        statuses = await provider.get(f"/deployments/{number}/statuses", optional=True)
+        path = f"/deployments/{number}/statuses"
+        statuses = await provider.get(path, optional=True)
         if statuses:
             sample = {
                 "deployment_id": number,
@@ -218,7 +229,11 @@ async def preflight(provider: Provider) -> tuple[str, int, dict[str, Any] | None
                 "state": statuses[0]["state"],
             }
         else:
-            note("deployment-sample-missing", available=statuses is not None)
+            note(
+                "deployment-status-sample-missing",
+                http_status=provider.denied.get(path, 200),
+                complete=statuses is not None and path not in provider.partial,
+            )
     return tip, len(pulls), sample
 
 
@@ -413,6 +428,69 @@ def require_pull(row: dict[str, Any], branch: str, head: str, base: str, state: 
     )
 
 
+class OwnedFixture:
+    def __init__(self, branch: str, tip: str) -> None:
+        self.branch = branch
+        self.head = tip
+        self.tip = tip
+        self.number: int | None = None
+        self.merged = False
+
+    async def cleanup(self, provider: Provider) -> None:
+        if self.merged:
+            return
+        ref = f"refs/heads/{self.branch}"
+        actual = await provider.get(f"/git/ref/heads/{self.branch}")
+        require(
+            actual["ref"] == ref and actual["object"]["sha"] == self.head,
+            "disposable branch head changed",
+        )
+        candidates = await provider.get(
+            "/pulls", params={"state": "all", "head": f"mgd43b:{self.branch}", "per_page": 100}
+        )
+        expected = [] if self.number is None else [self.number]
+        require([row["number"] for row in candidates] == expected, "fixture PR ownership ambiguous")
+        if self.number is not None:
+            path = f"/pulls/{self.number}"
+            pull = await provider.get(path)
+            state = pull["state"]
+            require(state in ("open", "closed"), "unexpected disposable PR state")
+            require_pull(pull, self.branch, self.head, self.tip, state)
+            if state == "open":
+                closed = await provider.request("PATCH", path, json={"state": "closed"})
+                require_pull(closed, self.branch, self.head, self.tip, "closed")
+        latest = await provider.get(f"/git/ref/heads/{self.branch}")
+        require(
+            latest["ref"] == ref and latest["object"]["sha"] == self.head,
+            "disposable branch changed during cleanup",
+        )
+        await provider.request("DELETE", f"/git/refs/heads/{self.branch}")
+        note("run-owned-fixture-cleaned", branch=self.branch, number=self.number)
+
+
+@asynccontextmanager
+async def owned_fixture(provider: Provider, run_id: str, tip: str) -> AsyncGenerator[OwnedFixture]:
+    branch = f"plotroom-fixture/{run_id}"
+    ref = f"refs/heads/{branch}"
+    created = await provider.request("POST", "/git/refs", json={"ref": ref, "sha": tip})
+    require(created["ref"] == ref and created["object"]["sha"] == tip, "branch creation unverified")
+    owned = OwnedFixture(branch, tip)
+    try:
+        yield owned
+    except Exception, asyncio.CancelledError:
+        try:
+            async with asyncio.timeout(30):
+                await owned.cleanup(provider)
+        except (Exception, asyncio.CancelledError) as exc:
+            note(
+                "fixture-cleanup-pending",
+                branch=branch,
+                number=owned.number,
+                reason=str(exc) if isinstance(exc, AcceptanceError) else type(exc).__name__,
+            )
+        raise
+
+
 async def lifecycle(
     provider: Provider,
     store: SqliteStore,
@@ -427,92 +505,107 @@ async def lifecycle(
     run = await provider.ready_ci(tip, "main", "push")
     require(await provider.main() == tip, "fixture main moved while reading CI")
     provider.preflight_passed = True
-    branch = f"plotroom-fixture/{run_id}"
-    await provider.request("POST", "/git/refs", json={"ref": f"refs/heads/{branch}", "sha": tip})
-    note("fixture-branch", branch=branch, main_ci=run)
-    base_readme, old = await provider.content("README.md", tip)
-    first = await branch_file(
-        provider, branch, "README.md", old, base_readme + b"\nProjection trial.\n"
-    )
-    opened = await provider.request(
-        "POST",
-        "/pulls",
-        json={"title": "Verify Plotroom projection", "head": branch, "base": "main"},
-    )
-    number = positive_id(opened["number"])
-    require_pull(opened, branch, first, tip, "open")
-    note("fixture-pr", number=number, head=first)
-    async with stdio(config, token_id) as client:
-        await observe_pull(store, client, number, "open", first, count + 1)
-        early = await trigger(client, number, "Fixture merge observation")
-        story, old = await provider.content(STORY, first)
-        entries = tomllib.loads(story.decode("utf-8"))["entry"]
-        entry_id = max(positive_id(entry["id"]) for entry in entries) + 1
-        addition = f'\n[[entry]]\nid = {entry_id}\ntype = "story"\ntitle = "Fixture follow-up"\n'
-        second = await branch_file(
-            provider,
-            branch,
-            STORY,
-            old,
-            story + addition.encode(),
+    async with owned_fixture(provider, run_id, tip) as owned:
+        branch = owned.branch
+        note("fixture-branch", branch=branch, main_ci=run)
+        base_readme, old = await provider.content("README.md", tip)
+        first = await branch_file(
+            provider, branch, "README.md", old, base_readme + b"\nProjection trial.\n"
         )
-        await observe_pull(store, client, number, "open", second, count + 1)
-        current = await provider.get(f"/pulls/{number}")
-        require_pull(current, branch, second, tip, "open")
-        await provider.request("PATCH", f"/pulls/{number}", json={"state": "closed"})
-        await observe_pull(store, client, number, "closed", second, count)
-        before = await store.fetch_cursor(REPO, PULL_REQUESTS)
-        if before is None:
-            raise AcceptanceError("missing pre-restart PR cursor")
+        owned.head = first
+        opened = await provider.request(
+            "POST",
+            "/pulls",
+            json={"title": "Verify Plotroom projection", "head": branch, "base": "main"},
+        )
+        number = positive_id(opened["number"])
+        require_pull(opened, branch, first, tip, "open")
+        owned.number = number
+        note("fixture-pr", number=number, head=first)
+        async with stdio(config, token_id) as client:
+            await observe_pull(store, client, number, "open", first, count + 1)
+            early = await trigger(client, number, "Fixture merge observation")
+            story, old = await provider.content(STORY, first)
+            entries = tomllib.loads(story.decode("utf-8"))["entry"]
+            entry_id = max(positive_id(entry["id"]) for entry in entries) + 1
+            addition = (
+                f'\n[[entry]]\nid = {entry_id}\ntype = "story"\ntitle = "Fixture follow-up"\n'
+            )
+            second = await branch_file(
+                provider,
+                branch,
+                STORY,
+                old,
+                story + addition.encode(),
+            )
+            owned.head = second
+            await observe_pull(store, client, number, "open", second, count + 1)
+            current = await provider.get(f"/pulls/{number}")
+            require_pull(current, branch, second, tip, "open")
+            await provider.request("PATCH", f"/pulls/{number}", json={"state": "closed"})
+            await observe_pull(store, client, number, "closed", second, count)
+            before = await store.fetch_cursor(REPO, PULL_REQUESTS)
+            if before is None:
+                raise AcceptanceError("missing pre-restart PR cursor")
 
-    await stop_daemon(root / "data")
-    checkpoint = await store.fetch_cursor(REPO, PULL_REQUESTS)
-    if (
-        checkpoint is None
-        or checkpoint.generation < before.generation
-        or checkpoint.watermark < before.watermark
-    ):
-        raise AcceptanceError("PR cursor lost at restart")
-    restarted = datetime.now(UTC)
-    async with stdio(config, token_id) as client:
-        await snapshot(client, count, restarted)
-        after = await store.fetch_cursor(REPO, PULL_REQUESTS)
-        require(
-            after is not None
-            and after.generation > checkpoint.generation
-            and after.watermark >= checkpoint.watermark,
-            "restarted daemon did not advance the persisted PR cursor",
-        )
-        current = await provider.get(f"/pulls/{number}")
-        require_pull(current, branch, second, tip, "closed")
-        await provider.request("PATCH", f"/pulls/{number}", json={"state": "open"})
-        await observe_pull(store, client, number, "open", second, count + 1)
+        await stop_daemon(root / "data")
+        checkpoint = await store.fetch_cursor(REPO, PULL_REQUESTS)
+        if (
+            checkpoint is None
+            or checkpoint.generation < before.generation
+            or checkpoint.watermark < before.watermark
+        ):
+            raise AcceptanceError("PR cursor lost at restart")
+        restarted = datetime.now(UTC)
+        async with stdio(config, token_id) as client:
+            await snapshot(client, count, restarted)
+            after = await store.fetch_cursor(REPO, PULL_REQUESTS)
+            require(
+                after is not None
+                and after.generation > checkpoint.generation
+                and after.watermark >= checkpoint.watermark,
+                "restarted daemon did not advance the persisted PR cursor",
+            )
+            current = await provider.get(f"/pulls/{number}")
+            require_pull(current, branch, second, tip, "closed")
+            await provider.request("PATCH", f"/pulls/{number}", json={"state": "open"})
+            await observe_pull(store, client, number, "open", second, count + 1)
 
-        pr_run = await provider.ready_ci(second, branch, "pull_request")
-        current = await provider.get(f"/pulls/{number}")
-        require_pull(current, branch, second, tip, "open")
-        require(
-            current["mergeable"] is True and await provider.main() == tip,
-            "fixture PR or protected base changed before merge",
-        )
-        merged = await provider.request(
-            "PUT", f"/pulls/{number}/merge", json={"sha": second, "merge_method": "merge"}
-        )
-        require(merged.get("merged") is True, "fixture merge was refused")
-        main = sha(merged["sha"])
-        await observe_pull(store, client, number, "merged", second, count)
-        require(await provider.main() == main, "main tip does not match fixture merge")
-        late = await trigger(client, number, "Fixture already merged")
-        committed = await store.events_after(0, 1000)
-        require(
-            sum(event.kind == TRIGGER_FIRED and event.upstream_id == late for event in committed)
-            == 1,
-            "already-merged registration did not fire on creation",
-        )
-        refs = await mirror(provider, store, root, main)
-        require(f"1.{entry_id}" in refs, "new ready ticket is missing after merge")
-        await verify_events(store, number, first, second, early, late)
-        note("accepted", number=number, head=second, main=main, pr_ci=pr_run, ready_refs=refs)
+            pr_run = await provider.ready_ci(second, branch, "pull_request")
+            current = await provider.get(f"/pulls/{number}")
+            require_pull(current, branch, second, tip, "open")
+            require(
+                current["mergeable"] is True and await provider.main() == tip,
+                "fixture PR or protected base changed before merge",
+            )
+            merged = await provider.request(
+                "PUT", f"/pulls/{number}/merge", json={"sha": second, "merge_method": "merge"}
+            )
+            require(merged.get("merged") is True, "fixture merge was refused")
+            owned.merged = True
+            main = sha(merged["sha"])
+            await observe_pull(store, client, number, "merged", second, count)
+            require(await provider.main() == main, "main tip does not match fixture merge")
+            late = await trigger(client, number, "Fixture already merged")
+            committed = await store.events_after(0, 1000)
+            require(
+                sum(
+                    event.kind == TRIGGER_FIRED and event.upstream_id == late for event in committed
+                )
+                == 1,
+                "already-merged registration did not fire on creation",
+            )
+            refs = await mirror(provider, store, root, main)
+            require(f"1.{entry_id}" in refs, "new ready ticket is missing after merge")
+            await verify_events(store, number, first, second, early, late)
+            note(
+                "core-pr-lifecycle-verified",
+                number=number,
+                head=second,
+                main=main,
+                pr_ci=pr_run,
+                ready_refs=refs,
+            )
 
 
 async def verify_events(

@@ -1,16 +1,16 @@
 """Keep the keeper workflow's phase and provider boundaries executable offline."""
 
 import base64
+import importlib.util
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
-from scripts import github_fixture_acceptance as fixture
 
 from plotroom.app.tokens import TokenRegistry
 from plotroom.core.events import Event
@@ -19,6 +19,16 @@ from test_github import REPO as LOOPBACK_REPO
 from test_github import TOKEN as LOOPBACK_TOKEN
 from test_github import FixtureGitHub
 from test_github import github_fixture as github_fixture
+
+if TYPE_CHECKING:
+    from scripts import github_fixture_acceptance as fixture
+else:
+    harness = Path(__file__).resolve().parents[1] / "scripts" / "github_fixture_acceptance.py"
+    spec = importlib.util.spec_from_file_location("github_fixture_acceptance", harness)
+    assert spec is not None
+    assert spec.loader is not None
+    fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture)
 
 TIP = "a" * 40
 PREFIX = f"/repos/{fixture.REPO}"
@@ -229,7 +239,13 @@ async def test_lifecycle_uses_exact_head_and_a_stopped_cursor_checkpoint(
                 )
             if path == "/git/refs":
                 assert request.content
-                return httpx.Response(201, json={})
+                return httpx.Response(
+                    201,
+                    json={
+                        "ref": f"refs/heads/{branch}",
+                        "object": {"sha": TIP},
+                    },
+                )
             if path.startswith("/contents/"):
                 if method == "PUT":
                     head = first if path.endswith("README.md") else second
@@ -392,3 +408,55 @@ async def test_keeper_stdio_opens_the_daemon_with_the_private_token_file(
         assert set(github_fixture.callers) == {f"Bearer {LOOPBACK_TOKEN}"}
     finally:
         await fixture.stop_daemon(data)
+
+
+async def test_optional_history_samples_a_page_but_open_pr_count_requires_completeness() -> None:
+    class History(FixtureProvider):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            response = super().__call__(request)
+            if request.url.path.endswith(("/actions/runs", "/pulls")):
+                response.headers["Link"] = f'<{request.url.copy_set_param("page", 2)}>; rel="next"'
+            return response
+
+    async with client(History()) as http:
+        provider = fixture.Provider(http, acceptance=False)
+        assert await provider.get("/actions/runs", optional=True) == {"workflow_runs": []}
+        assert "/actions/runs" in provider.partial
+        with pytest.raises(fixture.AcceptanceError, match="exceeded one page"):
+            await provider.get("/pulls")
+
+
+@pytest.mark.parametrize("drift", [False, True])
+async def test_cleanup_removes_only_the_exact_owned_head(drift: bool) -> None:
+    branch = "plotroom-fixture/42"
+
+    class Branch(FixtureProvider):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            path = request.url.path.removeprefix(PREFIX)
+            self.requests.append((request.method, path))
+            if request.method == "DELETE":
+                return httpx.Response(204)
+            if path == f"/git/ref/heads/{branch}":
+                return httpx.Response(
+                    200,
+                    json={
+                        "ref": f"refs/heads/{branch}",
+                        "object": {"sha": "b" * 40 if drift else TIP},
+                    },
+                )
+            assert path == "/pulls"
+            assert request.url.params["head"] == f"mgd43b:{branch}"
+            return httpx.Response(200, json=[])
+
+    mock = Branch()
+    async with client(mock) as http:
+        provider = fixture.Provider(http, acceptance=True)
+        provider.preflight_passed = True
+        owned = fixture.OwnedFixture(branch, TIP)
+        if drift:
+            with pytest.raises(fixture.AcceptanceError, match="head changed"):
+                await owned.cleanup(provider)
+            assert not any(method == "DELETE" for method, _ in mock.requests)
+        else:
+            await owned.cleanup(provider)
+            assert mock.requests[-1] == ("DELETE", f"/git/refs/heads/{branch}")
