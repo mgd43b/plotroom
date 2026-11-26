@@ -42,7 +42,8 @@ class Command:
     """A registered command: its name, typed arguments and handler.
 
     The handler runs inside the writer transaction with the unit of work and the validated
-    arguments, and returns a JSON object: the command's result.
+    arguments, and returns a JSON object: the command's result. An optional read-only preflight
+    receives validated, authorized arguments outside the writer. Recorded replays skip preflight.
     """
 
     name: str
@@ -50,6 +51,7 @@ class Command:
     handler: CommandHandler
     record_if: Callable[[dict[str, Any]], bool] | None = None
     lane_scoped: bool = False
+    preflight: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
     def __post_init__(self) -> None:
         if not _NAME.fullmatch(self.name):

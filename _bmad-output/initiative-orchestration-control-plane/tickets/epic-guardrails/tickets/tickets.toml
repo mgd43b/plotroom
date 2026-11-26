@@ -14,15 +14,15 @@ risk = "medium"
 [[entry]]
 id = 3
 type = "story"
-title = "First provider usage adapter (Anthropic)"
-description = "A UsageMeter adapter for Anthropic's usage and cost reporting, read with an admin credential from a mounted secret through entry 2.2's secret-file reader (never stored, C2), mapped to cumulative spend per run by the key scope or tag the run registered; the endpoint and fields are confirmed against Anthropic's current documentation at the plan checkpoint. The owner creates the read-only admin credential and makes a small tagged test run under a provider-enforced spend limit."
-verify = "Against Anthropic's real reporting for the small tagged test run, the adapter reports cumulative spend that matches the console within the reporting delay, and a scan finds the credential in no record or log."
+title = "First provider usage adapter (OpenRouter)"
+description = "Add the first real UsageMeter adapter for OpenRouter. For each run, read the dedicated inference key from a mounted file using the existing secret-file reader (C2). The key is scoped to one run with a provider-enforced USD cap and no reset. Use that same key to read cumulative USD usage from `GET /api/v1/key` (`data.usage`). Preserve the existing UsageMeter port and monotonic budget treatment. The trial and its spend claim exclude bring-your-own-key (BYOK) usage. Direct Anthropic Console support remains later work."
+verify = "Verify the adapter's read against the same dedicated key's real cumulative USD usage after allowing for reporting delay, and use deterministic fixtures to verify cumulative readings and missing or delayed data. Reconcile the existing authorized one-call trial's $0.0000033 response cost, generation cost and key-usage delta. A scan finds no credential in records or logs."
 covers = ["R1", "R2"]
 after = [1, "1.10", "2.2"]
 hitl = true
 risk = "high"
 plan_checkpoint = true
-notes = ["Paid run: the capped test run needs the coordinator's go-ahead when this is built, with a provider-enforced cap, a trial first and a projection from the trial's actual spend.", "Check beyond its criteria: a reporting delay or a gap in the provider's data never lowers a budget's recorded spend.", "Decision: 2026-11-22, Anthropic is the first provider (the lanes are Claude sessions); others are later adapters behind the same port."]
+notes = ["Paid run: the capped test run needs the coordinator's go-ahead when this is built, with a provider-enforced cap, a trial first and a projection from the trial's actual spend.", "Check beyond its criteria: a reporting delay or a gap in the provider's data never lowers a budget's recorded spend.", "Decision: 2026-11-26, OpenRouter is the first provider. This supersedes the November 22 Anthropic-first decision and leaves direct Anthropic Console support for later. See the story Notes."]
 
 [[entry]]
 id = 2

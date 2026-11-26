@@ -128,6 +128,7 @@ class _MemoryTransaction:
         self.goals: dict[str, StoredGoal] = {}
         self.lanes: dict[str, Lane] = {}
         self.budgets: dict[str, Budget] = {}
+        self.openrouter_bindings: dict[str, str] = {}
         self.routes: dict[str, str] = {}
         self.checklists: dict[str, Checklist] = {}
         self.claims: dict[tuple[str, str], Claim] = {}
@@ -205,6 +206,13 @@ class _MemoryTransaction:
     async def insert_budget(self, budget: Budget) -> None:
         self._live()
         self.budgets[budget.run] = budget
+
+    async def reserve_openrouter_key(self, reservation: str, run: str) -> bool:
+        self._live()
+        if reservation in self.openrouter_bindings:
+            return False
+        self.openrouter_bindings[reservation] = run
+        return True
 
     async def update_budget_spend(self, budget: Budget) -> None:
         self._live()
@@ -632,6 +640,7 @@ class MemoryStore:
         self._goals: dict[str, StoredGoal] = {}
         self._lanes: dict[str, Lane] = {}
         self._budgets: dict[str, Budget] = {}
+        self._openrouter_bindings: dict[str, str] = {}
         self._routes: dict[str, str] = {}
         self._checklists: dict[str, Checklist] = {}
         self._claims: dict[tuple[str, str], Claim] = {}
@@ -675,6 +684,7 @@ class MemoryStore:
         tx.goals = self._goals.copy()
         tx.lanes = self._lanes.copy()
         tx.budgets = self._budgets.copy()
+        tx.openrouter_bindings = self._openrouter_bindings.copy()
         tx.routes = self._routes.copy()
         tx.checklists = self._checklists.copy()
         tx.claims = self._claims.copy()
@@ -703,6 +713,7 @@ class MemoryStore:
             self._goals = tx.goals
             self._lanes = tx.lanes
             self._budgets = tx.budgets
+            self._openrouter_bindings = tx.openrouter_bindings
             self._routes = tx.routes
             self._checklists = tx.checklists
             self._claims = tx.claims

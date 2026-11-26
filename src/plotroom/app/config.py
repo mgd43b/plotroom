@@ -20,11 +20,13 @@ import httpx
 from plotroom.adapters.claude_desktop import SESSION_ID
 from plotroom.adapters.github import RECONCILE_EVERY, github_secret_name
 from plotroom.adapters.github.ticket_tree import validate_tree_path
+from plotroom.adapters.openrouter import OpenRouterRun
 from plotroom.core.briefs import BriefSettings
 from plotroom.core.events import LedgerError
 from plotroom.core.merge_gate import GatePolicy
 from plotroom.core.roles import role_family
 from plotroom.core.routing import validate_route_label
+from plotroom.core.run_reports import validate_identity
 from plotroom.core.snapshot import DEFAULT_SNAPSHOT_BUDGET, MIN_BOARD_BUDGET
 from plotroom.core.trigger_actions import DeliveryRoute
 from plotroom.ports.search import EmbeddingModel
@@ -141,6 +143,7 @@ class Config:
     embedders: Mapping[str, EmbedderConfig] = field(default_factory=lambda: {})
     backup_dir: Path | None = None
     backup_retain: int = 3
+    openrouter_runs: Mapping[str, Mapping[str, OpenRouterRun]] = field(default_factory=lambda: {})
 
     @property
     def url(self) -> str:
@@ -245,6 +248,7 @@ def load_config(
         github_issue_sources=github_issues,
         briefs=_brief_settings(projects, raw.get("projects")),
         embedders=_embedders(projects, raw.get("projects")),
+        openrouter_runs=_openrouter_runs(projects, raw.get("projects"), base),
         delivery_routes=_delivery_routes(projects, switchboards, worker_sessions, drain_sessions),
         routes=_routes(projects, raw.get("projects")),
         human_logins=_human_logins(projects, raw.get("projects")),
@@ -574,6 +578,44 @@ def _delivery_routes(
                 # An explicit relay address takes precedence over a session reader mapping.
                 routes.setdefault(worker, DeliveryRoute("claude", session))
         configured[project_id] = routes
+    return configured
+
+
+def _openrouter_runs(
+    projects: tuple[str, ...], table: Any, base: Path
+) -> dict[str, dict[str, OpenRouterRun]]:
+    entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
+    configured: dict[str, dict[str, OpenRouterRun]] = {}
+    pins: set[str] = set()
+    for project_id in projects:
+        raw = entries.get(project_id, {}).get("openrouter")
+        if raw is None:
+            continue
+        label = f"projects.{project_id}.openrouter"
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{label} must map run IDs to key bindings")
+        runs: dict[str, OpenRouterRun] = {}
+        for run, entry in cast("dict[str, Any]", raw).items():
+            try:
+                validate_identity(run, "OpenRouter run ID")
+            except LedgerError as exc:
+                raise ConfigError(f"{label}: {exc.message}") from None
+            if not isinstance(entry, dict) or set(cast("dict[str, Any]", entry)) != {
+                "key_file",
+                "key_sha256",
+            }:
+                raise ConfigError(f"{label} run bindings require key_file and key_sha256")
+            binding = cast("dict[str, Any]", entry)
+            pin = _string(f"{label} key_sha256", binding["key_sha256"])
+            if not re.fullmatch(r"[a-fA-F0-9]{64}", pin):
+                raise ConfigError(f"{label} key_sha256 must be a 64-digit SHA-256 hex digest")
+            pin = pin.lower()
+            if pin in pins:
+                raise ConfigError("each OpenRouter run must have a unique key pin")
+            pins.add(pin)
+            path = base / Path(_string(f"{label} key_file", binding["key_file"])).expanduser()
+            runs[run] = OpenRouterRun(path, pin)
+        configured[project_id] = runs
     return configured
 
 

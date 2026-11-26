@@ -34,7 +34,9 @@ from plotroom.adapters.github.details import GitHubDetailPoller
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.github.ticket_tree import GitHubTicketTree
 from plotroom.adapters.mcp import build_app
+from plotroom.adapters.openrouter import OpenRouterUsageMeter
 from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.adapters.store_sqlite.budgets_sql import foreign_openrouter_bindings
 from plotroom.adapters.store_sqlite.migrate import ProjectMigrationError
 from plotroom.adapters.store_sqlite.store import retryable_search_write_error
 from plotroom.adapters.switchboard import Switchboard
@@ -224,6 +226,7 @@ class Daemon:
     ) -> None:
         self._config = config
         self._usage_meters = dict(usage_meters or {})
+        self._blocked_openrouter_bindings: set[str] = set()
         self._fixture_github_writes = dict(fixture_github_writes or {})
         for project_id in self._fixture_github_writes:
             github = config.github.get(project_id)
@@ -385,6 +388,21 @@ class Daemon:
     async def _open_projects(self) -> None:
         """Migrate each project file and start its ledger (never reached below the SQLite floor)."""
         tokens = TokenRegistry(self._config.data_dir)
+        owners = {
+            binding.reservation: project
+            for project, runs in self._config.openrouter_runs.items()
+            for binding in runs.values()
+        }
+        if owners:
+            try:
+                self._blocked_openrouter_bindings = await asyncio.to_thread(
+                    foreign_openrouter_bindings, self._config.data_dir, owners
+                )
+            except OSError, sqlite3.Error:
+                log.warning("OpenRouter key reservations could not be verified")
+                self._blocked_openrouter_bindings = set(owners)
+            if self._blocked_openrouter_bindings:
+                log.warning("Unverified or previously reserved OpenRouter bindings were disabled")
         for project_id in self._config.projects:
             project = _Project(SqliteStore(project_id, self._config.data_dir))
             self._projects[project_id] = project  # registered first so a failure closes it
@@ -435,6 +453,19 @@ class Daemon:
                 project.store.embedding_index(embedder.model),
                 HttpEmbedder(project.embedding_client, embedder.url, embedder.model),
             )
+        openrouter_runs = {
+            run: binding
+            for run, binding in self._config.openrouter_runs.get(project_id, {}).items()
+            if binding.reservation not in self._blocked_openrouter_bindings
+        }
+        router_meter = None
+        if openrouter_runs:
+            router_meter = OpenRouterUsageMeter(
+                openrouter_runs,
+                lambda: project.store.read_openrouter_budgets(self._clock.now()),
+                self._clock,
+                timeout=min(5.0, self._config.tick_seconds * 0.8),
+            )
         catalog = build_catalog(
             workers,
             github_repository=repository,
@@ -442,6 +473,10 @@ class Daemon:
             image_jobs=github.image_jobs if github is not None else (),
             lane_idle_minutes=self._config.lane_idle_minutes,
             human_login=human_login,
+            check_openrouter_cap=router_meter.verify_cap if router_meter is not None else None,
+            openrouter_bindings={
+                run: binding.reservation for run, binding in openrouter_runs.items()
+            },
         )
         if relay is not None and bridged:
             register_bridge(
@@ -557,6 +592,7 @@ class Daemon:
                     issue_source.milestone,
                 )
         project.work_items = work_items
+        usage_meter = self._usage_meters.get(project_id, router_meter)
         project.runtime = ProjectRuntime(
             project.ledger,
             self._clock,
@@ -569,7 +605,7 @@ class Daemon:
             inputs=tuple(inputs),
             fixture_github_write=fixture_write,
             fixture_github_merge=fixture_write,
-            usage_meter=self._usage_meters.get(project_id),
+            usage_meter=usage_meter,
             switchboard_bridged=bridged,
         )
         project.runtime.start()

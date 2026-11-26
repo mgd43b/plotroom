@@ -190,6 +190,9 @@ class UnitOfWork:
     async def insert_budget(self, budget: Budget) -> None:
         await self._tx.insert_budget(budget)
 
+    async def reserve_openrouter_key(self, reservation: str, run: str) -> bool:
+        return await self._tx.reserve_openrouter_key(reservation, run)
+
     async def update_budget_spend(self, budget: Budget) -> None:
         await self._tx.update_budget_spend(budget)
 

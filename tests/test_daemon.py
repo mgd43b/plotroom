@@ -7,7 +7,7 @@ import os
 import signal
 import socket
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -182,6 +182,8 @@ async def test_a_mutating_tool_uses_the_authenticated_role_and_project_ledger(
         image_jobs: tuple[str, ...] = (),
         lane_idle_minutes: int = 15,
         human_login: str | None = None,
+        openrouter_bindings: Mapping[str, str] | None = None,
+        check_openrouter_cap: Callable[[str, float], Awaitable[bool]] | None = None,
     ) -> Catalog:
         return catalog
 

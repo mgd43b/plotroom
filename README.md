@@ -42,7 +42,7 @@ Plotroom moves that state out of the conversation and into a ledger every sessio
 - **Budget thresholds.** `budget_open` records a run's cap. With usage meter readings, Plotroom
   raises orchestrator items at 50%, 80%, and 100%. At 100% it queues a stop request for an active
   lane. Delivery depends on its route. Bridged lane-pinned stops surface as failed actions for
-  operator attention. The first provider meter is still to come (see Status).
+  operator attention. OpenRouter is the first live usage meter.
 - **Search.** `search` covers messages, turn reports, decisions, asks, issue comments and PR bodies,
   with full-text search by default and search by meaning when you configure an embedding endpoint.
 
@@ -87,7 +87,7 @@ tested. The remaining items are mostly checks against live services and the rele
 | The local daemon and its MCP tools | A tested run against a live GitHub repository ([#29](https://github.com/mgd43b/plotroom/issues/29)) |
 | Real Claude Code and Codex clients against the local daemon and the chart in disposable local kind | Releases to PyPI and ghcr.io ([#25](https://github.com/mgd43b/plotroom/issues/25)) |
 | Docker Compose, and the Helm chart on a local kind cluster | GitHub App credentials for hosted mode ([#39](https://github.com/mgd43b/plotroom/issues/39)) and a published chart ([#125](https://github.com/mgd43b/plotroom/issues/125)) |
-| Restart safety, migration backups, scheduled backups | A provider adapter for real spend readings ([#102](https://github.com/mgd43b/plotroom/issues/102)) |
+| Restart safety, migration backups, scheduled backups, and OpenRouter spend readings | Direct Anthropic Console metering |
 | The Switchboard bridge | Plotroom coordinating its own development for a working day ([#110](https://github.com/mgd43b/plotroom/issues/110)) |
 
 ## Try it in a minute
@@ -146,6 +146,38 @@ TOML path and replace `YOUR_TOKEN_ID` with the ID for that client's role.
 uv --directory /path/to/plotroom run --locked plotroom connect --stdio \
   --config /path/to/plotroom.toml --token-id YOUR_TOKEN_ID
 ```
+
+### Track OpenRouter spend
+
+Add a binding for the exact run ID you will pass to `budget_open`. Use a dedicated inference
+key with a positive, non-resetting OpenRouter USD cap and shared OpenRouter billing. Use a
+new key per run and keep inference for that run on that key for its lifetime.
+
+```toml
+[projects.example.openrouter.trial]
+key_file = "/run/secrets/openrouter-trial"
+key_sha256 = "<SHA-256 of the trimmed mounted key>"
+```
+
+Compute the SHA-256 from the key text after trimming surrounding whitespace, without printing
+the key. Keep the digest in private configuration and the key in an owner-controlled mounted
+file. Relative paths are based on the configuration file. Keep the binding and key dedicated
+to the same run across restarts. A replacement key requires a new run ID. A changed file
+fails the configured digest check. Plotroom keeps an opaque reservation in the project ledger
+to prevent reassigning an existing budget or reusing its key for a different run in the same
+daemon data directory, including inactive projects. Across separate data directories, keep the
+key dedicated to its original run.
+
+Open a budget for `run="trial"` with `provider="openrouter"`, the active lane,
+a `cap_usd` at least as high as the provider cap, and a `key_scope` of `staging`
+or `production`. Budget registration checks the mounted key and provider cap before reserving
+the key. The daemon reads lifetime `data.usage` in USD on the project tick.
+`budget_status(run="trial")` shows accepted spend and when Plotroom saw it.
+Provider accounting may lag. Equal, lower, incomplete, and BYOK readings preserve the previous
+spend and as-of. The provider key cap supplies the spend boundary during reporting delay.
+After a lane archives, its budgets can reconcile for two minutes. The key remains reserved
+when polling stops.
+[OpenRouter current-key API](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-key)
 
 - [Running Plotroom](docs/running.md): the local daemon, Docker Compose, the Helm chart on kind, and
   the Switchboard bridge.

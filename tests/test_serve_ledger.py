@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 
 import pytest
@@ -32,6 +32,8 @@ def fixture_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
         image_jobs: tuple[str, ...] = (),
         lane_idle_minutes: int = 15,
         human_login: str | None = None,
+        openrouter_bindings: Mapping[str, str] | None = None,
+        check_openrouter_cap: Callable[[str, float], Awaitable[bool]] | None = None,
     ) -> Catalog:
         return Fixture().catalog
 
