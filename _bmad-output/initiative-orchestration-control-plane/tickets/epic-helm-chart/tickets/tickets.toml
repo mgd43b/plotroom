@@ -75,6 +75,6 @@ title = "End-to-end suite over the epic's Done when"
 description = "One suite installs the chart on kind and runs every Done-when check of this epic with MCP SDK clients configured as a local daemon's clients are; the real-client check is entry 3's."
 verify = "The suite passes in CI, one test per Done-when line except the real clients, which are checked in entry 3."
 covers = ["R1", "R2"]
-after = [6]
+after = [1]
 hitl = false
 risk = "low"
