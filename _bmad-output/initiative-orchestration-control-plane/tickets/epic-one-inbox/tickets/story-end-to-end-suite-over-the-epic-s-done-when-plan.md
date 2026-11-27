@@ -99,3 +99,29 @@ The runner verified the exact running image ID. Docker containers, networks, and
 were removed. Explicit synthetic mode exited 0 and default full mode exited 1 after
 reporting six blocked real criteria. Ruff lint and formatting, Pyright, and whitespace
 checks passed.
+
+### Archived provider witness increment
+
+- Baseline: `65f4dcb2ed7ed8b49a889c7c8408779fbe200348`.
+- Run the same production daemon check locally and in an opt-in, isolated Compose job. The host reads public fixture facts with the already authenticated `gh` client. Give the container only a bounded request/response channel through Compose stdin/stdout, with no network egress, host credentials, mounted PAT, or provider write route. Cache the bounded public JSON responses in host memory for matching local/Compose input. The Compose result reuses archived provider responses.
+- Pin the approved repository, branch and exact heads for PR #1 and #2, named successful checks from run 45859680348, and resolved thread. Seed the lane without GitHub before first poll. Require actual first and follow-up production polls, exact terminal events, inferred lane, stable counts and no actions. Nothing here reconstructs past live transitions.
+- Expose the witness through an explicit `--archived-github` option on the current acceptance runner. Ordinary and synthetic runs remain useful without credentials and full acceptance still exits nonzero. Show success or failure separately for both environments and preserve all original criteria and pending credential-backed CI.
+- Verification uses focused tests of the bounded broker and CLI modes plus actual disposable Compose and local daemon. The canonical story and native ticket stay open.
+
+The archived witness passed on the pinned base. The broker confirmed the public repository and
+read back the exact successful attempt 1 of run 45859680348. There were 38 host-side read
+requests. Compose used the local image by immutable ID, confined the daemon to its own loopback,
+and replayed only responses captured in memory by the host. No provider credential entered the
+container.
+
+Both daemons observed PR #1's merged fact once on the inferred lane, both named successful check
+facts for PR #2 once, and the resolved PR #2 thread once. A scratch-only stale marker forced
+the normal scheduler to fetch PR #2's details again. The check and thread generations advanced
+and both ledgers stayed at 34 events and zero actions. The disposable projects were removed.
+Explicit archived mode still exits 1 with four full rows blocked and rows 1 and 9 pending
+integrated CI. It establishes terminal facts present in GitHub now.
+
+Independent review led to public-repository and exact-run preflight, random local broker binding,
+bounded subprocess capture, a verified second terminal detail poll, run-owned container fallback
+cleanup, and tests for scope and reporting. Follow-up review found no material blocker.
+Focused runner tests passed on locked Python 3.14 and 3.15. Ruff, Pyright and whitespace checks passed.

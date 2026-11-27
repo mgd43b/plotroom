@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from uuid import uuid4
 from xml.etree import ElementTree
 
 from deploy.bridge_smoke import ROOT, run, smoke
+from deploy.epic_two_archived import archived_checks
 
 WITNESSES = (
     "test_github.py::test_pull_lifecycle_and_credentials_preserve_committed_state",
@@ -153,8 +155,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--image-tag", required=True, help="tag of an existing local Plotroom image"
     )
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--synthetic", action="store_true", help="allow success for the synthetic checks alone"
+    )
+    modes.add_argument(
+        "--archived-github",
+        action="store_true",
+        help="also witness archived terminal facts using the existing read-only gh session",
     )
     args = parser.parse_args(argv)
     if not __debug__:
@@ -174,6 +182,9 @@ def main(argv: list[str] | None = None) -> int:
 
     local = check("Local daemon and adapter tests", local_checks)
     compose = check("Disposable Compose smoke", lambda: compose_checks(args.image_tag))
+    archived = args.archived_github and check(
+        "Archived GitHub evidence", lambda: asyncio.run(archived_checks(args.image_tag, print))
+    )
     for number, (criterion, local_witness, compose_witness, blocked) in enumerate(CRITERIA, 1):
         print(f"{number}. {criterion}")
         print(f"   Local synthetic {'PASS' if local else 'UNVERIFIED'} — {local_witness}")
@@ -181,15 +192,29 @@ def main(argv: list[str] | None = None) -> int:
             print("   Compose — not exercised by this runner")
         else:
             print(f"   Compose synthetic {'PASS' if compose else 'UNVERIFIED'} — {compose_witness}")
-        if blocked:
+        if archived and number in (1, 9):
+            print(
+                "   Archived GitHub PASS — terminal facts in the local daemon and isolated Compose"
+            )
+            print("   Original live transitions remain outside this terminal-fact witness.")
+            print("   Full PENDING — verify in the integrated credential-backed CI run.")
+        elif blocked:
             print(f"   Full BLOCKED — {blocked}")
     print("Integrated credential-backed CI acceptance remains pending.")
 
     if not local or not compose:
         print("Result: synthetic checks failed. Full acceptance remains incomplete.")
         return 1
+    if args.archived_github and not archived:
+        print("Result: archived GitHub checks failed. Full acceptance remains incomplete.")
+        return 1
     if not args.synthetic:
-        print("Result: full acceptance blocked. Synthetic checks passed.")
+        covered = (
+            "Synthetic and archived GitHub checks passed."
+            if archived
+            else "Synthetic checks passed."
+        )
+        print(f"Result: full acceptance blocked. {covered}")
         return 1
     print("Result: synthetic checks passed. Full acceptance remains incomplete.")
     return 0

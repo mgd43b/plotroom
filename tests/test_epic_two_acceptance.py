@@ -1,9 +1,11 @@
 import importlib
+import json
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 # Epic 2's fixed synthetic contract, including both transport and ingest variants.
@@ -139,3 +141,153 @@ def test_spike_finding_must_be_in_epic_notes(
     monkeypatch.setattr(acceptance, "EPIC_NOTES", epic)
     with pytest.raises(RuntimeError, match="spike answer is missing"):
         acceptance.local_checks()
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_archived_rows_are_explicit_and_full_mode_remains_blocked(
+    acceptance: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    available: bool,
+) -> None:
+    calls: list[str] = []
+
+    async def archived(tag: str, _report: Any) -> None:
+        calls.append(tag)
+        if not available:
+            raise RuntimeError("the read-only fixture input is missing")
+
+    def compose(_tag: str) -> None:
+        pass
+
+    monkeypatch.setattr(acceptance, "local_checks", lambda: None)
+    monkeypatch.setattr(acceptance, "compose_checks", compose)
+    monkeypatch.setattr(acceptance, "archived_checks", archived)
+    assert acceptance.main(["--image-tag", "fixture", "--archived-github"]) == 1
+
+    captured = capsys.readouterr()
+    assert calls == ["fixture"]
+    assert captured.out.count("Archived GitHub PASS") == (2 if available else 0)
+    assert captured.out.count("Full BLOCKED") == (4 if available else 6)
+    if available:
+        assert "Original live transitions remain outside" in captured.out
+        assert captured.out.count("Full PENDING") == 2
+        assert "full acceptance blocked" in captured.out
+    else:
+        assert "read-only fixture input is missing" in captured.err
+        assert "archived GitHub checks failed" in captured.out
+
+
+def test_archive_broker_allows_only_fixture_reads_and_replays_only_captured_inputs(
+    acceptance: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = importlib.import_module(acceptance.archived_checks.__module__)
+    provider: Any = archive.ProviderReads()
+    calls: list[list[str]] = []
+
+    def read(command: list[str], body: bytes) -> tuple[bytes, int]:
+        calls.append(command)
+        assert body == b""
+        return (
+            b"HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n"
+            b"Authorization: unsafe-header\r\nRetry-After: 1\r\n\r\n[]",
+            0,
+        )
+
+    monkeypatch.setattr(archive, "_read_gh", read)
+    endpoint = "/repos/mgd43b/plotroom-test/pulls?state=all"
+    expected = ({"retry-after": "1"}, b"[]")
+    assert provider.read("GET", endpoint, b"") == expected
+    assert provider.replay("GET", endpoint, b"") == expected
+    assert len(calls) == 1
+    assert calls[0][0:8] == [
+        "gh",
+        "api",
+        "--include",
+        "--hostname",
+        "github.com",
+        "--method",
+        "GET",
+        "-H",
+    ]
+
+    with pytest.raises(RuntimeError, match="absent from the local capture"):
+        provider.replay("GET", f"{endpoint}&page=2", b"")
+    for method, path, body in (
+        ("PUT", endpoint, b""),
+        ("GET", "/repos/mgd43b/plotroom/pulls", b""),
+        ("GET", "/repos/mgd43b/plotroom-test/actions/runs/1/logs", b""),
+        ("POST", "/graphql", b'{"query":"mutation { changed }","variables":{}}'),
+    ):
+        with pytest.raises(ValueError, match="outside"):
+            provider.read(method, path, body)
+    assert len(calls) == 1
+
+
+def test_archive_graphql_query_is_bound_to_the_fixture(acceptance: Any) -> None:
+    archive: Any = importlib.import_module(acceptance.archived_checks.__module__)
+    scoped: dict[str, object] = {
+        "owner": "mgd43b",
+        "name": "plotroom-test",
+        "number": 2,
+        "after": None,
+    }
+
+    def document(variables: dict[str, object]) -> bytes:
+        return json.dumps({"query": archive.REVIEW_THREADS_QUERY, "variables": variables}).encode()
+
+    assert archive._scoped_endpoint("POST", "/graphql", document(scoped)) == "graphql"
+    for key, value in (("owner", "other"), ("name", "plotroom"), ("number", 3)):
+        with pytest.raises(ValueError, match="outside"):
+            archive._scoped_endpoint("POST", "/graphql", document({**scoped, key: value}))
+
+
+def test_archive_preflight_stops_before_details_if_fixture_is_private(
+    acceptance: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive: Any = importlib.import_module(acceptance.archived_checks.__module__)
+    calls: list[str] = []
+
+    def read(command: list[str], body: bytes) -> tuple[bytes, int]:
+        assert not body
+        calls.append(command[-1])
+        return (
+            b"HTTP/2.0 200 OK\r\n\r\n"
+            b'{"full_name":"mgd43b/plotroom-test","visibility":"private","private":true}',
+            0,
+        )
+
+    monkeypatch.setattr(archive, "_read_gh", read)
+    with pytest.raises(RuntimeError, match="fixture is not public"):
+        archive.ProviderReads().preflight()
+    assert calls == ["repos/mgd43b/plotroom-test"]
+
+
+def test_archive_capture_rejects_oversize_child_stdout(
+    acceptance: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive: Any = importlib.import_module(acceptance.archived_checks.__module__)
+    monkeypatch.setattr(archive, "MAX_RESPONSE", 16)
+    with pytest.raises(RuntimeError, match="HTTP response exceeded the byte bound"):
+        archive._read_gh([sys.executable, "-c", "print('x' * 70000)"], b"")
+
+
+async def test_archive_loopback_requires_the_disposable_marker(acceptance: Any) -> None:
+    archive: Any = importlib.import_module(acceptance.archived_checks.__module__)
+    calls: list[str] = []
+
+    def read(_method: str, path: str, _body: bytes) -> tuple[dict[str, str], bytes]:
+        calls.append(path)
+        return {}, b"[]"
+
+    async with archive.loopback(read, "disposable-test-marker") as value:
+        endpoint: str = value[0]
+        async with httpx.AsyncClient(trust_env=False) as client:
+            denied = await client.get(endpoint + "/fixture")
+            assert denied.status_code == 403
+            assert calls == []
+            accepted = await client.get(
+                endpoint + "/fixture", headers={"Authorization": "Bearer disposable-test-marker"}
+            )
+            assert accepted.status_code == 200
+            assert calls == ["/fixture"]
