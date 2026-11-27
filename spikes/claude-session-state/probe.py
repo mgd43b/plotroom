@@ -17,11 +17,11 @@ Three local sources are read (macOS layout; roots are arguments so tests can use
               `origin.kind` is `peer` is an inbound session message.
 
 All of these formats are internal to the app and change between versions. The output is
-counts, key names and booleans only unless `events --include-text` is given.
+counts, key names, booleans and opaque session handles unless `events --include-text` is given.
 
 Usage:
     probe.py survey  [--claude-home DIR] [--app-support DIR]
-    probe.py events  --session N [--include-text] [...]     (N: ordinal from `survey`)
+    probe.py events  --session HANDLE [--include-text] [...]  (handle from `survey`)
     probe.py watch   --seconds S [...]                      (status flips and their lag)
 """
 
@@ -29,12 +29,15 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
+import stat
 import sys
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
+from pathlib import Path
 from typing import Any
 
 DEFAULT_HOME = os.path.expanduser("~/.claude")
@@ -54,131 +57,207 @@ def whole_number(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def session_id(value: object) -> str | None:
+    if (
+        isinstance(value, str)
+        and value not in {"", ".", ".."}
+        and not any(char in value for char in ("/", "\\", "\0"))
+    ):
+        return value
+    return None
+
+
+def session_handle(sid: str) -> str:
+    return hashlib.sha256(sid.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
 def read_json(path: str) -> dict[str, Any] | None:
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
-    except (OSError, ValueError):
+    except OSError, ValueError, RecursionError:
         return None
     return data if isinstance(data, dict) else None
 
 
-def read_rows(path: str) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+def _open_transcript(path: str, flags: int) -> int:
+    transcript = Path(path)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    projects_fd = os.open(transcript.parent.parent, directory_flags)
     try:
-        with open(path, encoding="utf-8") as fh:
+        project_fd = os.open(transcript.parent.name, directory_flags, dir_fd=projects_fd)
+        try:
+            fd = os.open(transcript.name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=project_fd)
+        finally:
+            os.close(project_fd)
+    finally:
+        os.close(projects_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("transcript must be a regular file")
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_rows(path: str) -> Iterator[dict[str, Any]]:
+    try:
+        with open(path, "rb", opener=_open_transcript) as fh:
             for line in fh:
                 try:
-                    row = json.loads(line)
-                except ValueError:
+                    row = json.loads(line.decode("utf-8"))
+                except ValueError, RecursionError:
                     continue  # a row being appended may be cut off
                 if isinstance(row, dict):
-                    rows.append(row)
+                    yield row
     except OSError:
         pass
-    return rows
 
 
 def registry(claude_home: str) -> list[dict[str, Any]]:
     """Live processes. Glob *.json only: the neighboring *.key files are never opened."""
     out = []
-    for path in sorted(glob.glob(os.path.join(claude_home, "sessions", "*.json"))):
+    pattern = os.path.join(glob.escape(claude_home), "sessions", "*.json")
+    for path in sorted(glob.glob(pattern)):
         data = read_json(path)
-        if data and data.get("sessionId"):
+        if data and session_id(data.get("sessionId")) is not None:
             out.append(data)
     return out
 
 
 def app_state(app_support: str) -> dict[str, dict[str, Any]]:
     """Desktop session metadata keyed by cliSessionId."""
-    pattern = os.path.join(app_support, "claude-code-sessions", "*", "*", "local_*.json")
+    pattern = os.path.join(
+        glob.escape(app_support), "claude-code-sessions", "*", "*", "local_*.json"
+    )
     out = {}
     for path in glob.glob(pattern):
         data = read_json(path)
-        if data and data.get("cliSessionId"):
+        if data and session_id(data.get("cliSessionId")) is not None:
             out[data["cliSessionId"]] = data
     return out
 
 
 def transcript_path(claude_home: str, cli_session_id: str) -> str | None:
-    # Glob rather than rebuild the project slug: the slug rules are internal.
-    hits = glob.glob(os.path.join(claude_home, "projects", "*", f"{cli_session_id}.jsonl"))
-    return hits[0] if hits else None
+    if session_id(cli_session_id) is None:
+        return None
+    name = f"{cli_session_id}.jsonl"
+    try:
+        projects = Path(claude_home).resolve(strict=True) / "projects"
+        if projects.is_symlink():
+            return None
+        # Only the project slug is a wildcard. Its encoding is internal to Desktop.
+        pattern = os.path.join(glob.escape(str(projects)), "*", glob.escape(name))
+        hits = glob.iglob(pattern)
+        hit = next(hits, None)
+        if hit is None or next(hits, None) is not None:
+            return None
+        resolved = Path(hit).resolve(strict=True)
+        if resolved == Path(hit) and resolved.is_file():
+            return str(resolved)
+    except OSError, RuntimeError, ValueError:
+        pass
+    return None
 
 
-def _blocks(row: dict[str, Any]) -> list[dict[str, Any]]:
-    content = (row.get("message") or {}).get("content")
-    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+def _assistant_turn_row(turn: dict[str, Any], message: dict[str, Any]) -> None:
+    content = message.get("content")
+    blocks = content if isinstance(content, list) else []
+    if message.get("stop_reason") == "end_turn":
+        turn["end_turn_rows"] += 1
+        texts = [
+            block["text"]
+            for block in blocks
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ]
+        if texts:
+            turn["report"] = "\n".join(texts)
+    for block in blocks:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        name, args = block.get("name"), block.get("input")
+        if isinstance(name, str) and name.endswith("wrap_up") and isinstance(args, dict):
+            recap = args.get("recap")
+            if isinstance(recap, str):
+                turn["recap"] = recap
 
 
-def turns(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Group transcript rows into turns keyed by turnPosition.turnIndex."""
-    out: list[dict[str, Any]] = []
+def transcript_items(rows: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    """Yield indexed turn summaries and unindexed peers, retaining one active turn."""
+    turn = None
+    indexed = False
     for row in rows:
-        position = row.get("turnPosition")
-        if row.get("type") == "user" and isinstance(position, dict) and "turnIndex" in position:
+        row_type = row.get("type")
+        if row_type == "user":
+            position = row.get("turnPosition")
+            index = whole_number(position.get("turnIndex")) if isinstance(position, dict) else None
             origin = row.get("origin")
-            out.append(
-                {
-                    "turn": position["turnIndex"],
-                    "turn_origin": known(row.get("turnOrigin"), KNOWN_ORIGIN),
-                    "inbound": origin
-                    if isinstance(origin, dict) and origin.get("kind") == "peer"
-                    else None,
-                    "report": None,
-                    "recap": None,
-                    "end_turn_rows": 0,
-                    "stop_hook_rows": 0,
-                    "sent": [],
-                }
-            )
+            peer = isinstance(origin, dict) and origin.get("kind") == "peer"
+            body = origin.get("body") if peer else None
+            if peer and not isinstance(body, str):
+                body = ""
+            if index is None or index <= 0:
+                if peer:
+                    yield {"turn": None, "body": body}
+                if peer or "turnPosition" in row:
+                    # A malformed boundary cannot attribute later rows to the prior turn.
+                    indexed = False
+                continue
+            if turn is not None:
+                yield turn
+            turn = {
+                "turn": index,
+                "turn_origin": known(row.get("turnOrigin"), KNOWN_ORIGIN),
+                "body": body,
+                "report": None,
+                "recap": None,
+                "end_turn_rows": 0,
+                "stop_hook_rows": 0,
+                "final": False,
+            }
+            indexed = True
             continue
-        if not out:
+        if turn is None or not indexed:
             continue
-        cur = out[-1]
-        if row.get("type") == "system" and row.get("subtype") == "stop_hook_summary":
-            cur["stop_hook_rows"] += 1
-        elif row.get("type") == "assistant":
-            message = row.get("message") or {}
-            texts = [b.get("text", "") for b in _blocks(row) if b.get("type") == "text"]
-            if message.get("stop_reason") == "end_turn":
-                cur["end_turn_rows"] += 1
-                if texts:
-                    cur["report"] = "\n".join(texts)
-            for block in _blocks(row):
-                if block.get("type") != "tool_use":
-                    continue
-                name, args = str(block.get("name", "")), block.get("input") or {}
-                if name.endswith("wrap_up") and isinstance(args.get("recap"), str):
-                    cur["recap"] = args["recap"]
-                if name.endswith("SendMessage") and "to" in args:
-                    cur["sent"].append(args)
-    return out
+        if row_type == "system" and row.get("subtype") == "stop_hook_summary":
+            turn["stop_hook_rows"] += 1
+        elif row_type == "assistant" and isinstance(row.get("message"), dict):
+            _assistant_turn_row(turn, row["message"])
+    if turn is not None:
+        turn["final"] = True
+        yield turn
 
 
 def events(
-    session: str, rows: list[dict[str, Any]], status: str | None, include_text: bool
+    session: str,
+    rows: Iterable[dict[str, Any]],
+    still_idle: Callable[[], bool],
+    include_text: bool,
 ) -> Iterator[dict[str, Any]]:
-    """Normalized claude.* events. The key (session, turn) is what a reader can derive
-    on its own; a turn is closed once a later turn exists or the process is idle. A closed
+    """Normalized claude.* events. A peer can have an unknown turn index.
+
+    An indexed turn is closed once a later turn exists or the process is idle. A closed
     turn with no `end_turn` row (interrupted, or its last row not flushed yet) is still
     emitted, with has_end_turn false. A process that left the registry is not read, so its
     last turn is only seen if a later poll found it idle first."""
-    all_turns = turns(rows)
-    for position, turn in enumerate(all_turns):
-        last = position == len(all_turns) - 1
-        if last and status != "idle":
+    for turn in transcript_items(rows):
+        if turn.get("final") and not still_idle():
             continue  # still running (or the process is gone and we cannot tell)
-        if turn["inbound"] is not None:
+        if turn["body"] is not None:
             event: dict[str, Any] = {
                 "kind": "claude.session_message",
                 "session": session,
                 "turn": turn["turn"],
-                "body_len": len(str(turn["inbound"].get("body", ""))),
+                "body_len": len(turn["body"]),
             }
             if include_text:
-                event["body"] = turn["inbound"].get("body")
+                event["body"] = turn["body"]
             yield event
+        if turn["turn"] is None:
+            continue
         report = turn["recap"] or turn["report"]
         event = {
             "kind": "claude.turn_report",
@@ -201,19 +280,42 @@ def app_state_event(
     and the time the turn ended. It is overwritten by the next turn, so a reader that polls
     slower than turns end loses turns; the transcript keeps them all."""
     report = state.get("lastTurnReport")
-    if not isinstance(report, str) or not isinstance(state.get("lastTurnEdgeAt"), int):
+    edge = whole_number(state.get("lastTurnEdgeAt"))
+    if not isinstance(report, str) or edge is None:
         return None
     event: dict[str, Any] = {
         "kind": "claude.turn_report",
         "source": "app_state",
         "session": session,
-        "turn_edge_at_ms": state["lastTurnEdgeAt"],
+        "turn_edge_at_ms": edge,
         "completed_turns": whole_number(state.get("completedTurns")),
         "report_len": len(report),
     }
     if include_text:
         event["report"] = report
     return event
+
+
+def transcript_counts(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    groups = reports = messages = 0
+    stop_hooks: Counter[int] = Counter()
+    end_turns: Counter[int] = Counter()
+    for turn in transcript_items(rows):
+        if turn["body"] is not None:
+            messages += 1
+        if turn["turn"] is None:
+            continue
+        groups += 1
+        reports += bool(turn["report"] or turn["recap"])
+        stop_hooks[turn["stop_hook_rows"]] += 1
+        end_turns[turn["end_turn_rows"]] += 1
+    return {
+        "turn_groups": groups,
+        "reports_found": reports,
+        "inbound_peer_messages": messages,
+        "stop_hooks_per_turn": dict(stop_hooks),
+        "end_turn_rows_per_turn": dict(end_turns),
+    }
 
 
 def survey(claude_home: str, app_support: str) -> dict[str, Any]:
@@ -223,11 +325,11 @@ def survey(claude_home: str, app_support: str) -> dict[str, Any]:
     for ordinal, entry in enumerate(live, 1):
         sid = entry["sessionId"]
         path = transcript_path(claude_home, sid)
-        grouped = turns(read_rows(path)) if path else []
         state = meta.get(sid) or {}
         per_session.append(
             {
                 "session_n": ordinal,
+                "session_handle": session_handle(sid),
                 "status": known(entry.get("status"), KNOWN_STATUS),
                 "has_app_state": sid in meta,
                 "has_transcript": path is not None,
@@ -235,15 +337,11 @@ def survey(claude_home: str, app_support: str) -> dict[str, Any]:
                 "app_state_report_len": len(state["lastTurnReport"])
                 if isinstance(state.get("lastTurnReport"), str)
                 else None,
-                "app_state_has_turn_edge": isinstance(state.get("lastTurnEdgeAt"), int),
+                "app_state_has_turn_edge": whole_number(state.get("lastTurnEdgeAt")) is not None,
                 "app_state_has_last_assistant_uuid": isinstance(
                     state.get("lastAssistantUuid"), str
                 ),
-                "turn_groups": len(grouped),
-                "reports_found": sum(1 for t in grouped if t["report"] or t["recap"]),
-                "inbound_peer_messages": sum(1 for t in grouped if t["inbound"]),
-                "stop_hooks_per_turn": dict(Counter(t["stop_hook_rows"] for t in grouped)),
-                "end_turn_rows_per_turn": dict(Counter(t["end_turn_rows"] for t in grouped)),
+                **transcript_counts(read_rows(path) if path else ()),
             }
         )
     return {
@@ -262,33 +360,54 @@ def watch(claude_home: str, seconds: float, interval: float = 0.5) -> dict[str, 
     timestamp was when the flip was seen and whether the transcript file had grown since
     the previous poll. It does not check that the turn's last row had landed."""
     ordinals: dict[str, int] = {}
-    last_status: dict[str, str | None] = {}
     flips: list[dict[str, Any]] = []
-    size_seen: dict[str, int] = {}
-    deadline = time.time() + seconds
-    while time.time() < deadline:
+    previous: dict[str, tuple[str, os.stat_result | None]] = {}
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        current = {}
         for entry in registry(claude_home):
             sid = entry["sessionId"]
             n = ordinals.setdefault(sid, len(ordinals) + 1)
-            status = entry.get("status")
+            status = known(entry.get("status"), KNOWN_STATUS)
             path = transcript_path(claude_home, sid)
             try:
-                size = os.path.getsize(path) if path else -1
+                sample = os.stat(path, follow_symlinks=False) if path else None
             except OSError:
-                size = -1
-            if last_status.get(sid) == "busy" and status == "idle":
+                sample = None
+            if sample is not None and not stat.S_ISREG(sample.st_mode):
+                sample = None
+            last_status, last_sample = previous.get(sid, ("other", None))
+            if last_status == "busy" and status == "idle":
+                seen_at = time.time()
+                seen_at_ms = int(seen_at * 1000)
+                updated = whole_number(entry.get("statusUpdatedAt"))
                 flips.append(
                     {
                         "session_n": n,
-                        "flip_seen_at": time.time(),
-                        "transcript_grew_since_last_poll": size != size_seen.get(sid),
-                        "registry_status_age_ms": int(time.time() * 1000)
-                        - (whole_number(entry.get("statusUpdatedAt")) or 0),
+                        "flip_seen_at": seen_at,
+                        "transcript_grew_since_last_poll": (
+                            sample is not None
+                            and last_sample is not None
+                            and (sample.st_dev, sample.st_ino)
+                            == (last_sample.st_dev, last_sample.st_ino)
+                            and sample.st_size > last_sample.st_size
+                        ),
+                        "registry_status_age_ms": seen_at_ms - updated
+                        if updated is not None and 0 < updated <= seen_at_ms
+                        else None,
                     }
                 )
-            last_status[sid], size_seen[sid] = status, size
+            current[sid] = status, sample
+        previous = current
         time.sleep(interval)
     return {"polled_seconds": seconds, "sessions_seen": len(ordinals), "busy_to_idle_flips": flips}
+
+
+def registry_entry(claude_home: str, handle: str | None) -> dict[str, Any] | None:
+    matches = [
+        entry for entry in registry(claude_home) if session_handle(entry["sessionId"]) == handle
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def main(argv: list[str]) -> int:
@@ -298,7 +417,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("command", choices=["survey", "events", "watch"])
     parser.add_argument("--claude-home", default=DEFAULT_HOME)
     parser.add_argument("--app-support", default=DEFAULT_APP)
-    parser.add_argument("--session", type=int, help="1-based ordinal from `survey` (events)")
+    parser.add_argument("--session", help="session_handle from `survey` (events)")
     parser.add_argument(
         "--include-text", action="store_true", help="events: include report and message text"
     )
@@ -310,17 +429,20 @@ def main(argv: list[str]) -> int:
     elif args.command == "watch":
         print(json.dumps(watch(args.claude_home, args.seconds), indent=2, sort_keys=True))
     else:
-        live = registry(args.claude_home)
-        if not args.session or not 1 <= args.session <= len(live):
-            print(f"events needs --session N, 1..{len(live)}", file=sys.stderr)
+        entry = registry_entry(args.claude_home, args.session)
+        if entry is None:
+            print("events needs the handle of one live session from survey", file=sys.stderr)
             return 2
-        entry = live[args.session - 1]
         sid = entry["sessionId"]
         path = transcript_path(args.claude_home, sid)
-        label = f"session-{args.session}"  # never print the real id
-        for event in events(
-            label, read_rows(path) if path else [], entry.get("status"), args.include_text
-        ):
+        label = session_handle(sid)
+
+        def still_idle() -> bool:
+            return entry.get("status") == "idle" and entry == registry_entry(
+                args.claude_home, label
+            )
+
+        for event in events(label, read_rows(path) if path else (), still_idle, args.include_text):
             print(json.dumps(event, sort_keys=True))
         state_event = app_state_event(
             label, app_state(args.app_support).get(sid) or {}, args.include_text

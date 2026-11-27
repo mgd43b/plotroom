@@ -39,7 +39,7 @@ The Epic 2 spike links the registry session ID, Desktop session metadata, and tr
 
 ## Implementation Notes
 
-Synthetic fixtures exercise both arrival orders, both index forms, and a repeated transcript read. The owner’s real Desktop observation remains open.
+Synthetic fixtures exercise both arrival orders, both index forms, and a repeated transcript read. An independent four-case real Claude Desktop run verified turn deduplication. The canonical story leaves the decision to accept that evidence or repeat the check with Matt. [Merged evidence PR #183](https://github.com/mgd43b/plotroom/pull/183)
 
 ## Plan Change Log
 

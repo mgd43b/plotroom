@@ -39,7 +39,7 @@ The local daemon runs project input tasks. The GitHub adapter owns HTTP and cred
 
 ## Implementation Notes
 
-The loopback HTTP fixture verified environment credentials, missing and rejected credentials, and an on-demand daemon with a mounted token file. The live GitHub acceptance is pending the repository owner. The intended CI secret is `PLOTROOM_GITHUB_FIXTURE_GITHUB_TOKEN` for project `github-fixture`.
+The loopback HTTP fixture verified environment credentials, missing and rejected credentials, and an on-demand daemon with a mounted token file. The dedicated repository's live fixture acceptance passed, including on-demand startup with a scoped PAT read from its configured file. The live deployment sample remains pending because the fixture contained zero deployment records. [Acceptance run](https://github.com/mgd43b/plotroom/actions/runs/45845942573)
 
 ## Plan Change Log
 
