@@ -38,7 +38,11 @@ def row_six_steps() -> dict[str, str]:
         "dict[str, Any]", yaml.load(ROW_SIX_WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     )
     assert set(workflow["on"]) == {"workflow_dispatch"}
-    assert set(workflow["on"]["workflow_dispatch"]["inputs"]) == {"expected_sha"}
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    assert set(inputs) == {"expected_sha", "mode"}
+    assert inputs["mode"]["type"] == "choice"
+    assert inputs["mode"]["default"] == "row-six"
+    assert inputs["mode"]["options"] == ["row-six", "integrated"]
     assert workflow["permissions"] == {"contents": "read"}
     assert set(workflow["jobs"]) == {"row-six"}
     job = workflow["jobs"]["row-six"]
@@ -49,14 +53,17 @@ def row_six_steps() -> dict[str, str]:
         "github.actor == 'mgd43b'",
         "github.triggering_actor == 'mgd43b'",
     ]
-    assert job["timeout-minutes"] == "15"
+    assert job["timeout-minutes"] == "${{ inputs.mode == 'integrated' && 30 || 15 }}"
     assert job["steps"][0]["with"] == {
         "ref": "${{ github.sha }}",
         "persist-credentials": "false",
     }
     [secret_step] = [step for step in job["steps"] if "secrets." in str(step.get("env", {}))]
-    assert secret_step["name"] == "Verify published work-item mirrors"
-    assert secret_step["env"] == {"FIXTURE_PAT": f"${{{{ secrets.{OVERRIDE} }}}}"}
+    assert secret_step["name"] == "Verify the selected read-only witnesses"
+    assert secret_step["env"] == {
+        "FIXTURE_PAT": f"${{{{ secrets.{OVERRIDE} }}}}",
+        "WITNESS_MODE": "${{ inputs.mode }}",
+    }
     assert job["steps"][-1] == secret_step
     assert job["steps"][-2]["name"] == "Recheck reviewed main before credential use"
     return {step["name"]: step["run"] for step in job["steps"] if "run" in step}
@@ -151,12 +158,14 @@ def test_row_six_rechecks_main_after_preparation(
     ("credential", "harness_exit", "expected"),
     [("test-marker", 0, 0), ("test-marker", 13, 13), ("", 0, 1)],
 )
+@pytest.mark.parametrize("mode", ["row-six", "integrated"])
 def test_row_six_workflow_confines_fixture_credential(
     row_six_steps: dict[str, str],
     tmp_path: Path,
     credential: str,
     harness_exit: int,
     expected: int,
+    mode: str,
 ) -> None:
     mktemp_path = shutil.which("mktemp")
     assert mktemp_path is not None
@@ -175,10 +184,12 @@ import sys
 from pathlib import Path
 
 args = sys.argv[1:]
+entrypoint = {
+    "row-six": ["--no-dev", "python", "-m", "deploy.epic_two_mirrors", "--verify-published"],
+    "integrated": ["python", "-m", "deploy.epic_two_acceptance", "--verify-integrated"],
+}[os.environ["WITNESS_MODE"]]
 assert args[:-1] == [
-    "run", "--locked", "--offline", "--no-dev", "python", "-m",
-    "deploy.epic_two_mirrors", "--verify-published", "--image-tag", "row-six-123",
-    "--token-file",
+    "run", "--locked", "--offline", *entrypoint, "--image-tag", "row-six-123", "--token-file",
 ]
 assert "FIXTURE_PAT" not in os.environ
 assert "fixture_pat" not in os.environ
@@ -201,18 +212,33 @@ sys.exit(int(os.environ["HARNESS_EXIT"]))
     runner_temp = tmp_path / "runner-temp"
     runner_temp.mkdir()
     result = run_step(
-        row_six_steps["Verify published work-item mirrors"],
+        row_six_steps["Verify the selected read-only witnesses"],
         tmp_path,
         RUNNER_TEMP=str(runner_temp),
         FIXTURE_PAT=credential,
         GITHUB_RUN_ID="123",
         HARNESS_EXIT=str(harness_exit),
+        WITNESS_MODE=mode,
         **{OVERRIDE: "synthetic-override"},
     )
     assert result.returncode == expected, result.stderr
     assert not result.stdout
     assert not result.stderr
     assert not tuple(runner_temp.iterdir())
+
+
+def test_row_six_workflow_rejects_unknown_mode(
+    row_six_steps: dict[str, str], tmp_path: Path
+) -> None:
+    result = run_step(
+        row_six_steps["Verify the selected read-only witnesses"],
+        tmp_path,
+        WITNESS_MODE="unknown",
+        FIXTURE_PAT="test-marker",
+    )
+    assert result.returncode == 2
+    assert not result.stdout
+    assert not result.stderr
 
 
 @pytest.mark.parametrize(

@@ -226,3 +226,39 @@ An exact-main credential-backed run remains pending.
 Opening review on PR #228 added a second secret-free main pin immediately before the
 credential step. Dry tests confirm source drift blocks it, the same mocked checkout
 passes attempt 1 and rejects attempt 2, and HTTP 403 reports only a sanitized message.
+
+### Integrated CI for available witnesses
+
+The standalone row 6 run [46067855585](https://github.com/mgd43b/plotroom/actions/runs/46067855585)
+passed on exact main `ce9c80140bbb9d2cba940cf90c429988972fb4a0`. The existing PAT
+read both fixtures successfully. The host and isolated Compose verified the same two ordered
+tree tickets and exact body of the single ready native child #7. No credential changes were needed.
+
+Add an explicit integrated mode to the existing owner/main/reviewed-SHA workflow.
+One bounded job runs the existing local daemon tests and scripted Compose bridge smoke,
+the exact archived GitHub terminal facts and lane inference, and the published work-item
+sources. Reuse the private temporary PAT file and the existing archive query allowlist and
+cache-only isolated Compose replay. A denial fails the included witness and reports the
+sanitized read boundary. Preserve the standalone row 6 default and the full suite's nonzero
+result. Report all nine rows with source and scope, identifying hosted bridge, hosted App,
+and recorded deployment acceptance as deferred. One green limited run cannot close #46.
+
+A complete local dry run passed with a synthetic credential file and 60 scoped public
+fixture reads, including five exact approved GraphQL read requests. The local and
+scripted Compose witnesses passed. Both archive ledgers retained 36 events and zero actions
+after a second observation. The work-item views matched and the two isolated Compose
+replays made zero fresh provider reads. All three disposable projects were removed.
+The dry run never used the Actions PAT. The real integrated dispatch remains pending.
+
+The manual workflow still defaults to the standalone row 6 path. Independent reviews
+verified the scope and added duplicate-key rejection in the archive's GraphQL envelope.
+Tests cover all four stage failures, exact deferred row assignments, sanitized permission
+denial, and both dry workflow modes. On both locked Python versions, 120 focused tests
+and Pyright passed. Ruff, actionlint, and whitespace checks passed.
+
+Opening review on PR #229 added a separate 30-minute job limit for integrated mode while
+keeping the standalone 15-minute limit. The local test process already has a five-minute
+limit. The scripted Compose stage and the two GitHub witness stages each have four-minute
+execution budgets. Cleanup keeps independent command limits, with the synchronous alarm
+paused for teardown. Synthetic timeouts prove the remaining stages still run and the report
+fails the integrated job.

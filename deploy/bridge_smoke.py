@@ -72,7 +72,7 @@ async def tool(client, name, arguments, **options):
     return result["data"]
 
 
-async def verify_worker(url, operator, worker, database) -> None:
+async def verify_worker(url, operator, worker, database, *, stage_timer=None) -> None:
     assert urlsplit(url).hostname == "127.0.0.1"
     async with (
         connect(url, operator) as client,
@@ -152,6 +152,8 @@ async def verify_worker(url, operator, worker, database) -> None:
                 [message["event"], "claude.session_message", "fixture-lane"],
             ]
         finally:
+            if stage_timer is not None:
+                stage_timer(False)
             wait.cancel()
             if watcher.returncode is None:
                 with suppress(ProcessLookupError):
@@ -230,7 +232,7 @@ async def queue_trigger(url, operator):
         )
 
 
-def smoke(root: Path, name: str, tag: str) -> None:
+def smoke(root: Path, name: str, tag: str, *, stage_timer=None) -> None:
     image_id = run(["docker", "image", "inspect", "--format", "{{.Id}}", f"plotroom:{tag}"]).strip()
     board = name + "-board"
     config = root / "plotroom.toml"
@@ -324,13 +326,21 @@ def smoke(root: Path, name: str, tag: str) -> None:
         assert database("decision", "orchestrator:compose-fixture-one") == "1"
         print("Compose restart passed: readiness, original bearer, and one durable event.")
 
-        verify_bridge(root, board, url, operator, bridge_token, database)
-        asyncio.run(verify_worker(url, operator, token("worker:fixture"), database))
+        verify_bridge(root, board, url, operator, bridge_token, database, stage_timer=stage_timer)
+        if stage_timer is not None:
+            stage_timer(True)
+        asyncio.run(
+            verify_worker(url, operator, token("worker:fixture"), database, stage_timer=stage_timer)
+        )
+        if stage_timer is not None:
+            stage_timer(True)
         print(
             "Compose worker passed: one durable report on replay, session message, "
             "armed MCP wake, CLI cursor observation, and acknowledgment."
         )
     finally:
+        if stage_timer is not None:
+            stage_timer(False)
         if run(["docker", "volume", "ls", "-q", "--filter", f"name=^{volume}$"]).strip():
             label = run(
                 [
@@ -347,7 +357,14 @@ def smoke(root: Path, name: str, tag: str) -> None:
 
 
 def verify_bridge(
-    root: Path, board: str, url: str, operator: str, bridge_token: str, database
+    root: Path,
+    board: str,
+    url: str,
+    operator: str,
+    bridge_token: str,
+    database,
+    *,
+    stage_timer=None,
 ) -> None:
     state = root / "relay"
     state.mkdir()
@@ -420,6 +437,8 @@ def verify_bridge(
             "and one leased outbound send."
         )
     finally:
+        if stage_timer is not None:
+            stage_timer(False)
         for process in processes:
             if process.poll() is None:
                 process.kill()

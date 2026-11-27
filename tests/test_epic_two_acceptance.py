@@ -4,6 +4,7 @@ import importlib
 import json
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,128 @@ def test_clean_witnesses_only_pass_in_synthetic_mode(
     assert "Integrated credential-backed CI acceptance remains pending" in output
     summary = "remains incomplete" if synthetic else "full acceptance blocked"
     assert summary in output
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "local",
+        "compose",
+        "archive",
+        "mirrors",
+        "compose-timeout",
+        "archive-timeout",
+        "mirrors-timeout",
+    ],
+)
+def test_integrated_result_requires_each_included_witness_and_reports_its_scope(
+    acceptance: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    fault: str | None,
+) -> None:
+    calls: list[str] = []
+    path = tmp_path / "fixture-token"
+    failed_stage = fault.removesuffix("-timeout") if fault else None
+
+    def observe(stage: str) -> None:
+        calls.append(stage)
+        if fault == stage == "archive":
+            raise acceptance.ArchiveReadError(
+                "GitHub fixture read returned HTTP 403 at GraphQL review threads for PR #2"
+            )
+        if fault == stage:
+            raise RuntimeError("untrusted error detail")
+
+    async def archive(tag: str, token_file: Path) -> None:
+        assert tag == "fixture"
+        assert token_file == path
+        observe("archive")
+        if fault == "archive-timeout":
+            await asyncio.sleep(0.2)
+
+    async def mirrors(tag: str, token_file: Path, _report: Callable[[str], None]) -> None:
+        assert tag == "fixture"
+        assert token_file == path
+        observe("mirrors")
+        if fault == "mirrors-timeout":
+            await asyncio.sleep(0.2)
+
+    def compose(tag: str, *, stage_timer: Callable[[bool], None]) -> None:
+        assert tag == "fixture"
+        try:
+            observe("compose")
+            if fault == "compose-timeout":
+                time.sleep(0.2)
+        finally:
+            stage_timer(False)
+
+    monkeypatch.setattr(acceptance, "local_checks", lambda: observe("local"))
+    monkeypatch.setattr(acceptance, "compose_checks", compose)
+    monkeypatch.setattr(acceptance, "archived_file_checks", archive)
+    monkeypatch.setattr(acceptance, "verify_published", mirrors)
+    monkeypatch.setattr(acceptance, "COMPOSE_STAGE_SECONDS", 0.05)
+    monkeypatch.setattr(acceptance, "GITHUB_STAGE_SECONDS", 0.05)
+    assert acceptance.main(
+        ["--verify-integrated", "--image-tag", "fixture", "--token-file", str(path)]
+    ) == (0 if fault is None else 1)
+    assert calls == ["local", "compose", "archive", "mirrors"]
+    captured = capsys.readouterr()
+    row = 0
+    archive_rows: set[int] = set()
+    live_rows: set[int] = set()
+    local_rows: set[int] = set()
+    compose_rows: set[int] = set()
+    deferred: set[int] = set()
+    for line in captured.out.splitlines():
+        if line[:1].isdigit():
+            row = int(line.split(".", 1)[0])
+        elif line.startswith("   Archived GitHub "):
+            archive_rows.add(row)
+            assert ("UNVERIFIED" if failed_stage == "archive" else "PASS") in line
+            assert "terminal facts" in line
+        elif line.startswith("   Live read-only "):
+            live_rows.add(row)
+            assert ("UNVERIFIED" if failed_stage == "mirrors" else "PASS") in line
+            assert "capture replay" in line
+        elif "External acceptance DEFERRED" in line:
+            deferred.add(row)
+        elif line.startswith("   Local synthetic "):
+            local_rows.add(row)
+            assert ("UNVERIFIED" if failed_stage == "local" else "PASS") in line
+        elif line.startswith("   Compose synthetic "):
+            compose_rows.add(row)
+            assert ("UNVERIFIED" if failed_stage == "compose" else "PASS") in line
+    assert archive_rows == {1, 9}
+    assert live_rows == {6}
+    assert deferred == {2, 5, 7}
+    assert local_rows == set(range(1, 10))
+    assert compose_rows == {2, 3, 4, 8, 9}
+    assert "Full #46 acceptance remains pending." in captured.out
+    assert "untrusted error detail" not in captured.err
+    if fault == "archive":
+        assert "HTTP 403 at GraphQL review threads for PR #2" in captured.err
+    if fault and fault.endswith("-timeout"):
+        assert "FAILED (TimeoutError)" in captured.err
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--verify-integrated"],
+        ["--token-file", "fixture"],
+        ["--verify-integrated", "--synthetic", "--token-file", "fixture"],
+        ["--verify-integrated", "--milestone", "1", "--child", "7", "--token-file", "fixture"],
+    ],
+)
+def test_integrated_cli_requires_its_private_file_and_fixed_fixture(
+    acceptance: Any, arguments: list[str]
+) -> None:
+    with pytest.raises(SystemExit) as result:
+        acceptance.main(["--image-tag", "fixture", *arguments])
+    assert result.value.code == 2
 
 
 @pytest.mark.parametrize("failed", ["local_checks", "compose_checks"])
@@ -755,6 +878,125 @@ def test_file_backed_read_does_not_follow_redirect_or_send_unscoped_token(
             with pytest.raises(RuntimeError, match="scoped GET"):
                 mirror._file_backed_read(client, path, method, target, b"")
     assert calls == ["https://api.github.com/" + endpoint]
+
+
+def test_archive_file_transport_rechecks_graphql_scope_before_sending_token(
+    acceptance: Any, tmp_path: Path
+) -> None:
+    mirror: Any = importlib.import_module(acceptance.work_item_mirrors.__module__)
+    archive: Any = importlib.import_module(acceptance.archived_checks.__module__)
+    path = tmp_path / "credential"
+    path.write_text("unit-test-pat\n", encoding="utf-8")
+    path.chmod(0o600)
+    calls: list[bytes] = []
+
+    def read(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert str(request.url) == "https://api.github.com/graphql"
+        assert request.headers["Authorization"] == "Bearer unit-test-pat"
+        assert request.headers["Content-Type"] == "application/json"
+        calls.append(request.content)
+        return httpx.Response(200, json={"data": {}})
+
+    variables = {"owner": "mgd43b", "name": "plotroom-test", "number": 2, "after": None}
+    approved = json.dumps({"query": archive.REVIEW_THREADS_QUERY, "variables": variables}).encode()
+    with httpx.Client(transport=httpx.MockTransport(read)) as client:
+        assert (
+            mirror._file_backed_read(client, path, "POST", "graphql", approved, archived=True)[0]
+            == 200
+        )
+        for query, proof in (
+            ("mutation { changed }", variables),
+            (archive.REVIEW_THREADS_QUERY, {**variables, "owner": "other"}),
+            (archive.REVIEW_THREADS_QUERY, {**variables, "number": 3}),
+        ):
+            denied = json.dumps({"query": query, "variables": proof}).encode()
+            with pytest.raises(ValueError, match="outside"):
+                mirror._file_backed_read(client, path, "POST", "graphql", denied, archived=True)
+        duplicate_query = approved.replace(
+            b'{"query":', b'{"query":"mutation { changed }","query":', 1
+        )
+        duplicate_variables = approved.replace(
+            b'"variables": {', b'"variables": {},"variables": {', 1
+        )
+        duplicate_owner = approved.replace(b'"owner":', b'"owner":"other","owner":', 1)
+        for denied in (duplicate_query, duplicate_variables, duplicate_owner):
+            with pytest.raises(ValueError, match="duplicate property"):
+                mirror._file_backed_read(client, path, "POST", "graphql", denied, archived=True)
+    assert calls == [approved]
+
+
+@pytest.mark.parametrize(
+    ("method", "endpoint", "status", "kind", "expected"),
+    [
+        (
+            "GET",
+            "repos/mgd43b/plotroom-test/commits/" + "a" * 40 + "/check-runs?private=query",
+            403,
+            "FORBIDDEN",
+            "read returned HTTP 403 at GET /repos/mgd43b/plotroom-test/commits/"
+            + "a" * 40
+            + "/check-runs",
+        ),
+        (
+            "POST",
+            "graphql",
+            401,
+            "UNKNOWN",
+            "read returned HTTP 401 at GraphQL review threads for PR #2",
+        ),
+        (
+            "POST",
+            "graphql",
+            200,
+            "UNKNOWN",
+            "read returned errors at GraphQL review threads for PR #2",
+        ),
+        ("POST", "graphql", 200, "FORBIDDEN", "access denied at GraphQL review threads for PR #2"),
+    ],
+)
+def test_archive_file_transport_sanitizes_provider_denials(
+    acceptance: Any,
+    tmp_path: Path,
+    method: str,
+    endpoint: str,
+    status: int,
+    kind: str,
+    expected: str,
+) -> None:
+    mirror: Any = importlib.import_module(acceptance.work_item_mirrors.__module__)
+    archive: Any = importlib.import_module(acceptance.archived_checks.__module__)
+    path = tmp_path / "credential"
+    path.write_text("unit-test-pat\n", encoding="utf-8")
+    path.chmod(0o600)
+    document = json.dumps(
+        {
+            "query": archive.REVIEW_THREADS_QUERY,
+            "variables": {"owner": "mgd43b", "name": "plotroom-test", "number": 2, "after": None},
+        }
+    ).encode()
+
+    calls = 0
+
+    def denied(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status, json={"errors": [{"message": "unit-test-pat", "type": kind}]})
+
+    with httpx.Client(transport=httpx.MockTransport(denied)) as client:
+
+        def transport(
+            verb: str, target: str, payload: bytes
+        ) -> tuple[int, tuple[dict[str, str], bytes]]:
+            return mirror._file_backed_read(client, path, verb, target, payload, archived=True)
+
+        provider = archive.ProviderReads(transport=transport, describe_archive_errors=True)
+        with pytest.raises(RuntimeError) as error:
+            provider.read(method, f"/{endpoint}", document if method == "POST" else b"")
+        with pytest.raises(RuntimeError, match="read budget exhausted"):
+            provider.read("GET", "/repos/mgd43b/plotroom-test/branches/main", b"")
+    assert calls == 1
+    assert str(error.value) == f"GitHub fixture {expected}"
 
 
 @pytest.mark.parametrize("fault", [None, "denied", "body-drift", "epic-drift", "replay-drift"])

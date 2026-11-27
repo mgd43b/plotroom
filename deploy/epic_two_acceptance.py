@@ -5,18 +5,24 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from types import FrameType
 from uuid import uuid4
 from xml.etree import ElementTree
 
 from deploy.bridge_smoke import ROOT, run, smoke
-from deploy.epic_two_archived import archived_checks
-from deploy.epic_two_mirrors import work_item_mirrors
+from deploy.epic_two_archived import ArchiveReadError, archived_checks
+from deploy.epic_two_mirrors import fixture_file_transport, verify_published, work_item_mirrors
+
+COMPOSE_STAGE_SECONDS = 240
+GITHUB_STAGE_SECONDS = 240
 
 WITNESSES = (
     "test_github.py::test_pull_lifecycle_and_credentials_preserve_committed_state",
@@ -139,7 +145,7 @@ def local_checks() -> None:
             raise RuntimeError("one or more local witnesses did not run to completion")
 
 
-def compose_checks(tag: str) -> None:
+def compose_checks(tag: str, *, stage_timer: Callable[[bool], None] | None = None) -> None:
     endpoint = os.environ.get("DOCKER_HOST") if not os.environ.get("DOCKER_CONTEXT") else None
     if endpoint is None:
         endpoint = run(
@@ -148,7 +154,98 @@ def compose_checks(tag: str) -> None:
     if not endpoint.startswith("unix://"):
         raise RuntimeError("the Compose witness requires a local Docker Unix socket")
     with tempfile.TemporaryDirectory(prefix="plotroom-epic-two-") as directory:
-        smoke(Path(directory), f"plotroom-epic-two-{uuid4().hex[:12]}", tag)
+        smoke(
+            Path(directory), f"plotroom-epic-two-{uuid4().hex[:12]}", tag, stage_timer=stage_timer
+        )
+
+
+async def archived_file_checks(tag: str, token_file: Path) -> None:
+    with fixture_file_transport(token_file, archived=True) as transport:
+        await archived_checks(tag, print, transport=transport)
+
+
+def bounded_compose_checks(tag: str) -> None:
+    def expired(_signal: int, _frame: FrameType | None) -> None:
+        raise TimeoutError("the scripted Compose stage exceeded its time budget")
+
+    deadline = time.monotonic() + COMPOSE_STAGE_SECONDS
+
+    def timer(active: bool) -> None:
+        if not active:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("the scripted Compose stage exceeded its time budget")
+        signal.setitimer(signal.ITIMER_REAL, remaining)
+
+    # Pause the alarm while the harness tears down processes and containers.
+    # Those commands keep their existing independent cleanup bounds.
+    previous = signal.signal(signal.SIGALRM, expired)
+    try:
+        timer(True)
+        compose_checks(tag, stage_timer=timer)
+    finally:
+        timer(False)
+        signal.signal(signal.SIGALRM, previous)
+
+
+async def bounded_github_check(witness: Awaitable[None]) -> None:
+    async with asyncio.timeout(GITHUB_STAGE_SECONDS):
+        await witness
+
+
+def verify_integrated(tag: str, token_file: Path) -> int:
+    def check(label: str, witness: Callable[[], None]) -> bool:
+        try:
+            witness()
+        except ArchiveReadError as error:
+            print(f"{label} FAILED: {error}", file=sys.stderr, flush=True)
+            return False
+        except Exception as error:
+            # Exceptions from lower-level clients and provider data are not
+            # safe evidence to print in a credential-backed step.
+            print(f"{label} FAILED ({type(error).__name__}).", file=sys.stderr, flush=True)
+            return False
+        print(f"{label} passed.", flush=True)
+        return True
+
+    local = check("Local synthetic daemon and adapter tests", local_checks)
+    compose = check(
+        "Synthetic Compose and scripted Switchboard", lambda: bounded_compose_checks(tag)
+    )
+    archive = check(
+        "Archived GitHub terminal facts",
+        lambda: asyncio.run(bounded_github_check(archived_file_checks(tag, token_file))),
+    )
+    mirrors = check(
+        "Live read-only work-item mirrors",
+        lambda: asyncio.run(bounded_github_check(verify_published(tag, token_file, print))),
+    )
+
+    for number, (criterion, local_witness, compose_witness, deferred) in enumerate(CRITERIA, 1):
+        print(f"{number}. {criterion}")
+        print(f"   Local synthetic {'PASS' if local else 'UNVERIFIED'} — {local_witness}")
+        if compose_witness is not None:
+            print(f"   Compose synthetic {'PASS' if compose else 'UNVERIFIED'} — {compose_witness}")
+        if number in (1, 9):
+            print(
+                f"   Archived GitHub {'PASS' if archive else 'UNVERIFIED'} — "
+                "pinned terminal facts in the local daemon and isolated Compose replay."
+            )
+        if number == 6:
+            print(
+                f"   Live read-only {'PASS' if mirrors else 'UNVERIFIED'} — "
+                "published work-item sources on the host and isolated Compose capture replay."
+            )
+        if number in (2, 5, 7):
+            print(f"   External acceptance DEFERRED — {deferred}")
+
+    if not (local and compose and archive and mirrors):
+        print("Result: included integrated witnesses failed. Full #46 acceptance remains pending.")
+        return 1
+    print("Result: limited integrated witnesses passed. Full #46 acceptance remains pending.")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -170,6 +267,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also verify the pinned fixture's read-only local work-item sources",
     )
+    modes.add_argument(
+        "--verify-integrated",
+        action="store_true",
+        help="verify the included credential-backed CI witnesses",
+    )
+    parser.add_argument(
+        "--token-file", type=Path, help="private fixture token file for integrated CI"
+    )
     parser.add_argument("--milestone", type=int, help="verified fixture milestone number")
     parser.add_argument("--child", type=int, help="verified fixture story issue number")
     args = parser.parse_args(argv)
@@ -181,6 +286,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--milestone and --child require --work-item-mirrors and two positive numbers")
     if not __debug__:
         parser.error("the acceptance witnesses require Python assertions to be enabled")
+    if args.verify_integrated != (args.token_file is not None):
+        parser.error("--verify-integrated and --token-file must be supplied together")
+    if args.verify_integrated:
+        return verify_integrated(args.image_tag, args.token_file)
     print("Running Epic 2 synthetic witnesses. Full acceptance needs real evidence.", flush=True)
 
     def check(label: str, run_check: Callable[[], None], *, verdict: str = "passed") -> bool:
