@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sys
 import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -12,8 +13,14 @@ from functools import partial
 from pathlib import Path
 
 import httpx
-from deploy.bridge_smoke import ROOT
-from deploy.epic_two_archived import REPO, ArchiveReadError, ProviderReads, Reader
+from deploy.epic_two_archived import (
+    REPO,
+    ArchiveReadError,
+    PipeReader,
+    ProviderReads,
+    Reader,
+    compose_witness,
+)
 
 from plotroom.adapters.github import GITHUB_API, LocalGitHubCredential
 from plotroom.adapters.github.details import GitHubDetailPoller
@@ -31,6 +38,14 @@ from plotroom.core.ledger import Ledger
 from plotroom.ports.work_items import WorkItem
 
 PREFIX = f"/repos/{REPO}"
+ROOT = Path(__file__).resolve().parents[1]
+ISSUES_STARTER = ".agents/skills/bmad-agent-po/config/github-ticketing.toml"
+MIRROR_SOURCES = (
+    "deploy/epic_two_archived.py",
+    "deploy/epic_two_mirrors.py",
+    "_bmad/method/scripts/tickets.py",
+    ISSUES_STARTER,
+)
 TREE_COMMIT = "9a6ce8a89a15046c18dbfa5d7d2af88bb0edbc14"
 ROOT_TREE = "444235a0fb71f25c289a384ee521d6a117c8f1e9"
 INITIATIVE_TREE = "27069e9cbf8f0f172fa4151f9d89c4161170e792"
@@ -279,7 +294,7 @@ async def issues_witness(read: Reader, scope: IssueScope, milestone: int, child:
             )
             source = GitHubIssuesWorkItems(
                 poller.issue_tree,
-                ROOT / ".agents/skills/bmad-agent-po/config/github-ticketing.toml",
+                ROOT / ISSUES_STARTER,
                 store_config,
                 REPO,
                 milestone,
@@ -298,19 +313,69 @@ async def issues_witness(read: Reader, scope: IssueScope, milestone: int, child:
     return ready[0]
 
 
+async def mirror_results(
+    read: Reader, milestone: int | None, child: int | None, scope: IssueScope | None
+) -> dict[str, object]:
+    repo_store = [[item.ref, item.title] for item in await tree_witness(read)]
+    native = None
+    if milestone is not None and child is not None and scope is not None:
+        ready = await issues_witness(read, scope, milestone, child)
+        native = [ready.ref, ready.title]
+    return {"repo_store": repo_store, "issues": native}
+
+
+async def compose_mirrors(
+    tag: str, replay: Reader, milestone: int | None, child: int | None
+) -> dict[str, object]:
+    arguments = (str(milestone), str(child)) if milestone is not None and child is not None else ()
+    return await compose_witness(
+        tag,
+        replay,
+        module="deploy.epic_two_mirrors",
+        arguments=arguments,
+        source_files=MIRROR_SOURCES,
+    )
+
+
 async def work_item_mirrors(
-    milestone: int | None, child: int | None, report: Callable[[str], None]
+    tag: str, milestone: int | None, child: int | None, report: Callable[[str], None]
 ) -> bool:
-    provider = ProviderReads(tree_scope)
+    scope = IssueScope(milestone, child) if milestone is not None and child is not None else None
+
+    def scoped_endpoint(method: str, path: str, body: bytes) -> str:
+        if path in TREE_READS or scope is None:
+            return tree_scope(method, path, body)
+        return scope.endpoint(method, path, body)
+
+    provider = ProviderReads(scoped_endpoint)
     await asyncio.to_thread(provider.preflight_public)
-    await tree_witness(provider.read)
-    report("Repo-store mirror PASS — 1.1 Fixture ticket, then 1.2 Fixture follow-up.")
-    if milestone is None or child is None:
-        report("GitHub Issues mirror BLOCKED — supply verified milestone and child numbers.")
-        return False
-    scope = IssueScope(milestone, child)
-    provider = ProviderReads(scope.endpoint)
-    await asyncio.to_thread(provider.preflight_public)
-    await issues_witness(provider.read, scope, milestone, child)
-    report(f"GitHub Issues mirror PASS — one ready child #{child} with the exact native body.")
-    return True
+    local = await mirror_results(provider.read, milestone, child, scope)
+    report("Local repo-store mirror PASS — 1.1 Fixture ticket, then 1.2 Fixture follow-up.")
+    if scope is None:
+        report("Local GitHub Issues mirror BLOCKED — supply verified milestone and child numbers.")
+    else:
+        report(f"Local GitHub Issues mirror PASS — ready child #{child} and exact native body.")
+    replayed = await compose_mirrors(tag, provider.replay, milestone, child)
+    if replayed != local:
+        raise ArchiveReadError("the Compose work-item mirrors differed from the local observations")
+    report("Compose repo-store mirror PASS — the same ordered ready tickets from captured input.")
+    if scope is None:
+        report(
+            "Compose GitHub Issues mirror BLOCKED — supply verified milestone and child numbers."
+        )
+    else:
+        report(f"Compose GitHub Issues mirror PASS — #{child}, exact body from captured input.")
+    return scope is not None
+
+
+async def _replay_child(arguments: list[str]) -> dict[str, object]:
+    if not __debug__:
+        raise RuntimeError("the work-item mirror witness requires Python assertions")
+    if not arguments:
+        return await mirror_results(PipeReader().read, None, None, None)
+    milestone, child = map(int, arguments)
+    return await mirror_results(PipeReader().read, milestone, child, IssueScope(milestone, child))
+
+
+if __name__ == "__main__":
+    print(json.dumps({"result": asyncio.run(_replay_child(sys.argv[1:]))}), flush=True)
