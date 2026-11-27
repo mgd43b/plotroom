@@ -38,21 +38,15 @@ Invalid key paths now return field-specific errors during config loading, and
 direct adapter reads convert invalid paths into sanitized embedding failures.
 The runbook distinguishes Helm mapping checks from daemon endpoint validation.
 
-## Owner acceptance pending
+## Owner acceptance
 
-After the exact merged revision passes main CI, the authorized owner chat can
-build that revision and load the image into a new disposable kind cluster
-with its own kubeconfig. In the release namespace, use the approved mounted
-App key as the source for the selected Kubernetes Secret key. Configure one
-project for `mgd43b/plotroom-test` with `projectSecrets.<project>.github.app`
-and the existing public client and installation IDs. Use the App example in
-`docs/running.md` and keep the key out of the values file.
+Built: [PR #215](https://github.com/mgd43b/plotroom/pull/215), merged as
+`d1904857f3c9b919a1ced078eee4c5e45d9892d5` with
+[green main CI](https://github.com/mgd43b/plotroom/actions/runs/46007832740).
 
-Run `helm template` and inspect the server mount and TOML paths. Install only
-in the disposable kind cluster with the locally loaded image. Verify
-`/readyz` and an authenticated project snapshot with a fresh available
-GitHub projection matching the dedicated repository. Compare the render,
-ConfigMap, and sanitized logs with the mounted key in-process without
-emitting credential material. Consume the disposable local bearer and remove
-the cluster and its temporary resources. Keep #122 open until this live
-witness is recorded.
+The November 27 owner-authorized run used a fresh local kind install and the
+mounted App key. The non-root daemon read the read-only `0440` file, passed
+readiness and authenticated MCP, and projected the dedicated repository's
+existing PRs. The render, live ConfigMap, and logs contained no credential
+material in the scan. The [story Notes](story-per-project-secrets-on-kubernetes.md#notes)
+record the live evidence and cleanup.
