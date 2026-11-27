@@ -3,6 +3,7 @@
 import base64
 import importlib
 import json
+import re
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -43,6 +44,9 @@ def test_workflow_has_public_default_and_explicit_owner_write_step() -> None:
     assert inputs["authorize_writes"]["default"] == "false"
     assert workflow["permissions"] == {"contents": "read"}
     job = workflow["jobs"]["fixture"]
+    uses = [step["uses"] for step in job["steps"] if "uses" in step]
+    assert uses
+    assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", action) for action in uses)
     for guard in (
         "github.ref == 'refs/heads/main'",
         "github.actor == 'mgd43b'",
