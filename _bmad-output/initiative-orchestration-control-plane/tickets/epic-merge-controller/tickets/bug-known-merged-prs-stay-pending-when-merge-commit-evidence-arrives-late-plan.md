@@ -48,7 +48,7 @@ Keep list and ordinary PR detail cursors, gate decisions, live operations and av
 
 ## Implementation notes
 
-- Backfill runs after ordinary detail reads, with two candidates and at most four provider requests. Each candidate gets at most three seconds. Authenticated GraphQL rate-limit responses use the usual details cooldown.
+- Backfill runs after ordinary detail reads, with two candidates and at most four provider requests. Each candidate gets at most three seconds, and the combined optional provider time is at most one quarter of the configured gate freshness window. Authenticated GraphQL rate-limit responses use the usual details cooldown.
 - Attempt timestamps and generations live under dedicated per-PR cursor keys. The normal list and detail cursors are independent. A SHA-only projection update completes pending attribution through the existing reconciler and leaves full gate evaluation to the ordinary inputs.
 - Writer revalidation and list projection preserve merge identities supplied by a concurrent observation. No schema or credentials change is required.
 
@@ -59,8 +59,11 @@ Keep list and ordinary PR detail cursors, gate decisions, live operations and av
 - Medium, patched. Independent review found that older attempted rows could starve other rows while local time lagged provider time. The selector clamps each ordering timestamp to one poll instant and uses generation as a tie-breaker. The fixture proves progress across restart with a pinned, provider-ahead clock.
 - Verification strengthened during follow-up. A synthetic gated merge already has one trigger action before backfill. The test asserts the same action remains, gated attribution completes exactly once, and list cursor data and other PR fields remain equal. Independent follow-up cleared both changes.
 
+- Medium, opening Kodus. At a one-second poll interval, the fixed optional timeout exceeded the two-second gate freshness window. The scaled budget permits 250 ms per candidate in this case. Independent follow-up and the focused fixture verified the deadline.
+
 ## Verification
 
 - `uv run --locked python -m pytest -q tests/test_merge_sha_backfill.py tests/test_github.py tests/test_github_details.py tests/test_controller_fixture_merge.py`
 - Run Ruff, Pyright, the dependency check and both locked Python suites. Verify the pinned remote CI and exact main merge.
 - After the review changes, the 64 affected tests passed under each locked Python version. The broader Python 3.14 run passed 1,346 tests before the clock-skew correction.
+- After the automatic review follow-up, 65 affected tests passed on each locked Python version.

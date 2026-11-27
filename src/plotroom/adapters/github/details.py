@@ -251,6 +251,10 @@ class GitHubDetailPoller:
 
     async def _backfill_merge_shas(self, client: httpx.AsyncClient, token: str) -> None:
         as_of = format_time(self.clock.now())
+        timeout = min(
+            MERGE_SHA_READ_TIMEOUT,
+            self.ledger.merge_gate_policy.max_age.total_seconds() / (4 * MAX_MERGE_SHA_READS),
+        )
         pending = await self.ledger.github_pending_merge_shas(
             self.api.repository, as_of, MAX_MERGE_SHA_READS
         )
@@ -258,7 +262,7 @@ class GitHubDetailPoller:
             sha = None
             rate_limit = None
             try:
-                async with asyncio.timeout(MERGE_SHA_READ_TIMEOUT):
+                async with asyncio.timeout(timeout):
                     sha = await self.api.pull_merge_sha(client, token, pull)
             except GitHubRateLimited as exc:
                 rate_limit = exc

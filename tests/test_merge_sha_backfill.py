@@ -1,10 +1,11 @@
 """Read-only recovery of late merge identity through the actual detail poller."""
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import pytest
 
 from fakes import FixedClock
 from plotroom.adapters.github import LocalGitHubCredential
+from plotroom.adapters.github import details as github_details
 from plotroom.adapters.github.details import GitHubDetailPoller
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.store_sqlite import SqliteStore
@@ -20,6 +22,7 @@ from plotroom.core.catalog import build_catalog
 from plotroom.core.github import DETAILS, PULL_REQUESTS, ObservedPull, apply_pull_poll
 from plotroom.core.ledger import Ledger
 from plotroom.core.merge_controller import MERGE_OBSERVATION_PENDING, MERGE_OBSERVED, MERGE_READY
+from plotroom.core.merge_gate import GatePolicy
 from plotroom.core.unit_of_work import UnitOfWork
 
 REPO = "fixture/repo"
@@ -42,7 +45,12 @@ def merged(number: int, sha: str | None = None) -> ObservedPull:
 
 
 @asynccontextmanager
-async def running(directory: Path, clock: FixedClock) -> AsyncGenerator[tuple[Ledger, SqliteStore]]:
+async def running(
+    directory: Path,
+    clock: FixedClock,
+    *,
+    policy: GatePolicy | None = None,
+) -> AsyncGenerator[tuple[Ledger, SqliteStore]]:
     store = SqliteStore("fixture", directory)
     await store.migrate()
     ledger = Ledger(
@@ -50,6 +58,7 @@ async def running(directory: Path, clock: FixedClock) -> AsyncGenerator[tuple[Le
         build_catalog(frozenset(), github_repository=REPO),
         clock,
         github_repository=REPO,
+        merge_gate_policy=policy,
         live_merge_controller=True,
     )
     ledger.start()
@@ -496,3 +505,31 @@ async def test_historical_row_backfills_quietly(
         assert row.merge_commit_sha == MERGE_SHA
         assert await audit(ledger, 1) == before
         assert await store.pending_action() is None
+
+
+async def test_optional_read_budget_scales_to_fast_poll_freshness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FixedClock(datetime.fromisoformat(NOW))
+    observed: list[float | None] = []
+    timeout = asyncio.timeout
+
+    def record_timeout(delay: float | None) -> asyncio.Timeout:
+        observed.append(delay)
+        return timeout(delay)
+
+    async with (
+        running(tmp_path, clock, policy=GatePolicy(max_age=timedelta(seconds=2))) as (ledger, _),
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: graph(graph_record(requested_pr(request)))
+            )
+        ) as client,
+    ):
+        await seed(ledger, 1, 2)
+        poller = details(ledger, clock, monkeypatch)
+        with monkeypatch.context() as patched:
+            patched.setattr(github_details.asyncio, "timeout", record_timeout)
+            await poller.poll(client)
+    assert observed == [0.25, 0.25]
