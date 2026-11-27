@@ -67,6 +67,13 @@ class ArchiveReadError(RuntimeError):
     """An actionable fixture read error containing only a controlled message."""
 
 
+def _unique_graphql_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate property in fixture GraphQL request")
+    return result
+
+
 def _scoped_endpoint(method: str, path: str, body: bytes) -> str:
     parsed = urlsplit(path)
     if (
@@ -82,7 +89,7 @@ def _scoped_endpoint(method: str, path: str, body: bytes) -> str:
         if parsed.path.startswith(root) and REST_RESOURCE.fullmatch(parsed.path[len(root) :]):
             return path[1:]
     if method == "POST" and path == "/graphql" and len(body) <= 24000:
-        document = json.loads(body)
+        document = json.loads(body, object_pairs_hook=_unique_graphql_object)
         if not isinstance(document, dict) or set(document) != {"query", "variables"}:
             raise ValueError("unexpected fixture GraphQL envelope")
         variables = document["variables"]
@@ -105,6 +112,15 @@ def _scoped_endpoint(method: str, path: str, body: bytes) -> str:
         ):
             return "graphql"
     raise ValueError("request outside the archived fixture read scope")
+
+
+def archive_read_boundary(method: str, endpoint: str, body: bytes) -> str:
+    """Describe an already-allowlisted read without including a query or payload."""
+    if method == "GET":
+        return f"GET /{urlsplit(endpoint).path}"
+    document = json.loads(body)
+    operation = "review threads" if document["query"] == REVIEW_THREADS_QUERY else "merged PR head"
+    return f"GraphQL {operation} for PR #{document['variables']['number']}"
 
 
 def _read_gh(command: list[str], body: bytes) -> tuple[bytes, int]:
@@ -194,9 +210,11 @@ class ProviderReads:
         scope: Callable[[str, str, bytes], str] = _scoped_endpoint,
         *,
         transport: ReadTransport | None = None,
+        describe_archive_errors: bool = False,
     ) -> None:
         self._scope = scope
         self._transport = _gh_transport if transport is None else transport
+        self._describe_archive_errors = describe_archive_errors
         self._cache: dict[tuple[str, str, bytes], Response] = {}
         self.live = 0
         self.reused = 0
@@ -235,6 +253,11 @@ class ProviderReads:
 
     def read(self, method: str, path: str, body: bytes) -> Response:
         endpoint = self._scope(method, path, body)
+        boundary = (
+            f" at {archive_read_boundary(method, endpoint, body)}"
+            if self._describe_archive_errors
+            else ""
+        )
         key = method, path, body
         with self._lock:
             if key in self._cache:
@@ -245,12 +268,24 @@ class ProviderReads:
             self.live += 1
             code, (headers, payload) = self._transport(method, endpoint, body)
             if code != 200:
-                if code in (403, 429):
+                if code in (403, 429) or (boundary and code == 401):
                     self._deadline = 0
-                raise ArchiveReadError(f"GitHub fixture read returned HTTP {code}")
+                raise ArchiveReadError(f"GitHub fixture read returned HTTP {code}{boundary}")
             if len(payload) > MAX_RESPONSE or self._bytes + len(payload) > MAX_CAPTURE:
                 raise ArchiveReadError("GitHub fixture capture exceeded the configured byte bound")
-            json.loads(payload)
+            document = json.loads(payload)
+            if (
+                boundary
+                and method == "POST"
+                and isinstance(document, dict)
+                and (errors := document.get("errors"))
+            ):
+                self._deadline = 0
+                if isinstance(errors, list) and any(
+                    isinstance(error, dict) and error.get("type") == "FORBIDDEN" for error in errors
+                ):
+                    raise ArchiveReadError(f"GitHub fixture access denied{boundary}")
+                raise ArchiveReadError(f"GitHub fixture read returned errors{boundary}")
             response = (
                 {
                     name.lower(): value
@@ -671,8 +706,10 @@ async def compose_witness(
             await asyncio.to_thread(run, [*command, "down", "--volumes"])
 
 
-async def archived_checks(tag: str, report: Callable[[str], None]) -> None:
-    provider = ProviderReads()
+async def archived_checks(
+    tag: str, report: Callable[[str], None], *, transport: ReadTransport | None = None
+) -> None:
+    provider = ProviderReads(transport=transport, describe_archive_errors=transport is not None)
     await asyncio.to_thread(provider.preflight)
     local = await witness(provider.read)
     report(f"Local archived provider facts PASS: {local}; {provider.live} live GitHub reads.")

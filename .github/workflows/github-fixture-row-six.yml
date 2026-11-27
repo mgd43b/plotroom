@@ -7,6 +7,13 @@ on:
         description: Reviewed Plotroom main commit (full SHA)
         type: string
         required: true
+      mode:
+        description: Standalone row 6 or all currently available witnesses
+        type: choice
+        default: row-six
+        options:
+          - row-six
+          - integrated
 
 permissions:
   contents: read
@@ -17,6 +24,7 @@ concurrency:
 
 jobs:
   row-six:
+    name: ${{ inputs.mode == 'integrated' && 'integrated-witnesses' || 'row-six' }}
     if: >-
       github.server_url == 'https://github.com' &&
       github.repository == 'mgd43b/plotroom' &&
@@ -51,7 +59,15 @@ jobs:
           require-checksums: true
           enable-cache: false
       - name: Install locked dependencies
-        run: uv sync --locked --no-dev
+        shell: bash
+        env:
+          WITNESS_MODE: ${{ inputs.mode }}
+        run: |
+          case "$WITNESS_MODE" in
+            row-six) uv sync --locked --no-dev ;;
+            integrated) uv sync --locked ;;
+            *) exit 2 ;;
+          esac
       - name: Build the reviewed local image
         run: docker build --tag "plotroom:row-six-$GITHUB_RUN_ID" .
       - name: Recheck reviewed main before credential use
@@ -64,12 +80,18 @@ jobs:
           git diff --quiet HEAD --
           remote_main=$(git ls-remote --exit-code https://github.com/mgd43b/plotroom.git refs/heads/main)
           test "$remote_main" = "$EXPECTED_SHA"$'\trefs/heads/main'
-      - name: Verify published work-item mirrors
+      - name: Verify the selected read-only witnesses
         shell: bash
         env:
           FIXTURE_PAT: ${{ secrets.PLOTROOM_GITHUB_FIXTURE_GITHUB_TOKEN }}
+          WITNESS_MODE: ${{ inputs.mode }}
         run: |
           set +x
+          case "$WITNESS_MODE" in
+            row-six) witness=(--no-dev python -m deploy.epic_two_mirrors --verify-published) ;;
+            integrated) witness=(python -m deploy.epic_two_acceptance --verify-integrated) ;;
+            *) exit 2 ;;
+          esac
           test -n "$FIXTURE_PAT"
           fixture_pat=$FIXTURE_PAT
           export -n fixture_pat
@@ -79,6 +101,5 @@ jobs:
           trap 'rm -rf -- "$token_dir"' EXIT
           printf '%s\n' "$fixture_pat" > "$token_dir/github-token"
           unset fixture_pat
-          uv run --locked --offline --no-dev python -m deploy.epic_two_mirrors \
-            --verify-published --image-tag "row-six-$GITHUB_RUN_ID" \
+          uv run --locked --offline "${witness[@]}" --image-tag "row-six-$GITHUB_RUN_ID" \
             --token-file "$token_dir/github-token"

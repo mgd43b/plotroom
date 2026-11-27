@@ -12,7 +12,8 @@ import stat
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -27,6 +28,8 @@ from deploy.epic_two_archived import (
     Reader,
     ReadTransport,
     Response,
+    _scoped_endpoint,
+    archive_read_boundary,
     compose_witness,
 )
 
@@ -114,22 +117,36 @@ def _read_token_file(path: Path) -> str:
 
 
 def _file_backed_read(
-    client: httpx.Client, token_file: Path, method: str, endpoint: str, body: bytes
+    client: httpx.Client,
+    token_file: Path,
+    method: str,
+    endpoint: str,
+    body: bytes,
+    *,
+    archived: bool = False,
 ) -> tuple[int, Response]:
-    # ProviderReads applies the fixture-specific allowlist before calling this
-    # transport. Keep a separate fixed-origin GET guard around the credential.
+    # ProviderReads applies the witness allowlist before calling the transport.
+    # Revalidate the exact archive scope at the credential boundary.
     root = f"repos/{REPO}"
-    if method != "GET" or body or not (endpoint == root or endpoint.startswith(root + "/")):
+    if archived:
+        _scoped_endpoint(method, f"/{endpoint}", body)
+    elif method != "GET" or body or not (endpoint == root or endpoint.startswith(root + "/")):
         raise ArchiveReadError("the published fixture credential permits scoped GET requests only")
     headers = {
         "Authorization": f"Bearer {_read_token_file(token_file)}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2026-03-10",
     }
+    if method == "POST":
+        headers["Content-Type"] = "application/json"
     deadline = time.monotonic() + 9
     try:
         with client.stream(
-            "GET", f"{GITHUB_API}/{endpoint}", headers=headers, follow_redirects=False
+            method,
+            f"{GITHUB_API}/{endpoint}",
+            headers=headers,
+            content=body if method == "POST" else None,
+            follow_redirects=False,
         ) as response:
             if response.status_code != 200:
                 return response.status_code, ({}, b"")
@@ -142,7 +159,18 @@ def _file_backed_read(
                     raise ArchiveReadError("GitHub fixture response exceeded the byte bound")
             return response.status_code, (dict(response.headers), bytes(payload))
     except httpx.HTTPError:
+        if archived:
+            boundary = archive_read_boundary(method, endpoint, body)
+            raise ArchiveReadError(f"GitHub fixture HTTPS read failed at {boundary}") from None
         raise ArchiveReadError("GitHub fixture HTTPS read failed") from None
+
+
+@contextmanager
+def fixture_file_transport(token_file: Path, *, archived: bool = False) -> Iterator[ReadTransport]:
+    # Reject an unusable file before any witness subprocess starts.
+    _read_token_file(token_file)
+    with httpx.Client(timeout=9, follow_redirects=False, trust_env=False) as client:
+        yield partial(_file_backed_read, client, token_file, archived=archived)
 
 
 def tree_scope(method: str, path: str, body: bytes) -> str:
@@ -463,14 +491,13 @@ async def work_item_mirrors(
 async def verify_published(tag: str, token_file: Path, report: Callable[[str], None]) -> None:
     # Reject unusable credentials before running any Docker command. The host
     # transport reads the private file itself, so no child receives the token.
-    await asyncio.to_thread(_read_token_file, token_file)
-    with httpx.Client(timeout=9, follow_redirects=False, trust_env=False) as client:
+    with fixture_file_transport(token_file) as transport:
         matched = await work_item_mirrors(
             tag,
             PUBLISHED_MILESTONE,
             PUBLISHED_CHILD,
             report,
-            transport=partial(_file_backed_read, client, token_file),
+            transport=transport,
             published=True,
         )
     if not matched:
