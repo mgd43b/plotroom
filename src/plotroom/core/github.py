@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from plotroom.core.events import FieldSpec, NewEvent
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 
 PULL_REQUESTS = "pull_requests"
 DETAILS = "details"
+MERGE_SHA_ATTEMPT_PREFIX = "pull_merge_sha/"
 PR_OPENED = "github.pr_opened"
 PR_MERGED = "github.pr_merged"
 PR_CLOSED = "github.pr_closed"
@@ -87,6 +89,36 @@ class FetchRetry:
 class GitHubSummary:
     open_prs: int
     as_of: str | None
+
+
+def valid_git_sha(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) is not None
+
+
+async def apply_merge_sha_backfill(
+    uow: UnitOfWork, target: PullRequest, merge_sha: str | None, as_of: str
+) -> None:
+    resource = f"{MERGE_SHA_ATTEMPT_PREFIX}{target.number}"
+    prior = await uow.fetch_cursor(target.repository, resource)
+    await uow.save_fetch_cursor(
+        target.repository,
+        resource,
+        FetchCursor(
+            "", max(as_of, prior.as_of) if prior else as_of, prior.generation + 1 if prior else 1
+        ),
+    )
+    if merge_sha is None or not valid_git_sha(merge_sha):
+        return
+    current = await uow.pull_request(target.repository, target.number)
+    if (
+        current is None
+        or not current.complete
+        or current.state != "merged"
+        or current.merge_commit_sha is not None
+        or current.head_sha != target.head_sha
+    ):
+        return
+    await uow.save_pull_request(replace(current, merge_commit_sha=merge_sha), merge_sha_only=True)
 
 
 async def apply_pull_poll(
@@ -165,7 +197,9 @@ async def _project_pull(
         True,
         previous_version + len(changes),
         observed.draft,
-        observed.merge_commit_sha or (current.merge_commit_sha if current else None),
+        current.merge_commit_sha
+        if current is not None and current.merge_commit_sha is not None
+        else observed.merge_commit_sha,
     )
     if current is not None and current.head_sha != projected.head_sha:
         files = await uow.github_resource(repository, FILES, str(projected.number))

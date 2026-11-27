@@ -26,7 +26,14 @@ from plotroom.core.claims import OVERLAP_KINDS, Claim
 from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
-from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, GitHubSummary, PullRequest
+from plotroom.core.github import (
+    MERGE_SHA_ATTEMPT_PREFIX,
+    PULL_REQUESTS,
+    FetchCursor,
+    FetchRetry,
+    GitHubSummary,
+    PullRequest,
+)
 from plotroom.core.github_projection import (
     ASK_COMMENT_HISTORY,
     COMMENTS,
@@ -939,6 +946,29 @@ class MemoryStore:
         ]
         rows.sort(key=lambda row: (row.state == "open", row.updated_at, row.number), reverse=True)
         return tuple(rows[:100])
+
+    async def github_pending_merge_shas(
+        self, repository: str, as_of: str, limit: int
+    ) -> tuple[PullRequest, ...]:
+        def priority(row: PullRequest) -> tuple[str, int, int]:
+            attempt = self._fetch_cursors.get(
+                (repository, f"{MERGE_SHA_ATTEMPT_PREFIX}{row.number}")
+            )
+            return (
+                min(attempt.as_of if attempt else row.updated_at, as_of),
+                attempt.generation if attempt else 0,
+                row.number,
+            )
+
+        rows = [
+            row
+            for row in self._pulls.values()
+            if row.repository == repository
+            and row.complete
+            and row.state == "merged"
+            and row.merge_commit_sha is None
+        ]
+        return tuple(sorted(rows, key=priority)[:limit])
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         return self._fetch_cursors.get((repository, resource))

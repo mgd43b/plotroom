@@ -207,6 +207,10 @@ class Transaction(Protocol):
 class Store(Protocol):
     async def github_pull_targets(self, repository: str) -> tuple[PullRequest, ...]: ...
 
+    async def github_pending_merge_shas(
+        self, repository: str, as_of: str, limit: int
+    ) -> tuple[PullRequest, ...]: ...
+
     """One project's ledger storage (AD-4: a store is opened for exactly one project)."""
 
     @property

@@ -530,6 +530,12 @@ class SqliteStore:
         async with self._engine.connect() as connection:
             return await github_sql.github_pull_targets(connection, repository)
 
+    async def github_pending_merge_shas(
+        self, repository: str, as_of: str, limit: int
+    ) -> tuple[PullRequest, ...]:
+        async with self._engine.connect() as connection:
+            return await github_sql.github_pending_merge_shas(connection, repository, as_of, limit)
+
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         async with self._engine.connect() as connection:
             return await github_sql.fetch_cursor(connection, repository, resource)
