@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "projectSecrets": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 1,
+        "properties": {
+          "github": {"$ref": "#/definitions/github"},
+          "embedder": {"$ref": "#/definitions/embedder"}
+        }
+      }
+    }
+  },
+  "definitions": {
+    "secretName": {
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"
+    },
+    "secretKey": {
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^[-._a-zA-Z0-9]+$"
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "github": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository"],
+      "oneOf": [{"required": ["pat"]}, {"required": ["app"]}],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$",
+          "not": {"pattern": "/[.]{1,2}$"}
+        },
+        "pat": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["secretName", "key"],
+          "properties": {
+            "secretName": {"$ref": "#/definitions/secretName"},
+            "key": {"$ref": "#/definitions/secretKey"}
+          }
+        },
+        "app": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["clientId", "installationId", "secretName", "key"],
+          "properties": {
+            "clientId": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+            "installationId": {"$ref": "#/definitions/positiveInteger"},
+            "secretName": {"$ref": "#/definitions/secretName"},
+            "key": {"$ref": "#/definitions/secretKey"}
+          }
+        }
+      }
+    },
+    "embedder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "model", "dimension", "secretName", "key"],
+      "properties": {
+        "url": {"type": "string", "pattern": "^https://[^/@#?\\s]+([/?][^#\\s]*)?$"},
+        "model": {"type": "string", "pattern": "\\S"},
+        "dimension": {"$ref": "#/definitions/positiveInteger"},
+        "secretName": {"$ref": "#/definitions/secretName"},
+        "key": {"$ref": "#/definitions/secretKey"}
+      }
+    }
+  }
+}

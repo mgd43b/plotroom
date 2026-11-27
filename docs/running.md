@@ -130,6 +130,47 @@ the claim. The smoke helper consumes the file without logging it and removes
 the completed Job. To remove the entire disposable cluster, run
 `kind delete cluster --name "$cluster" --kubeconfig "$KUBECONFIG"`.
 
+### Mount project credentials
+
+Create the referenced Kubernetes Secrets in the release namespace before installing
+the chart. Supply Secret names and key names in the chart values.
+
+```yaml
+projects: [app-project, pat-project]
+projectSecrets:
+  app-project:
+    github:
+      repository: owner/repository
+      app:
+        clientId: Iv1.example
+        installationId: 123456
+        secretName: app-credentials
+        key: app-key
+    embedder:
+      url: https://embedding.example.com/v1/embeddings
+      model: example-model
+      dimension: 384
+      secretName: search-credentials
+      key: api-key
+  pat-project:
+    github:
+      repository: owner/another-repository
+      pat:
+        secretName: pat-credentials
+        key: token
+```
+
+Each binding selects a key and projects it as a read-only file below
+`/var/run/plotroom-secrets/<project>/`. The App key uses `github-app.pem`, the PAT
+uses `github-token`, and the embedder key uses `embedder-key`. The chart places
+the corresponding file paths in Plotroom's TOML. A missing Secret or selected
+key prevents Kubernetes from starting the server pod. Helm rejects undeclared
+projects, malformed mappings, and a GitHub binding that supplies both App and PAT.
+
+Use an HTTPS embedding endpoint for a mounted bearer key. The server reads the
+selected file for each embedding request. Keep private values in the Secrets
+and use public settings in the chart values and endpoint URL.
+
 ### Verify scheduled backups locally
 
 On the same disposable cluster, run the backup smoke helper in a fresh

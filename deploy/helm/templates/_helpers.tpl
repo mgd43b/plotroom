@@ -41,6 +41,49 @@ capabilities:
 {{- end -}}
 
 
+{{- define "plotroom.projectSecretDirectory" -}}
+{{- printf "/var/run/plotroom-secrets/%s" . -}}
+{{- end -}}
+
+{{- define "plotroom.projectSecretMounts" -}}
+{{- range $index, $project := keys .Values.projectSecrets | sortAlpha }}
+- name: project-secrets-{{ $index }}
+  mountPath: {{ include "plotroom.projectSecretDirectory" $project | quote }}
+  readOnly: true
+{{- end }}
+{{- end -}}
+
+{{- define "plotroom.secretProjection" -}}
+- secret:
+    name: {{ .reference.secretName | quote }}
+    optional: false
+    items:
+      - key: {{ .reference.key | quote }}
+        path: {{ .file | quote }}
+{{- end -}}
+
+{{- define "plotroom.projectSecretVolumes" -}}
+{{- range $index, $project := keys .Values.projectSecrets | sortAlpha }}
+{{- $settings := index $.Values.projectSecrets $project }}
+- name: project-secrets-{{ $index }}
+  projected:
+    defaultMode: 0440
+    sources:
+      {{- with $settings.github }}
+      {{- with .pat }}
+      {{- include "plotroom.secretProjection" (dict "reference" . "file" "github-token") | nindent 6 }}
+      {{- end }}
+      {{- with .app }}
+      {{- include "plotroom.secretProjection" (dict "reference" . "file" "github-app.pem") | nindent 6 }}
+      {{- end }}
+      {{- end }}
+      {{- with $settings.embedder }}
+      {{- include "plotroom.secretProjection" (dict "reference" . "file" "embedder-key") | nindent 6 }}
+      {{- end }}
+{{- end }}
+{{- end -}}
+
+
 {{- define "plotroom.backupJobName" -}}
 {{- if le (len .Release.Name) 45 -}}
 {{- printf "%s-backup" .Release.Name -}}

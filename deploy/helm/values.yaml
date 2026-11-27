@@ -4,6 +4,8 @@ image:
   pullPolicy: Never
 projects:
   - helm-fixture
+# Optional references to caller-created Kubernetes Secrets, keyed by declared project.
+projectSecrets: {}
 # Add exact HTTP Host authorities for this release. Built-in local authorities stay enabled.
 allowedHosts: []
 bridge:

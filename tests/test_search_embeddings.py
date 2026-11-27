@@ -973,6 +973,10 @@ async def test_daemon_starts_embedding_only_for_configured_project(
         ('url = "http://xn--a.test/embeddings"\nmodel = "m"\ndimension = 2', "url"),
         ('url = "http://127.0.0.1/embedding"\ndimension = 2', "model"),
         ('url = "http://127.0.0.1/embedding"\nmodel = "m"\ndimension = false', "dimension"),
+        (
+            'url = "http://127.0.0.1/embedding"\nmodel = "m"\ndimension = 2\nkey_file = "key"',
+            "key_file",
+        ),
     ],
 )
 def test_config_requires_a_complete_embedder_table(
@@ -982,3 +986,52 @@ def test_config_requires_a_complete_embedder_table(
     path.write_text(f"[projects.demo.embedder]\n{settings}\n", encoding="utf-8")
     with pytest.raises(ConfigError, match=rf"projects\.demo\.embedder\.{field}"):
         load_config(path, {})
+
+
+async def test_embedder_reads_and_refreshes_mounted_key_without_following_redirect(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "plotroom.toml"
+    config_path.write_text(
+        '[projects.demo.embedder]\nurl = "https://embed.example.test/embeddings"\n'
+        'model = "fixture-model"\ndimension = 2\nkey_file = "embedder-key"\n',
+        encoding="utf-8",
+    )
+    settings = load_config(config_path, {}).embedders["demo"]
+    path = tmp_path / "embedder-key"
+    assert settings.key_file == path
+    calls = 0
+    expected = "test-embedder-key-a"
+    redirect = False
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert request.url.host == "embed.example.test"
+        if request.headers.get("Authorization") != f"Bearer {expected}":
+            pytest.fail("configured fixture bearer did not reach the selected endpoint")
+        if redirect:
+            return httpx.Response(307, headers={"Location": "https://elsewhere.example.test"})
+        return httpx.Response(
+            200, stream=httpx.ByteStream(b'{"data":[{"index":0,"embedding":[1,0]}]}')
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), follow_redirects=True
+    ) as client:
+        reader = HttpEmbedder(client, settings.url, settings.model, key_file=settings.key_file)
+        with pytest.raises(EmbeddingError, match="key file could not be read"):
+            await reader.embed(("fixture",))
+        path.write_text("invalid whitespace", encoding="utf-8")
+        with pytest.raises(EmbeddingError, match="key file is invalid"):
+            await reader.embed(("fixture",))
+        assert calls == 0
+        path.write_text(expected + "\n", encoding="utf-8")
+        assert await reader.embed(("fixture",)) == ((1.0, 0.0),)
+        expected = "test-embedder-key-b"
+        path.write_text(expected + "\n", encoding="utf-8")
+        assert await reader.embed(("fixture",)) == ((1.0, 0.0),)
+        redirect = True
+        with pytest.raises(EmbeddingError, match="endpoint request failed"):
+            await reader.embed(("fixture",))
+        assert calls == 3

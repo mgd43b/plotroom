@@ -115,6 +115,7 @@ class GitHubIssuesConfig:
 class EmbedderConfig:
     url: str
     model: EmbeddingModel
+    key_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -258,7 +259,7 @@ def load_config(
         github_ticket_trees=github_trees,
         github_issue_sources=github_issues,
         briefs=_brief_settings(projects, raw.get("projects")),
-        embedders=_embedders(projects, raw.get("projects")),
+        embedders=_embedders(projects, raw.get("projects"), base),
         openrouter_runs=_openrouter_runs(projects, raw.get("projects"), base),
         delivery_routes=_delivery_routes(projects, switchboards, worker_sessions, drain_sessions),
         routes=_routes(projects, raw.get("projects")),
@@ -461,7 +462,7 @@ def _switchboards(projects: tuple[str, ...], table: Any) -> dict[str, Switchboar
     return configured
 
 
-def _embedders(projects: tuple[str, ...], table: Any) -> dict[str, EmbedderConfig]:
+def _embedders(projects: tuple[str, ...], table: Any, base: Path) -> dict[str, EmbedderConfig]:
     entries = cast("dict[str, dict[str, Any]]", table if isinstance(table, dict) else {})
     configured: dict[str, EmbedderConfig] = {}
     for project_id in projects:
@@ -473,8 +474,8 @@ def _embedders(projects: tuple[str, ...], table: Any) -> dict[str, EmbedderConfi
         if not isinstance(raw_settings, dict):
             raise ConfigError(f"{label} must be a table")
         settings = cast("dict[str, Any]", raw_settings)
-        if set(settings) - {"url", "model", "dimension"}:
-            raise ConfigError(f"{label} supports url, model and dimension")
+        if set(settings) - {"url", "model", "dimension", "key_file"}:
+            raise ConfigError(f"{label} supports url, model, dimension and key_file")
         url = _string(f"{label}.url", settings.get("url"))
         message = f"{label}.url must be an HTTP or HTTPS endpoint without credentials or fragment"
         try:
@@ -496,7 +497,12 @@ def _embedders(projects: tuple[str, ...], table: Any) -> dict[str, EmbedderConfi
         dimension = _integer(f"{label}.dimension", settings.get("dimension"), minimum=1)
         if dimension > 2**63 - 1:
             raise ConfigError(f"{label}.dimension exceeds the SQLite integer range")
-        configured[project_id] = EmbedderConfig(url, EmbeddingModel(model, dimension))
+        key_file = None
+        if "key_file" in settings:
+            if endpoint.scheme != "https":
+                raise ConfigError(f"{label}.key_file requires an HTTPS endpoint")
+            key_file = base / Path(_string(f"{label}.key_file", settings["key_file"])).expanduser()
+        configured[project_id] = EmbedderConfig(url, EmbeddingModel(model, dimension), key_file)
     return configured
 
 
