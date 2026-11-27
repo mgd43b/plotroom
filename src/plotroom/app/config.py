@@ -501,7 +501,14 @@ def _embedders(projects: tuple[str, ...], table: Any, base: Path) -> dict[str, E
         if "key_file" in settings:
             if endpoint.scheme != "https":
                 raise ConfigError(f"{label}.key_file requires an HTTPS endpoint")
-            key_file = base / Path(_string(f"{label}.key_file", settings["key_file"])).expanduser()
+            setting = f"{label}.key_file"
+            key_path = _string(setting, settings["key_file"])
+            if "\0" in key_path:
+                raise ConfigError(f"{setting} must not contain a NUL character")
+            try:
+                key_file = base / Path(key_path).expanduser()
+            except RuntimeError:
+                raise ConfigError(f"{setting} could not expand the home directory") from None
         configured[project_id] = EmbedderConfig(url, EmbeddingModel(model, dimension), key_file)
     return configured
 

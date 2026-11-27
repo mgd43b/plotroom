@@ -165,7 +165,8 @@ Each binding selects a key and projects it as a read-only file below
 uses `github-token`, and the embedder key uses `embedder-key`. The chart places
 the corresponding file paths in Plotroom's TOML. A missing Secret or selected
 key prevents Kubernetes from starting the server pod. Helm rejects undeclared
-projects, malformed mappings, and a GitHub binding that supplies both App and PAT.
+projects, invalid mapping shapes, and a GitHub binding that supplies both App and PAT.
+The daemon validates endpoint details such as the port when it reads the TOML.
 
 Use an HTTPS embedding endpoint for a mounted bearer key. The server reads the
 selected file for each embedding request. Keep private values in the Secrets

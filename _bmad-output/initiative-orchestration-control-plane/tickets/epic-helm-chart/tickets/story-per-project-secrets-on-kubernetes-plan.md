@@ -32,6 +32,12 @@ values, rendered configuration, logs, or evidence.
 - The embedder tests cover missing and malformed key files, file refresh, and
   redirect isolation. Independent chart and runtime inspections passed.
 
+## Opening review
+
+Invalid key paths now return field-specific errors during config loading, and
+direct adapter reads convert invalid paths into sanitized embedding failures.
+The runbook distinguishes Helm mapping checks from daemon endpoint validation.
+
 ## Owner acceptance pending
 
 After the exact merged revision passes main CI, the authorized owner chat can

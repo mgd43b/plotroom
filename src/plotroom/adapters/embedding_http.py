@@ -100,7 +100,7 @@ class HttpEmbedder:
     async def _read_key(path: Path) -> str:
         try:
             key = await read_secret_file(path)
-        except OSError, UnicodeError:
+        except OSError, ValueError:
             raise EmbeddingError("embedding key file could not be read") from None
         if not key or not key.isascii() or not key.isprintable() or any(c.isspace() for c in key):
             raise EmbeddingError("embedding key file is invalid")

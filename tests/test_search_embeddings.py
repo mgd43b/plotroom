@@ -1025,6 +1025,11 @@ async def test_embedder_reads_and_refreshes_mounted_key_without_following_redire
         path.write_text("invalid whitespace", encoding="utf-8")
         with pytest.raises(EmbeddingError, match="key file is invalid"):
             await reader.embed(("fixture",))
+        invalid_path = HttpEmbedder(
+            client, settings.url, settings.model, key_file=tmp_path / "bad\0path"
+        )
+        with pytest.raises(EmbeddingError, match="key file could not be read"):
+            await invalid_path.embed(("fixture",))
         assert calls == 0
         path.write_text(expected + "\n", encoding="utf-8")
         assert await reader.embed(("fixture",)) == ((1.0, 0.0),)
@@ -1035,3 +1040,20 @@ async def test_embedder_reads_and_refreshes_mounted_key_without_following_redire
         with pytest.raises(EmbeddingError, match="endpoint request failed"):
             await reader.embed(("fixture",))
         assert calls == 3
+
+
+@pytest.mark.parametrize(
+    ("key_file", "message"),
+    [(r"bad\u0000path", "NUL character"), ("~plotroom-missing-fixture-user/key", "home directory")],
+)
+def test_embedder_config_reports_invalid_mount_path(
+    tmp_path: Path, key_file: str, message: str
+) -> None:
+    path = tmp_path / "plotroom.toml"
+    path.write_text(
+        '[projects.demo.embedder]\nurl = "https://embed.example.test/embeddings"\n'
+        f'model = "fixture-model"\ndimension = 2\nkey_file = "{key_file}"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match=rf"projects\.demo\.embedder\.key_file.*{message}"):
+        load_config(path, {})
