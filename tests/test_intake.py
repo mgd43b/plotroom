@@ -1,6 +1,8 @@
 import asyncio
 import json
 import sys
+from collections.abc import Generator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import pytest
@@ -9,11 +11,12 @@ from conftest import authenticated_client, child_env, tool_json, write_config
 from plotroom.app.config import load_config
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import TokenRegistry
+from plotroom.core.watchers import Watchers
 
 
 @pytest.mark.parametrize("turn_index", [None, 2])
 async def test_worker_ingest_wakes_local_watch_and_ack_closes(
-    tmp_path: Path, token_home: Path, turn_index: int | None
+    tmp_path: Path, token_home: Path, turn_index: int | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = write_config(tmp_path)
     config.write_text(
@@ -28,6 +31,17 @@ async def test_worker_ingest_wakes_local_watch_and_ack_closes(
     worker = tokens.issue("demo", "worker:fixture", local=True)
     other = tokens.issue("demo", "worker:other", local=True)
     daemon = Daemon(settings)
+    armed = asyncio.Event()
+    original = Watchers.waiting
+
+    @contextmanager
+    def observed(self: Watchers, role: str) -> Generator[None]:
+        with original(self, role):
+            if role == "orchestrator":
+                armed.set()
+            yield
+
+    monkeypatch.setattr(Watchers, "waiting", observed)
     serving = asyncio.create_task(daemon.run())
     try:
         async with asyncio.timeout(10):
@@ -62,6 +76,9 @@ async def test_worker_ingest_wakes_local_watch_and_ack_closes(
             stderr=asyncio.subprocess.PIPE,
         )
         try:
+            async with asyncio.timeout(10):
+                await armed.wait()
+            assert watcher.returncode is None
             args = {
                 "kind": "claude.turn_report",
                 "session_id": "fixture-session",
@@ -108,10 +125,30 @@ async def test_worker_ingest_wakes_local_watch_and_ack_closes(
                     == "closed"
                 )
             assert not (await ledger.read_board("orchestrator"))[1]
+            message = {
+                "kind": "claude.session_message",
+                "session_id": "fixture-session",
+                "upstream_id": "synthetic-peer-message",
+                "body": "worker session message",
+            }
+            async with authenticated_client(url, worker.bearer) as client:
+                accepted = tool_json(await client.call_tool("ingest", message))["data"]
+            assert accepted["created"]
+            [record] = [
+                event
+                for event in await ledger.events_after(0)
+                if event.kind == "claude.session_message"
+            ]
+            assert record.id == accepted["event"]
+            assert record.lane_id == "owned"
+            _, remaining, _, _ = await ledger.read_board("orchestrator")
+            assert [inbox_item.kind for inbox_item in remaining] == ["inbound_message"]
         finally:
             if watcher.returncode is None:
-                watcher.kill()
-                await watcher.wait()
+                with suppress(ProcessLookupError):
+                    watcher.kill()
+                async with asyncio.timeout(5):
+                    await watcher.communicate()
     finally:
         daemon.stop()
         async with asyncio.timeout(10):
