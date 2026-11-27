@@ -311,6 +311,29 @@ class ProbeTest(unittest.TestCase):
                     [(1, "indexed report")],
                 )
 
+    def test_unindexed_peer_stays_after_preceding_indexed_turn(self) -> None:
+        rows = [
+            user(1, {"kind": "peer", "body": "indexed"}, "peer"),
+            assistant("completed", "end_turn"),
+            {"type": "user", "origin": {"kind": "peer", "body": "unindexed"}},
+            user(2, {"kind": "peer", "body": "interrupted"}, "peer"),
+            {"type": "user", "origin": {"kind": "peer", "body": "later"}},
+        ]
+        events = list(probe.events("s", rows, lambda: False, include_text=True))
+        self.assertEqual(
+            [
+                (event["kind"], event["turn"], event.get("body", event.get("report")))
+                for event in events
+            ],
+            [
+                ("claude.session_message", 1, "indexed"),
+                ("claude.turn_report", 1, "completed"),
+                ("claude.session_message", None, "unindexed"),
+                ("claude.session_message", 2, "interrupted"),
+                ("claude.session_message", None, "later"),
+            ],
+        )
+
     def test_events_handle_survives_reordering_and_rejects_missing_or_duplicate(self) -> None:
         (session,) = probe.survey(self.home, self.app)["sessions"]
         handle = session["session_handle"]
@@ -458,6 +481,19 @@ class ProbeTest(unittest.TestCase):
             mock.patch.object(probe.time, "sleep"),
         ):
             self.assertEqual(probe.watch(self.home, 3)["busy_to_idle_flips"], [])
+
+    def test_watch_does_not_report_an_ambiguous_registry_transition(self) -> None:
+        busy = {"sessionId": CLI_ID, "status": "busy"}
+        idle = {**busy, "status": "idle"}
+        with (
+            mock.patch.object(probe, "registry", side_effect=[[busy], [idle, idle], [idle]]),
+            mock.patch.object(probe, "transcript_path", return_value=None),
+            mock.patch.object(probe.time, "monotonic", side_effect=[0, 0, 1, 2, 3]),
+            mock.patch.object(probe.time, "sleep"),
+        ):
+            result = probe.watch(self.home, 3)
+        self.assertEqual(result["sessions_seen"], 1)
+        self.assertEqual(result["busy_to_idle_flips"], [])
 
 
 if __name__ == "__main__":

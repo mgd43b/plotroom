@@ -201,6 +201,12 @@ def transcript_items(rows: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]
                 body = ""
             if index is None or index <= 0:
                 if peer:
+                    if turn is not None:
+                        # A peer boundary stops attribution. Require an observed end
+                        # before reporting a turn that this boundary interrupted.
+                        turn["peer_boundary"] = True
+                        yield turn
+                        turn = None
                     yield {"turn": None, "body": body}
                 if peer or "turnPosition" in row:
                     # A malformed boundary cannot attribute later rows to the prior turn.
@@ -239,10 +245,10 @@ def events(
 ) -> Iterator[dict[str, Any]]:
     """Normalized claude.* events. A peer can have an unknown turn index.
 
-    An indexed turn is closed once a later turn exists or the process is idle. A closed
-    turn with no `end_turn` row (interrupted, or its last row not flushed yet) is still
-    emitted, with has_end_turn false. A process that left the registry is not read, so its
-    last turn is only seen if a later poll found it idle first."""
+    A later indexed turn or a fresh idle observation closes an indexed turn, even if
+    its `end_turn` row has not been written. An unindexed peer ends attribution without
+    proving that the previous turn completed, so only an observed `end_turn` can produce
+    a report at that boundary."""
     for turn in transcript_items(rows):
         if turn.get("final") and not still_idle():
             continue  # still running (or the process is gone and we cannot tell)
@@ -256,7 +262,7 @@ def events(
             if include_text:
                 event["body"] = turn["body"]
             yield event
-        if turn["turn"] is None:
+        if turn["turn"] is None or (turn.get("peer_boundary") and not turn["end_turn_rows"]):
             continue
         report = turn["recap"] or turn["report"]
         event = {
@@ -365,8 +371,12 @@ def watch(claude_home: str, seconds: float, interval: float = 0.5) -> dict[str, 
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         current = {}
-        for entry in registry(claude_home):
+        entries = registry(claude_home)
+        session_counts = Counter(entry["sessionId"] for entry in entries)
+        for entry in entries:
             sid = entry["sessionId"]
+            if session_counts[sid] != 1:
+                continue
             n = ordinals.setdefault(sid, len(ordinals) + 1)
             status = known(entry.get("status"), KNOWN_STATUS)
             path = transcript_path(claude_home, sid)

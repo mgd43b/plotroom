@@ -90,10 +90,15 @@ Independent review disposition:
 | Verification | Low, patched. Added `test_boolean_app_state_edge_is_not_reported` to exercise both CLI paths. |
 | Intent | Medium and low, patched. The peer attribution and future timestamp cases are covered above. Missing or ambiguous transcript paths suppress transcript reads. A valid session may still have an independent app-state report. |
 
+Automatic opening review of PR #223:
+
+- [4722037139](https://github.com/mgd43b/plotroom/pull/223#discussion_r4722037139) — Medium, patched. Flush indexed events before the next unindexed peer. An interrupted turn without an observed end still has no turn report. `test_unindexed_peer_stays_after_preceding_indexed_turn`.
+- [4722037523](https://github.com/mgd43b/plotroom/pull/223#discussion_r4722037523) — Medium, patched. Ignore duplicate session IDs and break continuity for that poll. `test_watch_does_not_report_an_ambiguous_registry_transition`.
+
 ## Verification
 
-- `uv run --locked --python 3.14 python -I -m unittest discover -s spikes/claude-session-state -p 'test_*.py'` passed 21 tests.
-- `uv run --locked --python 3.15 python -I -m unittest discover -s spikes/claude-session-state -p 'test_*.py'` passed 21 tests.
+- `uv run --locked --python 3.14 python -I -m unittest discover -s spikes/claude-session-state -p 'test_*.py'` passed 23 tests.
+- `uv run --locked --python 3.15 python -I -m unittest discover -s spikes/claude-session-state -p 'test_*.py'` passed 23 tests.
 - Explicit Ruff checks passed for both spike files. The lint command uses `--extend-ignore PT009` for the standard-library unittest assertions. Normal CI excludes the spike.
 - `uv run --locked --python <3.14 or 3.15> pytest -q tests/test_session_reader.py tests/test_intake.py` passed 13 tests on each interpreter.
 - `git diff --check` passed.
