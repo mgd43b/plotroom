@@ -203,15 +203,19 @@ def main(argv: list[str] | None = None) -> int:
 
     def check_mirrors() -> None:
         nonlocal mirror_complete
-        mirror_complete = asyncio.run(work_item_mirrors(args.milestone, args.child, print))
+        mirror_complete = asyncio.run(
+            work_item_mirrors(args.image_tag, args.milestone, args.child, print)
+        )
 
     mirrors_checked = args.work_item_mirrors and check(
-        "Local work-item mirror observations", check_mirrors, verdict="completed"
+        "Local and Compose work-item mirror observations", check_mirrors, verdict="completed"
     )
     for number, (criterion, local_witness, compose_witness, blocked) in enumerate(CRITERIA, 1):
         print(f"{number}. {criterion}")
         print(f"   Local synthetic {'PASS' if local else 'UNVERIFIED'} — {local_witness}")
-        if compose_witness is None:
+        if mirrors_checked and number == 6:
+            print("   Compose work-item evidence replays captured provider input.")
+        elif compose_witness is None:
             print("   Compose — not exercised by this runner")
         else:
             print(f"   Compose synthetic {'PASS' if compose else 'UNVERIFIED'} — {compose_witness}")
@@ -222,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             print("   Original live transitions remain outside this terminal-fact witness.")
             print("   Full PENDING — verify in the integrated credential-backed CI run.")
         elif mirror_complete and number == 6:
-            print("   Full PENDING — verify both sources through Compose and credential-backed CI.")
+            print("   Full PENDING — verify both sources in integrated credential-backed CI.")
         elif blocked:
             print(f"   Full BLOCKED — {blocked}")
     print("Integrated credential-backed CI acceptance remains pending.")

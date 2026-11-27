@@ -161,3 +161,36 @@ Pyright, and whitespace checks passed.
 Automatic opening review on PR #226 strengthened the regressions. A valid ID pair is
 rejected without the mirror opt-in, an expressly provided unavailable milestone reports a
 failed check, and a body differing only by CRLF versus LF is rejected by the verbatim check.
+
+### Isolated Compose replay for row 6
+
+Use the existing archived Compose pipe broker and container lifecycle for the same production
+repo-store and Issues source checks. First capture narrowly scoped host reads. Then run one
+network-disabled, read-only Compose container using the checked local image by immutable ID.
+Give it only the brokered in-memory responses and the exact trusted local witness, BMad reader
+helpers and store starter files it needs. Compose never requests a fresh provider read.
+
+Require agreement between local and Compose ready refs and body verification. Omitted native
+IDs report blocked in both environments. Capture or replay failure keeps the row blocked.
+Even when both terminal observations pass, the integrated credential-backed CI remains pending
+and full mode exits nonzero. Neither the canonical ticket nor native tracker is completed.
+
+The public pinned fixture passed through the ordinary opt-in runner on the host and inside
+disposable Compose. Both returned `1.1 Fixture ticket` then `1.2 Fixture follow-up`, and both
+reported native Issues as blocked without IDs. A separate actual Compose run used 15 scoped
+public tree reads and seven synthetic Issues responses captured once on the host. The isolated
+worker returned the same single ready child and verified the verbatim CRLF/UTF-8 body through
+the production source. Compose made zero fresh provider reads.
+
+The verifier inspects the running container's immutable image ID and network mode before
+replying to the first frame. Only the two witness modules, the trusted BMad ticket reader,
+and the Issues store starter are mounted read-only. The existing broker and bounded cleanup
+remain shared with the archived witness. Independent scope and behavior review found no blocker.
+
+The launcher regression checks the exact four read-only file mounts, image pin, disabled
+network, and refusal before replay on image or network drift. Runner regressions cover a
+missing capture and divergent mirror results. All 65 focused tests passed on each locked
+Python interpreter. Ruff, Pyright and whitespace checks passed.
+
+Opening review on PR #227 strengthened the tests against inspecting the wrong container
+and accepting a replay whose repo-store order alone differs. Both regressions passed.

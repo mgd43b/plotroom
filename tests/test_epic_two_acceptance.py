@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import json
 import subprocess
@@ -8,6 +9,8 @@ from typing import Any
 
 import httpx
 import pytest
+
+from plotroom.ports.work_items import WorkItem
 
 # Epic 2's fixed synthetic contract, including both transport and ingest variants.
 REQUIRED_WITNESSES = (
@@ -335,12 +338,12 @@ def test_row_six_mirror_observations_do_not_pass_full_acceptance(
     capsys: pytest.CaptureFixture[str],
     complete: bool | None,
 ) -> None:
-    seen: list[tuple[int | None, int | None]] = []
+    seen: list[tuple[str, int | None, int | None]] = []
 
     async def mirror(
-        milestone: int | None, child: int | None, report: Callable[[str], None]
+        tag: str, milestone: int | None, child: int | None, report: Callable[[str], None]
     ) -> bool:
-        seen.append((milestone, child))
+        seen.append((tag, milestone, child))
         report("Repo-store mirror PASS")
         if complete is None:
             raise RuntimeError("fixture milestone unavailable")
@@ -354,7 +357,7 @@ def test_row_six_mirror_observations_do_not_pass_full_acceptance(
     monkeypatch.setattr(acceptance, "work_item_mirrors", mirror)
     numbers = ["--milestone", "6", "--child", "25"] if complete is not False else []
     assert acceptance.main(["--image-tag", "fixture", "--work-item-mirrors", *numbers]) == 1
-    assert seen == ([(6, 25)] if complete is not False else [(None, None)])
+    assert seen == ([("fixture", 6, 25)] if complete is not False else [("fixture", None, None)])
     captured = capsys.readouterr()
     output = captured.out
     row_six = output.split("\n6. ", 1)[1].split("\n7. ", 1)[0]
@@ -362,6 +365,199 @@ def test_row_six_mirror_observations_do_not_pass_full_acceptance(
     if complete is None:
         assert "fixture milestone unavailable" in captured.err
         assert "work-item mirror checks failed" in output
+    else:
+        assert "Compose work-item evidence replays captured provider input." in row_six
+
+
+@pytest.mark.parametrize(
+    "mode", ["blocked", "native", "issues-mismatch", "repo-mismatch", "cache-miss"]
+)
+async def test_work_item_compose_replays_only_captured_reads(
+    acceptance: Any, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    mirror: Any = importlib.import_module(acceptance.work_item_mirrors.__module__)
+    archive: Any = importlib.import_module(acceptance.archived_checks.__module__)
+    repository = "/repos/mgd43b/plotroom-test"
+    live: list[str] = []
+    reports: list[str] = []
+
+    def gh(command: list[str], body: bytes) -> tuple[bytes, int]:
+        assert not body
+        endpoint = "/" + command[-1]
+        live.append(endpoint)
+        if endpoint == repository:
+            data = b'{"full_name":"mgd43b/plotroom-test","visibility":"public","private":false}'
+        else:
+            assert endpoint in {repository + "/branches/main", repository + "/issues/25"}
+            data = b"{}"
+        return b"HTTP/2.0 200 OK\r\n\r\n" + data, 0
+
+    async def tree(read: Callable[[str, str, bytes], object]) -> object:
+        read("GET", repository + "/branches/main", b"")
+        return mirror.EXPECTED_TREE
+
+    async def issues(
+        read: Callable[[str, str, bytes], object], _scope: object, milestone: int, child: int
+    ) -> object:
+        assert (milestone, child) == (6, 25)
+        read("GET", repository + "/issues/25", b"")
+        return WorkItem("25", "Fixture Issue")
+
+    async def compose(
+        tag: str,
+        read: Callable[[str, str, bytes], object],
+        *,
+        module: str,
+        arguments: tuple[str, ...],
+        source_files: tuple[str, ...],
+    ) -> dict[str, object]:
+        assert tag == "fixture"
+        assert module == "deploy.epic_two_mirrors"
+        assert source_files == (
+            "deploy/epic_two_archived.py",
+            "deploy/epic_two_mirrors.py",
+            "_bmad/method/scripts/tickets.py",
+            ".agents/skills/bmad-agent-po/config/github-ticketing.toml",
+        )
+        before = live[:]
+        if mode == "cache-miss":
+            read("GET", repository + "/git/trees/" + mirror.ROOT_TREE, b"")
+        if not arguments:
+            assert mode == "blocked"
+            result: dict[str, object] = await mirror.mirror_results(read, None, None, None)
+        else:
+            assert arguments == ("6", "25")
+            result = await mirror.mirror_results(read, 6, 25, mirror.IssueScope(6, 25))
+        assert live == before
+        if mode == "issues-mismatch":
+            result["issues"] = ["26", "Wrong issue"]
+        if mode == "repo-mismatch":
+            result["repo_store"] = [["1.2", "Fixture follow-up"], ["1.1", "Fixture ticket"]]
+        return result
+
+    monkeypatch.setattr(archive, "_read_gh", gh)
+    monkeypatch.setattr(mirror, "tree_witness", tree)
+    monkeypatch.setattr(mirror, "issues_witness", issues)
+    monkeypatch.setattr(mirror, "compose_witness", compose)
+    if mode in {"issues-mismatch", "repo-mismatch", "cache-miss"}:
+        with pytest.raises(RuntimeError, match=r"differed|absent from the local capture"):
+            await mirror.work_item_mirrors("fixture", 6, 25, reports.append)
+        assert "Compose" not in " ".join(reports)
+    elif mode == "blocked":
+        assert not await mirror.work_item_mirrors("fixture", None, None, reports.append)
+        assert [line.split(" BLOCKED")[0] for line in reports if "BLOCKED" in line] == [
+            "Local GitHub Issues mirror",
+            "Compose GitHub Issues mirror",
+        ]
+        assert live == [repository, repository + "/branches/main"]
+    else:
+        assert await mirror.work_item_mirrors("fixture", 6, 25, reports.append)
+        assert "exact body from captured input" in reports[-1]
+    if mode != "blocked":
+        assert live == [repository, repository + "/branches/main", repository + "/issues/25"]
+
+
+@pytest.mark.parametrize("drift", ["none", "image", "network"])
+async def test_shared_compose_replay_validates_running_isolation_before_serving_frames(
+    acceptance: Any, monkeypatch: pytest.MonkeyPatch, drift: str
+) -> None:
+    mirror: Any = importlib.import_module(acceptance.work_item_mirrors.__module__)
+    bridge: Any = importlib.import_module("deploy.bridge_smoke")
+    repo: Path = bridge.ROOT
+    image = "sha256:" + "a" * 64
+    witness_files = (
+        "deploy/epic_two_archived.py",
+        "deploy/epic_two_mirrors.py",
+        "_bmad/method/scripts/tickets.py",
+        ".agents/skills/bmad-agent-po/config/github-ticketing.toml",
+    )
+    observed: list[str] = []
+    frames: list[bytes] = []
+    container_name: str | None = None
+
+    def run(command: list[str]) -> str:
+        if command[:3] == ["docker", "image", "inspect"]:
+            assert command[-1] == "plotroom:fixture"
+            return image
+        if command[:2] == ["docker", "inspect"]:
+            assert container_name is not None
+            assert command[-1] == container_name
+            observed.append("inspected")
+            deployed_image = "sha256:" + "b" * 64 if drift == "image" else image
+            network = "bridge" if drift == "network" else "none"
+            return f"{deployed_image} {network}"
+        if command[:3] == ["docker", "ps", "-aq"]:
+            return ""
+        assert command[-2:] == ["down", "--volumes"]
+        observed.append("cleaned")
+        return ""
+
+    class Input:
+        def write(self, data: bytes) -> None:
+            frames.append(data)
+
+        async def drain(self) -> None:
+            pass
+
+    class Process:
+        def __init__(self) -> None:
+            self.stdin = Input()
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(
+                b'{"request":["GET","/repos/mgd43b/plotroom-test",""]}\n'
+                b'{"result":{"repo_store":[],"issues":null}}\n'
+            )
+            self.stdout.feed_eof()
+            self.returncode: int | None = None
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    async def launch(*command: str, **_options: object) -> Process:
+        nonlocal container_name
+        container_name = command[command.index("--name") + 1]
+        config = Path(command[command.index("-f") + 1])
+        raw = await asyncio.to_thread(config.read_text, encoding="utf-8")
+        service = json.loads(raw)["services"]["archive"]
+        assert service == {
+            "image": image,
+            "network_mode": "none",
+            "read_only": True,
+            "tmpfs": ["/tmp"],
+            "working_dir": "/fixture",
+            "volumes": [f"{(repo / path).resolve()}:/fixture/{path}:ro" for path in witness_files],
+        }
+        assert command[command.index("--pull") + 1] == "never"
+        assert command[-4:] == ("archive", "-B", "-m", "deploy.epic_two_mirrors")
+        return Process()
+
+    def read(method: str, path: str, body: bytes) -> tuple[dict[str, str], bytes]:
+        assert (method, path, body) == ("GET", "/repos/mgd43b/plotroom-test", b"")
+        assert observed == ["inspected"]
+        observed.append("replayed")
+        return {}, b"{}"
+
+    monkeypatch.setenv("DOCKER_HOST", "unix:///fixture/docker.sock")
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    monkeypatch.setattr(bridge, "run", run)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    if drift == "none":
+        result = await mirror.compose_mirrors("fixture", read, None, None)
+        assert result == {"repo_store": [], "issues": None}
+        assert frames == [b'{"headers": {}, "body": "e30="}\n']
+        assert observed == ["inspected", "replayed", "cleaned"]
+    else:
+        with pytest.raises(RuntimeError, match="pinned isolated image"):
+            await mirror.compose_mirrors("fixture", read, None, None)
+        assert not frames
+        assert observed == ["inspected", "cleaned"]
 
 
 async def test_repo_store_rejects_moved_main_before_fetching_git_objects(

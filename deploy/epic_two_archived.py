@@ -518,8 +518,15 @@ class PipeReader:
             return frame["headers"], base64.b64decode(frame["body"], validate=True)
 
 
-async def compose_witness(tag: str, read: Reader) -> dict[str, int]:
-    from deploy.bridge_smoke import run
+async def compose_witness(
+    tag: str,
+    read: Reader,
+    *,
+    module: str = "deploy.epic_two_archived",
+    arguments: tuple[str, ...] = (),
+    source_files: tuple[str, ...] = ("deploy/epic_two_archived.py",),
+) -> dict[str, object]:
+    from deploy.bridge_smoke import ROOT, run
 
     endpoint = os.environ.get("DOCKER_HOST") if not os.environ.get("DOCKER_CONTEXT") else None
     if endpoint is None:
@@ -527,9 +534,17 @@ async def compose_witness(tag: str, read: Reader) -> dict[str, int]:
             ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"]
         ).strip()
     if not endpoint.startswith("unix://"):
-        raise RuntimeError("the archived Compose witness requires a local Docker Unix socket")
+        raise RuntimeError("the Compose replay witness requires a local Docker Unix socket")
     image = run(["docker", "image", "inspect", "--format", "{{.Id}}", f"plotroom:{tag}"]).strip()
-    script = await asyncio.to_thread(Path(__file__).resolve)
+    volumes: list[str] = []
+    for name in source_files:
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("the Compose replay mount needs a repository-relative path")
+        source = (ROOT / relative).resolve(strict=True)
+        if not source.is_file() or not source.is_relative_to(ROOT):
+            raise RuntimeError("the Compose replay mount needs a trusted source file")
+        volumes.append(f"{source}:/fixture/{relative.as_posix()}:ro")
     with tempfile.TemporaryDirectory(prefix="plotroom-epic-two-archive-compose-") as directory:
         file = Path(directory) / "compose.json"
         file.write_text(
@@ -541,7 +556,8 @@ async def compose_witness(tag: str, read: Reader) -> dict[str, int]:
                             "network_mode": "none",
                             "read_only": True,
                             "tmpfs": ["/tmp"],  # noqa: S108 - private container tmpfs
-                            "volumes": [f"{script}:/fixture/witness.py:ro"],
+                            "working_dir": "/fixture",
+                            "volumes": volumes,
                         }
                     }
                 }
@@ -575,7 +591,10 @@ async def compose_witness(tag: str, read: Reader) -> dict[str, int]:
             "--entrypoint",
             "/app/.venv/bin/python",
             "archive",
-            "/fixture/witness.py",
+            "-B",
+            "-m",
+            module,
+            *arguments,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             limit=MAX_FRAME,
@@ -584,10 +603,23 @@ async def compose_witness(tag: str, read: Reader) -> dict[str, int]:
         assert proc.stdin is not None
         try:
             async with asyncio.timeout(100):
-                for _ in range(150):
+                for frame_number in range(150):
                     line = await proc.stdout.readline()
                     if not line:
                         raise RuntimeError("archived Compose witness stopped without a result")
+                    if frame_number == 0:
+                        identity = await asyncio.to_thread(
+                            run,
+                            [
+                                "docker",
+                                "inspect",
+                                "--format",
+                                "{{.Image}} {{.HostConfig.NetworkMode}}",
+                                container,
+                            ],
+                        )
+                        if identity.strip() != f"{image} none":
+                            raise RuntimeError("Compose did not use the pinned isolated image")
                     frame = json.loads(line)
                     if set(frame) == {"result"}:
                         if await proc.wait():
