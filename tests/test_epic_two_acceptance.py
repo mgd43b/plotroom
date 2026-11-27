@@ -2,6 +2,7 @@ import importlib
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -309,3 +310,202 @@ async def test_archive_loopback_requires_the_disposable_marker(acceptance: Any) 
             )
             assert accepted.status_code == 200
             assert calls == ["/fixture"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--milestone", "2"],
+        ["--work-item-mirrors", "--milestone", "2"],
+        ["--work-item-mirrors", "--milestone", "0", "--child", "4"],
+        ["--work-item-mirrors", "--synthetic"],
+    ],
+)
+def test_mirror_fixture_ids_must_be_explicit_and_paired(acceptance: Any, args: list[str]) -> None:
+    with pytest.raises(SystemExit) as error:
+        acceptance.main(["--image-tag", "fixture", *args])
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("complete", [True, False, None])
+def test_row_six_mirror_observations_do_not_pass_full_acceptance(
+    acceptance: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    complete: bool | None,
+) -> None:
+    seen: list[tuple[int | None, int | None]] = []
+
+    async def mirror(
+        milestone: int | None, child: int | None, report: Callable[[str], None]
+    ) -> bool:
+        seen.append((milestone, child))
+        report("Repo-store mirror PASS")
+        if complete is None:
+            raise RuntimeError("fixture milestone unavailable")
+        return complete
+
+    def compose(_tag: str) -> None:
+        pass
+
+    monkeypatch.setattr(acceptance, "local_checks", lambda: None)
+    monkeypatch.setattr(acceptance, "compose_checks", compose)
+    monkeypatch.setattr(acceptance, "work_item_mirrors", mirror)
+    numbers = ["--milestone", "6", "--child", "25"] if complete else []
+    assert acceptance.main(["--image-tag", "fixture", "--work-item-mirrors", *numbers]) == 1
+    assert seen == ([(6, 25)] if complete else [(None, None)])
+    captured = capsys.readouterr()
+    output = captured.out
+    row_six = output.split("\n6. ", 1)[1].split("\n7. ", 1)[0]
+    assert ("Full PENDING" if complete else "Full BLOCKED") in row_six
+    if complete is None:
+        assert "fixture milestone unavailable" in captured.err
+        assert "work-item mirror checks failed" in output
+
+
+async def test_repo_store_rejects_moved_main_before_fetching_git_objects(
+    acceptance: Any,
+) -> None:
+    mirror: Any = importlib.import_module(acceptance.work_item_mirrors.__module__)
+    prefix = "/repos/mgd43b/plotroom-test"
+    calls: list[str] = []
+
+    def reader(method: str, path: str, body: bytes) -> tuple[dict[str, str], bytes]:
+        assert method == "GET"
+        assert not body
+        calls.append(path)
+        values = {
+            prefix: {"default_branch": "main"},
+            prefix + "/branches/main": {
+                "commit": {"sha": "b" * 40, "commit": {"tree": {"sha": mirror.ROOT_TREE}}}
+            },
+        }
+        return {}, json.dumps(values[path]).encode()
+
+    with pytest.raises(RuntimeError, match="default-branch tree changed"):
+        await mirror.tree_witness(reader)
+    assert calls == [prefix, prefix + "/branches/main"]
+    with pytest.raises(RuntimeError, match="outside"):
+        mirror.tree_scope("GET", prefix + "/git/blobs/" + "b" * 40, b"")
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "inherited",
+        "closed",
+        "unrefined",
+        "body-prose",
+        "extra",
+        "wrong-body",
+        "extra-relation",
+        "cross-repo-relation",
+        "child-drift",
+        "milestone-pagination",
+        "relation-pagination",
+    ],
+)
+async def test_native_mirror_reads_only_the_pinned_milestone_and_relationships(
+    acceptance: Any, fault: str | None
+) -> None:
+    mirror: Any = importlib.import_module(acceptance.work_item_mirrors.__module__)
+    scope: Any = mirror.IssueScope(6, 25)
+    prefix = "/repos/mgd43b/plotroom-test"
+    page = f"{prefix}/issues?milestone=6&state=all&per_page=100&page=1"
+    parent_path = f"{prefix}/issues/24"
+    child_path = f"{prefix}/issues/25"
+    suffix = "?per_page=100&page=1"
+    calls: list[str] = []
+    native_body = "```yaml\r\ntype: story\r\nrefined: true\r\n```\r\n\r\nExact emoji 📌.\r\n"
+    if fault == "body-prose":
+        native_body = "```yaml\r\ntype: story\r\n```\r\nrefined: true\r\n"
+    if fault == "unrefined":
+        native_body = native_body.replace("refined: true", "refined: false")
+
+    def entry(number: int, title: str, labels: list[str], body: str) -> dict[str, Any]:
+        return {
+            "number": number,
+            "title": title,
+            "labels": [{"name": name} for name in labels],
+            "body": body,
+            "state": "open",
+            "milestone": {"number": 6},
+            "assignees": [],
+            "updated_at": "2026-11-27T19:00:00Z",
+        }
+
+    child = entry(25, "Fixture issue", ["story", "backlog"], native_body)
+    parent = entry(24, "Fixture epic", ["epic", "backlog"], "")
+    if fault == "inherited":
+        child["milestone"] = None
+    listed = [parent]
+    if fault != "inherited":
+        listed.append(
+            {**child, "body": native_body + "changed"} if fault == "wrong-body" else child
+        )
+    if fault == "child-drift":
+        child = {**child, "labels": [*child["labels"], {"name": "in-progress"}]}
+    if fault == "extra":
+        listed.append(entry(26, "Unapproved issue", ["story", "backlog"], native_body))
+    related: list[dict[str, Any]] = [
+        {"number": 25, "repository_url": f"https://api.github.com{prefix}"}
+    ]
+    if fault == "extra-relation":
+        related.append({"number": 900, "repository_url": f"https://api.github.com{prefix}"})
+    if fault == "cross-repo-relation":
+        related.append(
+            {"number": 901, "repository_url": "https://api.github.com/repos/other/other"}
+        )
+    values: dict[str, Any] = {
+        f"{prefix}/milestones/6": {
+            "number": 6,
+            "state": "closed" if fault == "closed" else "open",
+            "title": "Fixture",
+        },
+        child_path: child,
+        page: listed,
+        f"{parent_path}/sub_issues{suffix}": related,
+        f"{child_path}/sub_issues{suffix}": [],
+        f"{parent_path}/dependencies/blocked_by{suffix}": [],
+        f"{child_path}/dependencies/blocked_by{suffix}": [],
+    }
+
+    def reader(method: str, path: str, body: bytes) -> tuple[dict[str, str], bytes]:
+        assert method == "GET"
+        assert not body
+        calls.append(path)
+        paginated = (fault == "milestone-pagination" and path == page) or (
+            fault == "relation-pagination" and path == f"{parent_path}/sub_issues{suffix}"
+        )
+        headers = {"link": f'<https://api.github.com{path[:-1]}2>; rel="next"'} if paginated else {}
+        return headers, json.dumps(values[path]).encode()
+
+    for outside in (
+        f"{prefix}/issues",
+        f"{prefix}/milestones",
+        f"{prefix}/issues/123",
+        f"{parent_path}/sub_issues{suffix}",
+    ):
+        with pytest.raises(RuntimeError, match="outside"):
+            scope.endpoint("GET", outside, b"")
+    if fault is not None and fault != "inherited":
+        with pytest.raises(RuntimeError):
+            await mirror.issues_witness(reader, scope, 6, 25)
+        if fault in {
+            "closed",
+            "body-prose",
+            "unrefined",
+            "extra",
+            "child-drift",
+            "milestone-pagination",
+        }:
+            assert not any("sub_issues" in path or "blocked_by" in path for path in calls)
+        assert all(
+            all(part not in path for part in ("/900", "/901", "/26", "page=2")) for path in calls
+        )
+        return
+    ready = await mirror.issues_witness(reader, scope, 6, 25)
+    assert (ready.ref, ready.title) == ("25", "Fixture issue")
+    assert set(calls) == set(values)
+    assert len(calls) == len(values)

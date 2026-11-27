@@ -152,7 +152,8 @@ def _read_gh(command: list[str], body: bytes) -> tuple[bytes, int]:
 
 
 class ProviderReads:
-    def __init__(self) -> None:
+    def __init__(self, scope: Callable[[str, str, bytes], str] = _scoped_endpoint) -> None:
+        self._scope = scope
         self._cache: dict[tuple[str, str, bytes], Response] = {}
         self.live = 0
         self.reused = 0
@@ -160,7 +161,7 @@ class ProviderReads:
         self._lock = threading.Lock()
         self._deadline = time.monotonic() + 100
 
-    def preflight(self) -> None:
+    def preflight_public(self) -> None:
         prefix = f"/repos/{REPO}"
         _, raw = self.read("GET", prefix, b"")
         repo = json.loads(raw)
@@ -172,6 +173,10 @@ class ProviderReads:
             raise ArchiveReadError(
                 "the dedicated GitHub fixture is not public or its identity changed"
             )
+
+    def preflight(self) -> None:
+        self.preflight_public()
+        prefix = f"/repos/{REPO}"
         _, raw = self.read("GET", f"{prefix}/actions/runs/{RUN}", b"")
         run = json.loads(raw)
         if (
@@ -186,7 +191,7 @@ class ProviderReads:
             raise ArchiveReadError("the pinned archived Actions run did not match")
 
     def read(self, method: str, path: str, body: bytes) -> Response:
-        endpoint = _scoped_endpoint(method, path, body)
+        endpoint = self._scope(method, path, body)
         key = method, path, body
         with self._lock:
             if key in self._cache:
@@ -238,7 +243,7 @@ class ProviderReads:
             return response
 
     def replay(self, method: str, path: str, body: bytes) -> Response:
-        _scoped_endpoint(method, path, body)
+        self._scope(method, path, body)
         with self._lock:
             response = self._cache.get((method, path, body))
             if response is None:

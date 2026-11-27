@@ -16,6 +16,7 @@ from xml.etree import ElementTree
 
 from deploy.bridge_smoke import ROOT, run, smoke
 from deploy.epic_two_archived import archived_checks
+from deploy.epic_two_mirrors import work_item_mirrors
 
 WITNESSES = (
     "test_github.py::test_pull_lifecycle_and_credentials_preserve_committed_state",
@@ -164,12 +165,25 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also witness archived terminal facts using the existing read-only gh session",
     )
+    modes.add_argument(
+        "--work-item-mirrors",
+        action="store_true",
+        help="also verify the pinned fixture's read-only local work-item sources",
+    )
+    parser.add_argument("--milestone", type=int, help="verified fixture milestone number")
+    parser.add_argument("--child", type=int, help="verified fixture story issue number")
     args = parser.parse_args(argv)
+    numbers = (args.milestone, args.child)
+    if any(number is not None for number in numbers) and (
+        not args.work_item_mirrors
+        or any(number is None or not 0 < number < 2**63 for number in numbers)
+    ):
+        parser.error("--milestone and --child require --work-item-mirrors and two positive numbers")
     if not __debug__:
         parser.error("the acceptance witnesses require Python assertions to be enabled")
     print("Running Epic 2 synthetic witnesses. Full acceptance needs real evidence.", flush=True)
 
-    def check(label: str, run_check: Callable[[], None]) -> bool:
+    def check(label: str, run_check: Callable[[], None], *, verdict: str = "passed") -> bool:
         try:
             run_check()
         except Exception as error:
@@ -177,13 +191,22 @@ def main(argv: list[str] | None = None) -> int:
             if isinstance(error, ExceptionGroup):
                 traceback.print_exception(error)
             return False
-        print(f"{label} passed.", flush=True)
+        print(f"{label} {verdict}.", flush=True)
         return True
 
     local = check("Local daemon and adapter tests", local_checks)
     compose = check("Disposable Compose smoke", lambda: compose_checks(args.image_tag))
     archived = args.archived_github and check(
         "Archived GitHub evidence", lambda: asyncio.run(archived_checks(args.image_tag, print))
+    )
+    mirror_complete = False
+
+    def check_mirrors() -> None:
+        nonlocal mirror_complete
+        mirror_complete = asyncio.run(work_item_mirrors(args.milestone, args.child, print))
+
+    mirrors_checked = args.work_item_mirrors and check(
+        "Local work-item mirror observations", check_mirrors, verdict="completed"
     )
     for number, (criterion, local_witness, compose_witness, blocked) in enumerate(CRITERIA, 1):
         print(f"{number}. {criterion}")
@@ -198,6 +221,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             print("   Original live transitions remain outside this terminal-fact witness.")
             print("   Full PENDING — verify in the integrated credential-backed CI run.")
+        elif mirror_complete and number == 6:
+            print("   Full PENDING — verify both sources through Compose and credential-backed CI.")
         elif blocked:
             print(f"   Full BLOCKED — {blocked}")
     print("Integrated credential-backed CI acceptance remains pending.")
@@ -207,6 +232,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.archived_github and not archived:
         print("Result: archived GitHub checks failed. Full acceptance remains incomplete.")
+        return 1
+    if args.work_item_mirrors and not mirrors_checked:
+        print("Result: work-item mirror checks failed. Full acceptance remains incomplete.")
         return 1
     if not args.synthetic:
         covered = (

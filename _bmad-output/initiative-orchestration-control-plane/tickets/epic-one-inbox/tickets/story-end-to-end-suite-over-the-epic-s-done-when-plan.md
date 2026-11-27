@@ -130,3 +130,30 @@ The installed opening review on PR #225 added two test assertions. The report te
 the exact row assignments rather than status totals ([review](https://github.com/mgd43b/plotroom/pull/225#discussion_r4722693297)).
 The broker test rejects an incorrect marker before making a provider read
 ([review](https://github.com/mgd43b/plotroom/pull/225#discussion_r4722693558)).
+
+### Scoped work-item mirror witness increment
+
+Use separate production repo-store and GitHub Issues work-item sources for row 6. Read the existing default-branch initiative-demo from the fixed public fixture with the local trusted BMad installation. Allow only the reviewed tree/object scope. Require explicit verified milestone and child numbers before the native Issues witness. Read one exact open milestone and its bounded issue and relation scope. Require an epic parent and one refined backlog story, assert its exact ready ref and compare its body verbatim with a separately scoped native issue read. A missing or invalid input remains blocked.
+
+Reuse the archived host-side read transport. Do not provision a fixture or credential. Keep default and synthetic modes unchanged. The opt-in row 6 evidence reports actual public tree separately from the still-pending real Issues path. Synthetic provider cases prove the native adapter wiring, strict read scope, and failure behavior. Keep the canonical and native ticket open.
+
+Invoke with `--work-item-mirrors` for the public repo-store check. Add the verified
+`--milestone` and `--child` together when the real Issues fixture exists. With no IDs,
+the runner reads the pinned repo-store tree and reports Issues as blocked. If a supplied
+input is invalid, it reports the work-item check failure. Even both local observations
+leave full acceptance pending for Compose and integrated credential-backed CI.
+
+The live public repo-store witness passed on fixture main
+`9a6ce8a89a15046c18dbfa5d7d2af88bb0edbc14`. The production reader returned
+`1.1 Fixture ticket` then `1.2 Fixture follow-up`. The whole opt-in runner exited 1
+with the Issues input missing. The unrelated disposable synthetic Compose smoke passed
+and its resources were removed. No live Issues view was verified.
+
+Independent review added direct-versus-list readiness field agreement, a check of raw
+native relationship shape before the production projection can discard a foreign child,
+and fail-closed pagination coverage. Synthetic native cases exercised the production
+fetchers, the committed SQLite projection and the Issues source. They verified inherited
+milestone membership and verbatim UTF-8/CRLF body round-tripping. The scoped tests reject
+unrefined stories, extra or foreign records, inconsistent reads, and later pages without
+making an out-of-scope call. Locked 3.14 and 3.15 each passed 56 focused tests. Ruff,
+Pyright, and whitespace checks passed.
