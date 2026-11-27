@@ -16,9 +16,9 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from plotroom._secret_file import read_secret_file
 from plotroom.adapters.github import (
+    GITHUB_API,
     GitHubRateLimited,
     GitHubUnavailable,
-    is_github_api_url,
     is_rate_limited,
 )
 from plotroom.ports.clock import Clock
@@ -32,6 +32,7 @@ _READ_PERMISSIONS = {
     "pull_requests": "read",
 }
 _BEARER = re.compile(r"[A-Za-z0-9._~-]+")
+_MAX_RESPONSE_BYTES = 64 * 1024
 
 
 def _base64url(value: bytes) -> bytes:
@@ -60,14 +61,36 @@ class _InstallationToken:
     refresh_at: datetime
 
 
-def _response_payload(response: httpx.Response, expected_status: int, error: str) -> dict[str, Any]:
-    if is_rate_limited(response):
+async def _response_payload(
+    response: httpx.Response, expected_status: int, error: str
+) -> dict[str, Any]:
+    if response.status_code == 429 or (
+        response.status_code == 403
+        and (
+            response.headers.get("X-RateLimit-Remaining") == "0"
+            or "Retry-After" in response.headers
+        )
+    ):
         raise GitHubRateLimited(response.headers)
-    if response.status_code != expected_status:
+    if response.status_code not in (expected_status, 403):
         raise GitHubUnavailable(error)
+    if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+        # Avoid decompressing a large response before enforcing the byte limit.
+        raise GitHubUnavailable(error)
+
+    body = bytearray()
+    async for chunk in response.aiter_bytes(chunk_size=4096):
+        if len(body) + len(chunk) > _MAX_RESPONSE_BYTES:
+            raise GitHubUnavailable(error)
+        body.extend(chunk)
+    if response.status_code == 403:
+        if is_rate_limited(httpx.Response(403, content=bytes(body))):
+            raise GitHubRateLimited(response.headers)
+        raise GitHubUnavailable(error)
+
     try:
-        payload: Any = response.json()
-    except ValueError:
+        payload: Any = json.loads(body)
+    except ValueError, RecursionError:
         raise GitHubUnavailable(error) from None
     if not isinstance(payload, dict):
         raise GitHubUnavailable(error)
@@ -84,14 +107,14 @@ class GitHubAppCredential:
         api_url: str,
         clock: Clock,
     ) -> None:
-        if not is_github_api_url(api_url):
-            raise ValueError("GitHub App credentials require a verified API origin")
+        if api_url != GITHUB_API:
+            raise ValueError("GitHub App credentials require https://api.github.com")
         if type(installation_id) is not int or installation_id < 1:
             raise ValueError("GitHub App credentials require a positive installation ID")
         self._client_id = client_id
         self._key_file = key_file
         self._owner, self._repository = repository.split("/", 1)
-        self._installation = f"{api_url.rstrip('/')}/app/installations/{installation_id}"
+        self._installation = f"{GITHUB_API}/app/installations/{installation_id}"
         self._clock = clock
         self._lock = asyncio.Lock()
         self._last_now: datetime | None = None
@@ -114,6 +137,11 @@ class GitHubAppCredential:
             self._cached = await self._refresh()
             return self._cached.value
 
+    async def reject(self, token: str) -> None:
+        async with self._lock:
+            if self._cached is not None and self._cached.value == token:
+                self._cached = None
+
     async def _refresh(self) -> _InstallationToken:
         try:
             pem = await read_secret_file(self._key_file)
@@ -126,17 +154,17 @@ class GitHubAppCredential:
         headers = {
             "Authorization": f"Bearer {jwt}",
             "Accept": "application/vnd.github+json",
+            "Accept-Encoding": "identity",
             "X-GitHub-Api-Version": "2026-03-10",
         }
         try:
             async with httpx.AsyncClient(
                 timeout=15, follow_redirects=False, trust_env=False
             ) as client:
-                installation = _response_payload(
-                    await client.get(self._installation, headers=headers),
-                    200,
-                    "Cannot read the configured GitHub App installation",
-                )
+                async with client.stream("GET", self._installation, headers=headers) as response:
+                    installation = await _response_payload(
+                        response, 200, "Cannot read the configured GitHub App installation"
+                    )
                 account: Any = installation.get("account")
                 login = (
                     cast("dict[str, Any]", account).get("login")
@@ -147,18 +175,15 @@ class GitHubAppCredential:
                     raise GitHubUnavailable(
                         "GitHub App installation does not own the configured repository"
                     )
-                payload = _response_payload(
-                    await client.post(
-                        f"{self._installation}/access_tokens",
-                        headers=headers,
-                        json={
-                            "repositories": [self._repository],
-                            "permissions": _READ_PERMISSIONS,
-                        },
-                    ),
-                    201,
-                    "Cannot mint a GitHub App installation token",
-                )
+                async with client.stream(
+                    "POST",
+                    f"{self._installation}/access_tokens",
+                    headers=headers,
+                    json={"repositories": [self._repository], "permissions": _READ_PERMISSIONS},
+                ) as response:
+                    payload = await _response_payload(
+                        response, 201, "Cannot mint a GitHub App installation token"
+                    )
         except httpx.RequestError:
             raise GitHubUnavailable("GitHub App credential request failed") from None
 

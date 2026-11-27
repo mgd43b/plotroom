@@ -13,13 +13,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from conftest import write_config
 from fakes import FixedClock
-from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable
+from plotroom.adapters.github import GITHUB_API, GitHubRateLimited, GitHubUnavailable
 from plotroom.adapters.github.app_credential import GitHubAppCredential
 from plotroom.app.config import ConfigError, load_config
 from plotroom.app.serve import Daemon
@@ -56,15 +57,18 @@ class AppFixture:
     mode: str = ""
     requests: list[str] = field(default_factory=lambda: [])
     issued: int = 0
+    revoked: int | None = None
     pull_generations: list[int] = field(default_factory=lambda: [])
     jwts: set[str] = field(default_factory=lambda: set(), repr=False)
 
     def credential(self) -> GitHubAppCredential:
-        return GitHubAppCredential(CLIENT, INSTALLATION, self.key_file, REPO, self.url, self.clock)
+        return GitHubAppCredential(
+            CLIENT, INSTALLATION, self.key_file, REPO, GITHUB_API, self.clock
+        )
 
 
 @pytest.fixture
-def app_fixture(tmp_path: Path) -> Iterator[AppFixture]:
+def app_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[AppFixture]:
     # This key exists only in this test directory and has no corresponding GitHub App.
     private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     key_file = tmp_path / "fixture-key.pem"
@@ -81,7 +85,9 @@ def app_fixture(tmp_path: Path) -> Iterator[AppFixture]:
 
     class Handler(BaseHTTPRequestHandler):
         def send_json(self, code: int, body: Any) -> None:
-            encoded = json.dumps(body).encode()
+            self.send_bytes(code, json.dumps(body).encode())
+
+        def send_bytes(self, code: int, encoded: bytes) -> None:
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(encoded)))
@@ -117,13 +123,19 @@ def app_fixture(tmp_path: Path) -> Iterator[AppFixture]:
                     self.send_header("Location", f"{data.url}/must-not-follow")
                     self.end_headers()
                     return
+                if data.mode == "installation_large":
+                    self.send_json(200, {"oversized": "x" * 70000})
+                    return
                 owner = "other" if data.mode == "owner" else "Fixture"
                 self.send_json(200, {"account": {"login": owner}})
                 return
             if path == "/must-not-follow":
                 self.send_json(500, {})
                 return
-            if self.headers.get("Authorization") != f"Bearer {installation_token(data.issued)}":
+            if (
+                self.headers.get("Authorization") != f"Bearer {installation_token(data.issued)}"
+                or data.issued == data.revoked
+            ):
                 self.send_json(401, {"message": "fixture bearer absent"})
                 return
             if path == f"/repos/{REPO}/pulls":
@@ -151,6 +163,13 @@ def app_fixture(tmp_path: Path) -> Iterator[AppFixture]:
             self.verify_jwt()
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             assert body == {"repositories": ["example"], "permissions": PERMISSIONS}
+            if data.mode in {"token_nested", "denied_nested"}:
+                code = 403 if data.mode == "denied_nested" else 201
+                self.send_bytes(code, b"[" * 2000 + b"]" * 2000)
+                return
+            if data.mode == "token_large":
+                self.send_json(201, {"oversized": "x" * 70000})
+                return
             if data.mode == "denied":
                 self.send_json(403, {"message": installation_token(1)})
                 return
@@ -174,7 +193,24 @@ def app_fixture(tmp_path: Path) -> Iterator[AppFixture]:
             pass
 
     with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
-        data.url = f"http://127.0.0.1:{server.server_port}"
+        port = server.server_port
+        data.url = f"http://127.0.0.1:{port}"
+
+        class LoopbackTransport(httpx.AsyncHTTPTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                assert request.url.scheme == "https"
+                assert request.url.host == "api.github.com"
+                request.url = request.url.copy_with(scheme="http", host="127.0.0.1", port=port)
+                return await super().handle_async_request(request)
+
+        original = httpx.AsyncClient.__init__
+
+        def connect(client: httpx.AsyncClient, **options: Any) -> None:
+            if options.get("transport") is None:
+                options["transport"] = LoopbackTransport()
+            original(client, **options)
+
+        monkeypatch.setattr(httpx.AsyncClient, "__init__", connect)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -193,7 +229,7 @@ async def test_app_daemon_keeps_polling_across_short_installation_tokens(
     path = write_config(tmp_path)
     path.write_text(
         path.read_text() + f'\n[projects.demo.github]\nrepository = "{REPO}"\n'
-        f'api_url = "{app_fixture.url}"\npoll_seconds = 1\n'
+        "poll_seconds = 1\n"
         f'[projects.demo.github.app]\nclient_id = "{CLIENT}"\n'
         f'installation_id = {INSTALLATION}\nprivate_key_file = "fixture-key.pem"\n'
     )
@@ -230,13 +266,18 @@ async def test_app_daemon_keeps_polling_across_short_installation_tokens(
             app_fixture.clock.advance(5)
             await observed(2)
             assert app_fixture.issued == 2
+
+            # HTTP 401 evicts the cached bearer before its scheduled refresh.
+            app_fixture.revoked = 2
+            await observed(3)
+            assert app_fixture.issued == 3
             app_fixture.mode = "denied"
             app_fixture.clock.advance(5)
             while ledger.github_error != "Cannot mint a GitHub App installation token":  # noqa: ASYNC110
                 await asyncio.sleep(0.05)
-            assert app_fixture.issued == 2
+            assert app_fixture.issued == 3
             app_fixture.mode = ""
-            await observed(3)
+            await observed(4)
     finally:
         daemon.stop()
         await serving
@@ -244,7 +285,7 @@ async def test_app_daemon_keeps_polling_across_short_installation_tokens(
     mount = app_fixture.key_file.read_bytes().splitlines()[1:-1]
     secrets = [
         *mount,
-        *(installation_token(n).encode() for n in range(1, 4)),
+        *(installation_token(n).encode() for n in range(1, 5)),
         *(jwt.encode() for jwt in app_fixture.jwts),
     ]
     evidence = [path.read_bytes(), caplog.text.encode(), repr(config).encode()]
@@ -262,6 +303,10 @@ async def test_app_daemon_keeps_polling_across_short_installation_tokens(
         ("naive", "expired or invalid", True),
         ("token", "invalid installation token", True),
         ("denied", "Cannot mint", True),
+        ("installation_large", "Cannot read the configured", False),
+        ("token_large", "Cannot mint", True),
+        ("token_nested", "Cannot mint", True),
+        ("denied_nested", "Cannot mint", True),
     ],
 )
 async def test_app_refuses_unusable_provider_evidence(
@@ -286,6 +331,9 @@ async def test_app_serializes_refresh_and_handles_rate_limits(app_fixture: AppFi
     app_fixture.mode = ""
     await asyncio.gather(*(credential.token() for _ in range(8)))
     assert app_fixture.issued == 2
+    await credential.reject(installation_token(1))
+    await credential.token()
+    assert app_fixture.issued == 2
 
 
 async def test_app_malformed_key_fails_before_http(app_fixture: AppFixture) -> None:
@@ -300,6 +348,7 @@ async def test_app_malformed_key_fails_before_http(app_fixture: AppFixture) -> N
     [
         ('token_file="pat"\n', "cannot be combined"),
         ('api_url="https://api.github.com.invalid"\n', "loopback fixture"),
+        ('api_url="http://127.0.0.1:4321"\n', "GitHub HTTPS API origin"),
     ],
 )
 def test_app_defaults_to_verified_origin_and_refuses_mixed_settings(
@@ -330,3 +379,18 @@ async def test_app_invalidates_cached_token_on_clock_regression(app_fixture: App
     app_fixture.clock.advance(1)
     await credential.token()
     assert app_fixture.issued == 2
+
+
+def test_app_projects_do_not_reserve_pat_environment_names(tmp_path: Path) -> None:
+    path = write_config(tmp_path, projects=("team-a", "team_a"))
+    settings = ""
+    for project in ("team-a", "team_a"):
+        settings += (
+            f'\n[projects.{project}.github]\nrepository = "{REPO}"\n'
+            f'[projects.{project}.github.app]\nclient_id = "{CLIENT}"\n'
+            f'installation_id = {INSTALLATION}\nprivate_key_file = "fixture-key.pem"\n'
+        )
+    path.write_text(path.read_text() + settings, encoding="utf-8")
+    config = load_config(path, {})
+    assert set(config.github) == {"team-a", "team_a"}
+    assert all(settings.app is not None for settings in config.github.values())

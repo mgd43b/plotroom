@@ -14,7 +14,12 @@ from urllib.parse import quote
 
 import httpx
 
-from plotroom.adapters.github import GitHubCredential, GitHubRateLimited, GitHubUnavailable
+from plotroom.adapters.github import (
+    GitHubCredential,
+    GitHubRateLimited,
+    GitHubUnavailable,
+    repository_client,
+)
 from plotroom.adapters.github.read import GitHubReadClient, Row, obj
 from plotroom.ports.work_items import MAX_WORK_ITEM_BODY_BYTES, WorkItem
 
@@ -256,9 +261,7 @@ class GitHubTicketTree:
         try:
             token = await self._credential.token()
             async with (
-                httpx.AsyncClient(
-                    timeout=15, follow_redirects=False, trust_env=False, transport=self._transport
-                ) as client,
+                repository_client(self._credential, transport=self._transport) as client,
                 asyncio.timeout(_FETCH_TIMEOUT),
             ):
                 return await read(_GitObjects(self._api, client, token))

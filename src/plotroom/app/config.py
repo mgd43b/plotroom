@@ -646,10 +646,12 @@ def _github_projects(projects: tuple[str, ...], table: Any, base: Path) -> dict[
         repository = _string(f"{label}.repository", settings.get("repository")).lower()
         if not _REPOSITORY.fullmatch(repository) or repository.split("/")[1] in (".", ".."):
             raise ConfigError(f"{label}.repository must be a GitHub owner/repository")
-        name = github_secret_name(project_id)
-        if name in names:
-            raise ConfigError(f"{label} credential environment variable must be unique")
-        names.add(name)
+        app = _github_app(settings, label, base)
+        if app is None:
+            name = github_secret_name(project_id)
+            if name in names:
+                raise ConfigError(f"{label} credential environment variable must be unique")
+            names.add(name)
         token_file = None
         if "token_file" in settings:
             token_file = (
@@ -658,7 +660,8 @@ def _github_projects(projects: tuple[str, ...], table: Any, base: Path) -> dict[
         api_url = _string(f"{label}.api_url", settings.get("api_url", GITHUB_API)).rstrip("/")
         if not is_github_api_url(api_url):
             raise ConfigError(f"{label}.api_url must be the GitHub API or a loopback fixture")
-        app = _github_app(settings, label, base)
+        if app is not None and api_url != GITHUB_API:
+            raise ConfigError(f"{label}.app requires the GitHub HTTPS API origin")
         poll_seconds = _integer(
             f"{label}.poll_seconds", settings.get("poll_seconds", 60), minimum=1
         )

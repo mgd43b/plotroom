@@ -32,7 +32,8 @@ private_key_file = "secrets/github-app.pem"
 ```
 
 The path is relative to the config file. App mode uses the mounted key and
-keeps installation tokens in memory until refresh. Projects without this
+keeps installation tokens in memory until refresh. App authentication uses
+the GitHub HTTPS API. Projects without this
 table use the PAT configuration above. The App needs the repository selected
 in its installation and read access to Actions, Checks, Contents, Deployments,
 Issues, and Pull requests. Plotroom requests those permissions for the configured
