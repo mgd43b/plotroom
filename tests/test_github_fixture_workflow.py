@@ -53,7 +53,7 @@ def row_six_steps() -> dict[str, str]:
         "github.actor == 'mgd43b'",
         "github.triggering_actor == 'mgd43b'",
     ]
-    assert job["timeout-minutes"] == "15"
+    assert job["timeout-minutes"] == "${{ inputs.mode == 'integrated' && 30 || 15 }}"
     assert job["steps"][0]["with"] == {
         "ref": "${{ github.sha }}",
         "persist-credentials": "false",

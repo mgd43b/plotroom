@@ -4,6 +4,7 @@ import importlib
 import json
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -72,7 +73,19 @@ def test_clean_witnesses_only_pass_in_synthetic_mode(
     assert summary in output
 
 
-@pytest.mark.parametrize("fault", [None, "local", "compose", "archive", "mirrors"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "local",
+        "compose",
+        "archive",
+        "mirrors",
+        "compose-timeout",
+        "archive-timeout",
+        "mirrors-timeout",
+    ],
+)
 def test_integrated_result_requires_each_included_witness_and_reports_its_scope(
     acceptance: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -82,6 +95,7 @@ def test_integrated_result_requires_each_included_witness_and_reports_its_scope(
 ) -> None:
     calls: list[str] = []
     path = tmp_path / "fixture-token"
+    failed_stage = fault.removesuffix("-timeout") if fault else None
 
     def observe(stage: str) -> None:
         calls.append(stage)
@@ -96,20 +110,31 @@ def test_integrated_result_requires_each_included_witness_and_reports_its_scope(
         assert tag == "fixture"
         assert token_file == path
         observe("archive")
+        if fault == "archive-timeout":
+            await asyncio.sleep(0.2)
 
     async def mirrors(tag: str, token_file: Path, _report: Callable[[str], None]) -> None:
         assert tag == "fixture"
         assert token_file == path
         observe("mirrors")
+        if fault == "mirrors-timeout":
+            await asyncio.sleep(0.2)
 
-    def compose(tag: str) -> None:
+    def compose(tag: str, *, stage_timer: Callable[[bool], None]) -> None:
         assert tag == "fixture"
-        observe("compose")
+        try:
+            observe("compose")
+            if fault == "compose-timeout":
+                time.sleep(0.2)
+        finally:
+            stage_timer(False)
 
     monkeypatch.setattr(acceptance, "local_checks", lambda: observe("local"))
     monkeypatch.setattr(acceptance, "compose_checks", compose)
     monkeypatch.setattr(acceptance, "archived_file_checks", archive)
     monkeypatch.setattr(acceptance, "verify_published", mirrors)
+    monkeypatch.setattr(acceptance, "COMPOSE_STAGE_SECONDS", 0.05)
+    monkeypatch.setattr(acceptance, "GITHUB_STAGE_SECONDS", 0.05)
     assert acceptance.main(
         ["--verify-integrated", "--image-tag", "fixture", "--token-file", str(path)]
     ) == (0 if fault is None else 1)
@@ -126,20 +151,20 @@ def test_integrated_result_requires_each_included_witness_and_reports_its_scope(
             row = int(line.split(".", 1)[0])
         elif line.startswith("   Archived GitHub "):
             archive_rows.add(row)
-            assert ("UNVERIFIED" if fault == "archive" else "PASS") in line
+            assert ("UNVERIFIED" if failed_stage == "archive" else "PASS") in line
             assert "terminal facts" in line
         elif line.startswith("   Live read-only "):
             live_rows.add(row)
-            assert ("UNVERIFIED" if fault == "mirrors" else "PASS") in line
+            assert ("UNVERIFIED" if failed_stage == "mirrors" else "PASS") in line
             assert "capture replay" in line
         elif "External acceptance DEFERRED" in line:
             deferred.add(row)
         elif line.startswith("   Local synthetic "):
             local_rows.add(row)
-            assert ("UNVERIFIED" if fault == "local" else "PASS") in line
+            assert ("UNVERIFIED" if failed_stage == "local" else "PASS") in line
         elif line.startswith("   Compose synthetic "):
             compose_rows.add(row)
-            assert ("UNVERIFIED" if fault == "compose" else "PASS") in line
+            assert ("UNVERIFIED" if failed_stage == "compose" else "PASS") in line
     assert archive_rows == {1, 9}
     assert live_rows == {6}
     assert deferred == {2, 5, 7}
@@ -149,6 +174,8 @@ def test_integrated_result_requires_each_included_witness_and_reports_its_scope(
     assert "untrusted error detail" not in captured.err
     if fault == "archive":
         assert "HTTP 403 at GraphQL review threads for PR #2" in captured.err
+    if fault and fault.endswith("-timeout"):
+        assert "FAILED (TimeoutError)" in captured.err
 
 
 @pytest.mark.parametrize(

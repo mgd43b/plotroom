@@ -253,5 +253,12 @@ The dry run never used the Actions PAT. The real integrated dispatch remains pen
 The manual workflow still defaults to the standalone row 6 path. Independent reviews
 verified the scope and added duplicate-key rejection in the archive's GraphQL envelope.
 Tests cover all four stage failures, exact deferred row assignments, sanitized permission
-denial, and both dry workflow modes. On both locked Python versions, 117 focused tests
+denial, and both dry workflow modes. On both locked Python versions, 120 focused tests
 and Pyright passed. Ruff, actionlint, and whitespace checks passed.
+
+Opening review on PR #229 added a separate 30-minute job limit for integrated mode while
+keeping the standalone 15-minute limit. The local test process already has a five-minute
+limit. The scripted Compose stage and the two GitHub witness stages each have four-minute
+execution budgets. Cleanup keeps independent command limits, with the synchronous alarm
+paused for teardown. Synthetic timeouts prove the remaining stages still run and the report
+fails the integrated job.
