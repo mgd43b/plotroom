@@ -12,6 +12,7 @@ dependencies = [
   "aiosqlite==0.22.1",
   "alembic==1.20.1",
   "httpx==0.28.1",
+  "cryptography",
   "pyyaml>=6.0.2,<7",
   "sqlite-vec==0.1.9",
 ]
@@ -20,7 +21,7 @@ dependencies = [
 plotroom = "plotroom.app.cli:main"
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio", "ruff", "pyright", "cryptography"]
+dev = ["pytest", "pytest-asyncio", "ruff", "pyright"]
 
 [build-system]
 requires = ["hatchling"]

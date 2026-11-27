@@ -10,7 +10,12 @@ from typing import Any
 
 import httpx
 
-from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable, LocalGitHubCredential
+from plotroom.adapters.github import (
+    GitHubCredential,
+    GitHubRateLimited,
+    GitHubUnavailable,
+    repository_client,
+)
 from plotroom.adapters.github.ci import (
     JUnitBudget,
     fetch_checks,
@@ -103,7 +108,7 @@ class GitHubDetailPoller:
         ledger: Ledger,
         clock: Clock,
         api: GitHubReadClient,
-        credential: LocalGitHubCredential,
+        credential: GitHubCredential,
         image_jobs: tuple[str, ...] = (),
         *,
         include_issue_tree: bool = False,
@@ -127,7 +132,7 @@ class GitHubDetailPoller:
         try:
             async with (
                 asyncio.timeout(20),
-                httpx.AsyncClient(timeout=15, follow_redirects=False, trust_env=False) as client,
+                repository_client(self.credential) as client,
             ):
                 return await self.read_gate_snapshot(client, snapshot)
         except GitHubRateLimited as exc:

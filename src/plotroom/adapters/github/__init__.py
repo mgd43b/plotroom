@@ -9,7 +9,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast, runtime_checkable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -22,6 +23,7 @@ from plotroom.ports.clock import Clock
 log = logging.getLogger("plotroom.github")
 RECONCILE_EVERY = 60
 POLL_OVERLAP = timedelta(minutes=5)
+GITHUB_API = "https://api.github.com"
 
 
 class GitHubUnavailable(Exception):
@@ -66,10 +68,57 @@ def is_rate_limited(response: httpx.Response) -> bool:
         return True
     try:
         payload: Any = response.json()
-    except ValueError, UnicodeError:
+    except ValueError, UnicodeError, RecursionError:
         return False
     message = cast("dict[str, Any]", payload).get("message") if isinstance(payload, dict) else None
     return isinstance(message, str) and "rate limit" in message.lower()
+
+
+def is_github_api_url(value: str) -> bool:
+    if value == GITHUB_API:
+        return True
+    try:
+        url = urlsplit(value)
+        return (
+            url.scheme == "http"
+            and url.hostname in ("127.0.0.1", "::1")
+            and url.port is not None
+            and url.username is None
+            and not (url.path or url.query or url.fragment)
+            and value == f"http://{url.netloc}"
+        )
+    except ValueError:
+        return False
+
+
+class GitHubCredential(Protocol):
+    """Supply the bearer for repository reads."""
+
+    async def token(self) -> str: ...
+
+
+@runtime_checkable
+class _RejectableCredential(Protocol):
+    async def reject(self, token: str) -> None: ...
+
+
+def repository_client(
+    credential: GitHubCredential, *, transport: httpx.AsyncBaseTransport | None = None
+) -> httpx.AsyncClient:
+    hooks: dict[str, list[Callable[[httpx.Response], Awaitable[None]]]] = {}
+    if isinstance(credential, _RejectableCredential):
+        rejecting = credential
+
+        async def reject_unauthorized(response: httpx.Response) -> None:
+            if response.status_code == 401:
+                scheme, _, token = response.request.headers.get("Authorization", "").partition(" ")
+                if scheme.casefold() == "bearer" and token:
+                    await rejecting.reject(token)
+
+        hooks["response"] = [reject_unauthorized]
+    return httpx.AsyncClient(
+        timeout=15, follow_redirects=False, trust_env=False, transport=transport, event_hooks=hooks
+    )
 
 
 def github_secret_name(project_id: str) -> str:
@@ -222,7 +271,7 @@ class GitHubPoller:
         ledger: Ledger,
         clock: Clock,
         repo: str,
-        credential: LocalGitHubCredential,
+        credential: GitHubCredential,
         fetcher: PullRequestFetcher,
         seconds: int,
     ) -> None:
@@ -278,7 +327,7 @@ class GitHubPoller:
     async def run(
         self, after_pull: Callable[[httpx.AsyncClient], Awaitable[None]] | None = None
     ) -> None:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=False, trust_env=False) as client:
+        async with repository_client(self._credential) as client:
             while True:
                 committed = await self.poll(client)
                 if committed and after_pull is not None:

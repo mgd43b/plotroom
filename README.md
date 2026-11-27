@@ -86,7 +86,7 @@ tested. The remaining items are mostly checks against live services and the rele
 |---|---|
 | The local daemon and its MCP tools | A tested run against a live GitHub repository ([#29](https://github.com/mgd43b/plotroom/issues/29)) |
 | Real Claude Code and Codex clients against the local daemon and the chart in disposable local kind | Releases to PyPI and ghcr.io ([#25](https://github.com/mgd43b/plotroom/issues/25)) |
-| Docker Compose, and the Helm chart on a local kind cluster | GitHub App credentials for hosted mode ([#39](https://github.com/mgd43b/plotroom/issues/39)) and a published chart ([#125](https://github.com/mgd43b/plotroom/issues/125)) |
+| Docker Compose, and the Helm chart on a local kind cluster | Live GitHub App fixture acceptance ([#39](https://github.com/mgd43b/plotroom/issues/39)) and a published chart ([#125](https://github.com/mgd43b/plotroom/issues/125)) |
 | Restart safety, migration backups, scheduled backups, and OpenRouter spend readings | Direct Anthropic Console metering |
 | The Switchboard bridge | Plotroom coordinating its own development for a working day ([#110](https://github.com/mgd43b/plotroom/issues/110)) |
 
