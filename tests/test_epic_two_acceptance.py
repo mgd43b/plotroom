@@ -369,7 +369,9 @@ def test_row_six_mirror_observations_do_not_pass_full_acceptance(
         assert "Compose work-item evidence replays captured provider input." in row_six
 
 
-@pytest.mark.parametrize("mode", ["blocked", "native", "mismatch", "cache-miss"])
+@pytest.mark.parametrize(
+    "mode", ["blocked", "native", "issues-mismatch", "repo-mismatch", "cache-miss"]
+)
 async def test_work_item_compose_replays_only_captured_reads(
     acceptance: Any, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
@@ -427,15 +429,17 @@ async def test_work_item_compose_replays_only_captured_reads(
             assert arguments == ("6", "25")
             result = await mirror.mirror_results(read, 6, 25, mirror.IssueScope(6, 25))
         assert live == before
-        if mode == "mismatch":
+        if mode == "issues-mismatch":
             result["issues"] = ["26", "Wrong issue"]
+        if mode == "repo-mismatch":
+            result["repo_store"] = [["1.2", "Fixture follow-up"], ["1.1", "Fixture ticket"]]
         return result
 
     monkeypatch.setattr(archive, "_read_gh", gh)
     monkeypatch.setattr(mirror, "tree_witness", tree)
     monkeypatch.setattr(mirror, "issues_witness", issues)
     monkeypatch.setattr(mirror, "compose_witness", compose)
-    if mode in {"mismatch", "cache-miss"}:
+    if mode in {"issues-mismatch", "repo-mismatch", "cache-miss"}:
         with pytest.raises(RuntimeError, match=r"differed|absent from the local capture"):
             await mirror.work_item_mirrors("fixture", 6, 25, reports.append)
         assert "Compose" not in " ".join(reports)
@@ -469,13 +473,15 @@ async def test_shared_compose_replay_validates_running_isolation_before_serving_
     )
     observed: list[str] = []
     frames: list[bytes] = []
+    container_name: str | None = None
 
     def run(command: list[str]) -> str:
         if command[:3] == ["docker", "image", "inspect"]:
             assert command[-1] == "plotroom:fixture"
             return image
         if command[:2] == ["docker", "inspect"]:
-            assert command[-1].endswith("-run")
+            assert container_name is not None
+            assert command[-1] == container_name
             observed.append("inspected")
             deployed_image = "sha256:" + "b" * 64 if drift == "image" else image
             network = "bridge" if drift == "network" else "none"
@@ -515,6 +521,8 @@ async def test_shared_compose_replay_validates_running_isolation_before_serving_
             return b"", b""
 
     async def launch(*command: str, **_options: object) -> Process:
+        nonlocal container_name
+        container_name = command[command.index("--name") + 1]
         config = Path(command[command.index("-f") + 1])
         raw = await asyncio.to_thread(config.read_text, encoding="utf-8")
         service = json.loads(raw)["services"]["archive"]

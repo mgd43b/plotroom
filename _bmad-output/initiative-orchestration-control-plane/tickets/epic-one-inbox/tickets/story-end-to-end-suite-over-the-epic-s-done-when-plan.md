@@ -189,5 +189,8 @@ remain shared with the archived witness. Independent scope and behavior review f
 
 The launcher regression checks the exact four read-only file mounts, image pin, disabled
 network, and refusal before replay on image or network drift. Runner regressions cover a
-missing capture and divergent mirror results. All 64 focused tests passed on each locked
+missing capture and divergent mirror results. All 65 focused tests passed on each locked
 Python interpreter. Ruff, Pyright and whitespace checks passed.
+
+Opening review on PR #227 strengthened the tests against inspecting the wrong container
+and accepting a replay whose repo-store order alone differs. Both regressions passed.
