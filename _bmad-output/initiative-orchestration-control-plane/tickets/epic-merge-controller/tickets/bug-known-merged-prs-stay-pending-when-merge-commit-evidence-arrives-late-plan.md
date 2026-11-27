@@ -63,6 +63,8 @@ Keep list and ordinary PR detail cursors, gate decisions, live operations and av
 
 ## Verification
 
+Built: [PR #219](https://github.com/mgd43b/plotroom/pull/219).
+
 - `uv run --locked python -m pytest -q tests/test_merge_sha_backfill.py tests/test_github.py tests/test_github_details.py tests/test_controller_fixture_merge.py`
 - Run Ruff, Pyright, the dependency check and both locked Python suites. Verify the pinned remote CI and exact main merge.
 - After the review changes, the 64 affected tests passed under each locked Python version. The broader Python 3.14 run passed 1,346 tests before the clock-skew correction.
