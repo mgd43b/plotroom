@@ -1,4 +1,10 @@
 {{- $bridgeProjects := ((.Values.bridge | default dict).projects | default dict) -}}
+{{- $projectSecrets := .Values.projectSecrets | default dict -}}
+{{- range $project, $_ := $projectSecrets -}}
+  {{- if not (has $project $.Values.projects) -}}
+    {{- fail (printf "projectSecrets project %q must also appear in projects" $project) -}}
+  {{- end -}}
+{{- end -}}
 {{- $hosts := list "127.0.0.1:*" "localhost:*" (printf "%s:8765" .Release.Name) -}}
 {{- range .Values.allowedHosts -}}
   {{- $host := toString . -}}
@@ -38,6 +44,28 @@ data:
     allowed_hosts = {{ $hosts | uniq | mustToJson }}
     {{- range $project := .Values.projects }}
     [projects.{{ $project | quote }}]
+    {{- with index $projectSecrets $project }}
+    {{- $directory := include "plotroom.projectSecretDirectory" $project }}
+    {{- with .github }}
+    [projects.{{ $project | quote }}.github]
+    repository = {{ .repository | mustToJson }}
+    {{- if .pat }}
+    token_file = {{ printf "%s/github-token" $directory | mustToJson }}
+    {{- else }}
+    [projects.{{ $project | quote }}.github.app]
+    client_id = {{ .app.clientId | mustToJson }}
+    installation_id = {{ .app.installationId | int64 }}
+    private_key_file = {{ printf "%s/github-app.pem" $directory | mustToJson }}
+    {{- end }}
+    {{- end }}
+    {{- with .embedder }}
+    [projects.{{ $project | quote }}.embedder]
+    url = {{ .url | mustToJson }}
+    model = {{ .model | mustToJson }}
+    dimension = {{ .dimension | int64 }}
+    key_file = {{ printf "%s/embedder-key" $directory | mustToJson }}
+    {{- end }}
+    {{- end }}
     {{- with index $bridgeProjects $project }}
     [projects.{{ $project | quote }}.switchboard]
     board = {{ required "each bridge project needs an explicit board" .board | quote }}

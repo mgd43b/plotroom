@@ -453,7 +453,12 @@ class Daemon:
             project.embedding_client = httpx.AsyncClient(trust_env=False)
             semantic_search = SemanticSearch(
                 project.store.embedding_index(embedder.model),
-                HttpEmbedder(project.embedding_client, embedder.url, embedder.model),
+                HttpEmbedder(
+                    project.embedding_client,
+                    embedder.url,
+                    embedder.model,
+                    key_file=embedder.key_file,
+                ),
             )
         openrouter_runs = {
             run: binding
