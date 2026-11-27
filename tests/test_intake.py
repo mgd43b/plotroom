@@ -1,9 +1,9 @@
 import asyncio
 import json
 import sys
-from collections.abc import Generator
-from contextlib import contextmanager, suppress
+from contextlib import AsyncExitStack, suppress
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -11,7 +11,7 @@ from conftest import authenticated_client, child_env, tool_json, write_config
 from plotroom.app.config import load_config
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import TokenRegistry
-from plotroom.core.watchers import Watchers
+from plotroom.core.ledger import Ledger
 
 
 @pytest.mark.parametrize("turn_index", [None, 2])
@@ -32,16 +32,8 @@ async def test_worker_ingest_wakes_local_watch_and_ack_closes(
     other = tokens.issue("demo", "worker:other", local=True)
     daemon = Daemon(settings)
     armed = asyncio.Event()
-    original = Watchers.waiting
-
-    @contextmanager
-    def observed(self: Watchers, role: str) -> Generator[None]:
-        with original(self, role):
-            if role == "orchestrator":
-                armed.set()
-            yield
-
-    monkeypatch.setattr(Watchers, "waiting", observed)
+    signaled = asyncio.Event()
+    clients = AsyncExitStack()
     serving = asyncio.create_task(daemon.run())
     try:
         async with asyncio.timeout(10):
@@ -60,6 +52,46 @@ async def test_worker_ingest_wakes_local_watch_and_ack_closes(
             "other",
             {"lane": "unowned", "worker": "other", "branch": "other", "work_items": []},
         )
+        args = {
+            "kind": "claude.turn_report",
+            "session_id": "fixture-session",
+            "body": "worker report",
+            "lane": "unowned",
+        }
+        async with authenticated_client(url, other.bearer) as wrong_worker:
+            denied = tool_json(await wrong_worker.call_tool("ingest", args))
+            assert denied["error"]["code"] == "forbidden"
+            assert "bound to another worker" in denied["error"]["message"]
+        worker_client = await clients.enter_async_context(authenticated_client(url, worker.bearer))
+        denied = tool_json(
+            await worker_client.call_tool("ingest", {**args, "kind": "github.pr_opened"})
+        )
+        assert denied["error"]["code"] == "forbidden"
+
+        get_commit_signal = Ledger.commit_signal.fget
+        assert get_commit_signal is not None
+        observed_signals: set[asyncio.Event] = set()
+        deadline = 0.0
+
+        def observe_commit_signal(instance: Ledger) -> asyncio.Event:
+            signal = cast("asyncio.Event", get_commit_signal(instance))
+            if instance is not ledger or signal in observed_signals:
+                return signal
+            observed_signals.add(signal)
+            original_wait = signal.wait
+
+            async def observe_wait() -> bool:
+                nonlocal deadline
+                deadline = asyncio.get_running_loop().time() + 10
+                armed.set()
+                result = await original_wait()
+                signaled.set()
+                return result
+
+            monkeypatch.setattr(signal, "wait", observe_wait)
+            return signal
+
+        monkeypatch.setattr(Ledger, "commit_signal", property(observe_commit_signal))
         watcher = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
@@ -79,34 +111,21 @@ async def test_worker_ingest_wakes_local_watch_and_ack_closes(
             async with asyncio.timeout(10):
                 await armed.wait()
             assert watcher.returncode is None
-            args = {
-                "kind": "claude.turn_report",
-                "session_id": "fixture-session",
-                "body": "worker report",
-                "lane": "unowned",
-            }
-            async with authenticated_client(url, other.bearer) as wrong_worker:
-                denied = tool_json(await wrong_worker.call_tool("ingest", args))
-                assert denied["error"]["code"] == "forbidden"
-                assert "bound to another worker" in denied["error"]["message"]
-            async with authenticated_client(url, worker.bearer) as client:
-                denied = tool_json(
-                    await client.call_tool("ingest", {**args, "kind": "github.pr_opened"})
-                )
-                assert denied["error"]["code"] == "forbidden"
-                payload = {**args, "turn_index": turn_index}
-                made = tool_json(await client.call_tool("ingest", payload))["data"]
-                assert made["created"]
-                same = tool_json(await client.call_tool("ingest", payload))["data"]
-                assert same == {"event": made["event"], "created": False}
-                other_route = tool_json(
-                    await client.call_tool(
-                        "ingest", {**args, "turn_index": 2 if turn_index is None else None}
-                    )
-                )["data"]
-                assert other_route == same
-            async with asyncio.timeout(10):
+            payload = {**args, "turn_index": turn_index}
+            assert not signaled.is_set()
+            async with asyncio.timeout_at(deadline):
+                made = tool_json(await worker_client.call_tool("ingest", payload))["data"]
                 stdout, stderr = await watcher.communicate()
+            assert signaled.is_set()
+            assert made["created"]
+            same = tool_json(await worker_client.call_tool("ingest", payload))["data"]
+            assert same == {"event": made["event"], "created": False}
+            other_route = tool_json(
+                await worker_client.call_tool(
+                    "ingest", {**args, "turn_index": 2 if turn_index is None else None}
+                )
+            )["data"]
+            assert other_route == same
             assert watcher.returncode == 0, stderr.decode()
             item = json.loads(stdout)["item"]
             assert item["kind"] == "inbound_message"
@@ -131,8 +150,7 @@ async def test_worker_ingest_wakes_local_watch_and_ack_closes(
                 "upstream_id": "synthetic-peer-message",
                 "body": "worker session message",
             }
-            async with authenticated_client(url, worker.bearer) as client:
-                accepted = tool_json(await client.call_tool("ingest", message))["data"]
+            accepted = tool_json(await worker_client.call_tool("ingest", message))["data"]
             assert accepted["created"]
             [record] = [
                 event
@@ -150,6 +168,9 @@ async def test_worker_ingest_wakes_local_watch_and_ack_closes(
                 async with asyncio.timeout(5):
                     await watcher.communicate()
     finally:
-        daemon.stop()
-        async with asyncio.timeout(10):
-            await serving
+        try:
+            await clients.aclose()
+        finally:
+            daemon.stop()
+            async with asyncio.timeout(10):
+                await serving

@@ -78,6 +78,12 @@ Remaining full inputs are the approved fixture GitHub run and PAT in CI, a hoste
 
 Follow-up inspection confirmed the cursor wording, exact test identity gate and immutable image pinning.
 
+The installed opening review on PR #224 found three gaps. All were patched and independently checked:
+
+- [4722348171](https://github.com/mgd43b/plotroom/pull/224#discussion_r4722348171) requires the armed Compose MCP wait to return within eight seconds of submitting the request, before its ten-second fallback poll.
+- [4722348491](https://github.com/mgd43b/plotroom/pull/224#discussion_r4722348491) independently pins the required pytest selectors, including parameter variants, and checks the actual subprocess arguments.
+- [4722348821](https://github.com/mgd43b/plotroom/pull/224#discussion_r4722348821) observes the actual local CLI's commit-signal wait, proves it was signaled, and requires the CLI result before the periodic recheck.
+
 ## Verification
 
 - Locked Python 3.14 and 3.15 runner/unit and focused witness tests.

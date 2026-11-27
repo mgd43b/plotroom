@@ -100,26 +100,29 @@ async def verify_worker(url, operator, worker, database) -> None:
         async def progress(_elapsed, _cap, _message=None):
             armed.set()
 
+        # A 20-second wait first rechecks at 10 seconds. Require the result earlier.
+        immediate_deadline = asyncio.get_running_loop().time() + 8
         wait = asyncio.create_task(
             tool(observer, "wait", {"cursor": cursor, "timeout": 20}, progress_callback=progress)
         )
         try:
             async with asyncio.timeout(15):
-                await armed.wait()
-                assert not wait.done()
-                assert watcher.returncode is None
                 payload = {
                     "kind": "claude.turn_report",
                     "session_id": "compose-fixture-session",
                     "body": "Compose worker report",
                     "turn_index": 1,
                 }
-                report = await tool(ingress, "ingest", payload)
+                async with asyncio.timeout_at(immediate_deadline):
+                    await armed.wait()
+                    assert not wait.done()
+                    assert watcher.returncode is None
+                    report = await tool(ingress, "ingest", payload)
+                    observed = await wait
                 event = report["event"]
                 assert report["created"] is True
                 assert await tool(ingress, "ingest", payload) == {"event": event, "created": False}
 
-                observed = await wait
                 stdout, stderr = await watcher.communicate()
                 assert watcher.returncode == 0, stderr.decode()
                 assert json.loads(stdout) == observed
@@ -232,7 +235,7 @@ def smoke(root: Path, name: str, tag: str) -> None:
     board = name + "-board"
     config = root / "plotroom.toml"
     config.write_text(
-        "[projects.bridge-fixture]\nwatchers = []\n"
+        "wait_cap = 20\n[projects.bridge-fixture]\nwatchers = []\n"
         f'[projects.bridge-fixture.switchboard]\nboard = "{board}"\nvia_bridge = true\n'
         "[projects.bridge-fixture.session_reader]\n"
         'claude_home = "/fixture/unused-claude"\napp_support = "/fixture/unused-desktop"\n'

@@ -6,6 +6,23 @@ from typing import Any
 
 import pytest
 
+# Epic 2's fixed synthetic contract, including both transport and ingest variants.
+REQUIRED_WITNESSES = (
+    "test_github.py::test_pull_lifecycle_and_credentials_preserve_committed_state",
+    "test_github.py::test_on_demand_daemon_reads_the_mounted_pat",
+    "test_github_details.py::test_github_transitions_and_pagination_are_durable",
+    "test_switchboard.py::test_switchboard_redelivery_after_interrupted_ack",
+    "test_intake.py::test_worker_ingest_wakes_local_watch_and_ack_closes[None]",
+    "test_intake.py::test_worker_ingest_wakes_local_watch_and_ack_closes[2]",
+    "test_github_app.py::test_app_daemon_keeps_polling_across_short_installation_tokens",
+    "test_work_items_github_tree.py::test_default_branch_tick_matches_checkout_and_preserves_last_good_view",
+    "test_github_details.py::test_github_issues_flow_through_the_runtime_tick",
+    "test_work_items_github_issues.py::test_work_items_match_the_synced_bmad_board",
+    "test_deploy_status.py::test_paginated_get_only_deployments_isolate_failures_and_deduplicate",
+    "test_deploy_status.py::test_only_own_lane_worker_can_report_and_replay[http]",
+    "test_deploy_status.py::test_only_own_lane_worker_can_report_and_replay[stdio]",
+)
+
 
 @pytest.fixture
 def acceptance(monkeypatch: pytest.MonkeyPatch) -> Any:
@@ -79,14 +96,17 @@ def test_local_checks_require_every_exact_witness(
     acceptance: Any, monkeypatch: pytest.MonkeyPatch, fault: str | None
 ) -> None:
     def pytest_run(command: list[str], **_kwargs: object) -> None:
+        assert [arg for arg in command if arg.startswith("tests/")] == [
+            f"tests/{selector}" for selector in REQUIRED_WITNESSES
+        ]
         report = Path(
             next(arg.split("=", 1)[1] for arg in command if arg.startswith("--junitxml="))
         )
         cases: list[str] = []
-        for selector in acceptance.WITNESSES:
+        for selector in REQUIRED_WITNESSES:
             filename, name = selector.split("::")
             status = ""
-            if selector == acceptance.WITNESSES[-1]:
+            if selector == REQUIRED_WITNESSES[-1]:
                 if fault == "wrong-identity":
                     name = "unrelated_passing_test"
                 elif fault == "skipped":
