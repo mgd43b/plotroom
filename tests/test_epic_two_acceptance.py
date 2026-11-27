@@ -167,11 +167,24 @@ def test_archived_rows_are_explicit_and_full_mode_remains_blocked(
 
     captured = capsys.readouterr()
     assert calls == ["fixture"]
-    assert captured.out.count("Archived GitHub PASS") == (2 if available else 0)
-    assert captured.out.count("Full BLOCKED") == (4 if available else 6)
+    criterion = 0
+    archived_rows: set[int] = set()
+    pending_rows: set[int] = set()
+    blocked_rows: set[int] = set()
+    for line in captured.out.splitlines():
+        if line[:1].isdigit():
+            criterion = int(line.split(".", 1)[0])
+        elif "Archived GitHub PASS" in line:
+            archived_rows.add(criterion)
+        elif "Full PENDING" in line:
+            pending_rows.add(criterion)
+        elif "Full BLOCKED" in line:
+            blocked_rows.add(criterion)
+    assert archived_rows == ({1, 9} if available else set())
+    assert pending_rows == archived_rows
+    assert blocked_rows == ({2, 5, 6, 7} if available else {1, 2, 5, 6, 7, 9})
     if available:
         assert "Original live transitions remain outside" in captured.out
-        assert captured.out.count("Full PENDING") == 2
         assert "full acceptance blocked" in captured.out
     else:
         assert "read-only fixture input is missing" in captured.err
@@ -285,6 +298,11 @@ async def test_archive_loopback_requires_the_disposable_marker(acceptance: Any) 
         async with httpx.AsyncClient(trust_env=False) as client:
             denied = await client.get(endpoint + "/fixture")
             assert denied.status_code == 403
+            assert calls == []
+            wrong_marker = await client.get(
+                endpoint + "/fixture", headers={"Authorization": "Bearer wrong-test-marker"}
+            )
+            assert wrong_marker.status_code == 403
             assert calls == []
             accepted = await client.get(
                 endpoint + "/fixture", headers={"Authorization": "Bearer disposable-test-marker"}

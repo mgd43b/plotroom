@@ -125,3 +125,8 @@ Independent review led to public-repository and exact-run preflight, random loca
 bounded subprocess capture, a verified second terminal detail poll, run-owned container fallback
 cleanup, and tests for scope and reporting. Follow-up review found no material blocker.
 Focused runner tests passed on locked Python 3.14 and 3.15. Ruff, Pyright and whitespace checks passed.
+
+The installed opening review on PR #225 added two test assertions. The report test checks
+the exact row assignments rather than status totals ([review](https://github.com/mgd43b/plotroom/pull/225#discussion_r4722693297)).
+The broker test rejects an incorrect marker before making a provider read
+([review](https://github.com/mgd43b/plotroom/pull/225#discussion_r4722693558)).
