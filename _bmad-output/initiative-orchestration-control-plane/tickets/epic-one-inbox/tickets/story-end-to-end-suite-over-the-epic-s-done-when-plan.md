@@ -220,5 +220,9 @@ shell variable before the dedicated witness starts. A real disposable Compose dr
 used a synthetic token file and 22 scoped published fixture responses obtained through
 the existing host read session. It verified both source results with zero fresh Compose
 reads. The Actions secret was not used for this run. Independent review and actionlint
-passed, as did 98 focused tests on each locked Python, Ruff, Pyright and whitespace checks.
+passed, as did 99 focused tests on each locked Python, Ruff, Pyright and whitespace checks.
 An exact-main credential-backed run remains pending.
+
+Opening review on PR #228 added a second secret-free main pin immediately before the
+credential step. Dry tests confirm source drift blocks it, the same mocked checkout
+passes attempt 1 and rejects attempt 2, and HTTP 403 reports only a sanitized message.

@@ -58,6 +58,7 @@ def row_six_steps() -> dict[str, str]:
     assert secret_step["name"] == "Verify published work-item mirrors"
     assert secret_step["env"] == {"FIXTURE_PAT": f"${{{{ secrets.{OVERRIDE} }}}}"}
     assert job["steps"][-1] == secret_step
+    assert job["steps"][-2]["name"] == "Recheck reviewed main before credential use"
     return {step["name"]: step["run"] for step in job["steps"] if "run" in step}
 
 
@@ -70,6 +71,34 @@ def run_step(script: str, stub_bin: Path, **values: str) -> subprocess.Completed
         timeout=10,
         check=False,
     )
+
+
+@pytest.fixture
+def reviewed_source(tmp_path: Path) -> dict[str, str]:
+    git = tmp_path / "git"
+    git.write_text(
+        """#!/bin/bash
+set -eu
+case "$1" in
+  rev-parse) printf '%s\\n' "$MOCK_SHA" ;;
+  diff) test "$MOCK_DIRTY" = no ;;
+  ls-remote)
+    test "$*" = 'ls-remote --exit-code https://github.com/mgd43b/plotroom.git refs/heads/main'
+    printf '%s\\trefs/heads/main\\n' "$MOCK_MAIN"
+    ;;
+  *) exit 3 ;;
+esac
+"""
+    )
+    git.chmod(0o700)
+    return {
+        "EXPECTED_SHA": SHA,
+        "GITHUB_SHA": SHA,
+        "MOCK_SHA": SHA,
+        "MOCK_MAIN": SHA,
+        "MOCK_DIRTY": "no",
+        "GITHUB_RUN_ATTEMPT": "1",
+    }
 
 
 @pytest.mark.parametrize(
@@ -88,49 +117,34 @@ def test_workflow_checks_reviewed_main_source(
     request: pytest.FixtureRequest,
     workflow_fixture: str,
     tmp_path: Path,
+    reviewed_source: dict[str, str],
     overrides: dict[str, str],
     expected: int,
 ) -> None:
     workflow_steps = cast("dict[str, str]", request.getfixturevalue(workflow_fixture))
-    git = tmp_path / "git"
-    git.write_text(
-        """#!/bin/bash
-set -eu
-case "$1" in
-  rev-parse) printf '%s\\n' "$MOCK_SHA" ;;
-  diff) test "$MOCK_DIRTY" = no ;;
-  ls-remote)
-    test "$*" = 'ls-remote --exit-code https://github.com/mgd43b/plotroom.git refs/heads/main'
-    printf '%s\\trefs/heads/main\\n' "$MOCK_MAIN"
-    ;;
-  *) exit 3 ;;
-esac
-"""
+    result = run_step(
+        workflow_steps["Verify the reviewed source"], tmp_path, **(reviewed_source | overrides)
     )
-    git.chmod(0o700)
-    env = {
-        "EXPECTED_SHA": SHA,
-        "GITHUB_SHA": SHA,
-        "MOCK_SHA": SHA,
-        "MOCK_MAIN": SHA,
-        "MOCK_DIRTY": "no",
-        "GITHUB_RUN_ATTEMPT": "1",
-        **overrides,
-    }
-    result = run_step(workflow_steps["Verify the reviewed source"], tmp_path, **env)
     assert result.returncode == expected, result.stderr
 
 
-def test_row_six_source_guard_rejects_reruns(row_six_steps: dict[str, str], tmp_path: Path) -> None:
-    result = run_step(
-        row_six_steps["Verify the reviewed source"],
-        tmp_path,
-        EXPECTED_SHA=SHA,
-        GITHUB_SHA=SHA,
-        GITHUB_RUN_ATTEMPT="2",
-    )
-    assert result.returncode == 1
-    assert not result.stderr
+def test_row_six_source_guard_rejects_reruns(
+    row_six_steps: dict[str, str], tmp_path: Path, reviewed_source: dict[str, str]
+) -> None:
+    source_guard = row_six_steps["Verify the reviewed source"]
+    assert run_step(source_guard, tmp_path, **reviewed_source).returncode == 0
+    denied = run_step(source_guard, tmp_path, **(reviewed_source | {"GITHUB_RUN_ATTEMPT": "2"}))
+    assert denied.returncode == 1
+    assert not denied.stderr
+
+
+def test_row_six_rechecks_main_after_preparation(
+    row_six_steps: dict[str, str], tmp_path: Path, reviewed_source: dict[str, str]
+) -> None:
+    recheck = row_six_steps["Recheck reviewed main before credential use"]
+    assert run_step(recheck, tmp_path, **reviewed_source).returncode == 0
+    advanced = run_step(recheck, tmp_path, **(reviewed_source | {"MOCK_MAIN": "b" * 40}))
+    assert advanced.returncode == 1
 
 
 @pytest.mark.parametrize(

@@ -871,8 +871,10 @@ async def test_published_mirror_captures_auth_reads_and_replays_without_credenti
             "epic-drift": "published fixture epic differs",
             "replay-drift": "Compose work-item mirrors differed",
         }.get(fault)
-        with pytest.raises(RuntimeError, match=message):
+        with pytest.raises(RuntimeError, match=message) as error:
             await mirror.verify_published("fixture", path, reports.append)
+        if fault == "denied":
+            assert str(error.value) == "GitHub fixture read returned HTTP 403"
         assert compose_calls == ([(1, 7)] if fault == "replay-drift" else [])
         assert not any("credential-backed witness PASS" in report for report in reports)
         assert not any("unit-test-pat" in report for report in reports)
