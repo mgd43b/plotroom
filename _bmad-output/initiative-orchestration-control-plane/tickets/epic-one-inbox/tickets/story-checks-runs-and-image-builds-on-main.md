@@ -9,7 +9,7 @@ hitl: true
 risk: medium
 tracker_id: "33"
 remote: "https://github.com/mgd43b/plotroom/issues/33"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Checks, runs and image builds on main
@@ -42,4 +42,10 @@ Verify: A CI run on a PR and on main produces one event per check state change, 
 - Decision (2026-11-27, coordinator chat): Matt authorized this one green-to-green fixture rerun: “why are we waiting for one to happen? rerun a passing workflow on the same head in plotroom-test and get #33 moving.”
 - Both push attempts in fixture run `45846161353` passed on `refs/heads/main` at unchanged head `9a6ce8a89a15046c18dbfa5d7d2af88bb0edbc14`. Attempt 1 had check IDs `140000271234` and `140000271767`. Attempt 2 had distinct check IDs `140607557039` and `140607557509`. [Attempt 1](https://github.com/mgd43b/plotroom-test/actions/runs/45846161353/attempts/1) · [Attempt 2](https://github.com/mgd43b/plotroom-test/actions/runs/45846161353/attempts/2)
 - A disposable offline replay fed the recorded GitHub responses through the normal pollers on Plotroom `88058c40f67ffc995364cf42a9b8af0de434528e`. It produced two distinct workflow-attempt events and four distinct check events. An unchanged third poll added no events. The projection reported attempt 2 green with image job `140607557509`. Scratch resources were removed. [Plotroom main CI](https://github.com/mgd43b/plotroom/actions/runs/46021546372) · [Attempt 2 image job](https://github.com/mgd43b/plotroom-test/actions/runs/45846161353/job/140607557509)
-- **Pending:** The named fixture jobs' queued and in-progress states remain unobserved. The cause of #63's recorded `overlap_unreadable` refusal remains unconfirmed, and #65 still lacks qualifying recorded failure history or a proven fallback.
+
+### PR and main check transitions (2026-11-27)
+
+- Fixture PR #5 attempt 1 ran at source head `d58ac0958b8cb0411c08029dd1fd9218fc125b84` (synthetic runner merge `fc4111ac`). Both named jobs were observed queued and completed successfully, and the image job was observed in progress. The regular check's in-progress state was missed. Replaying the recorded provider responses through the normal Plotroom projection produced five distinct check events and zero on repeat. The check IDs were `140623694080` and `140623694328`. The PR was closed unmerged and its temporary branch removed. Fixture main and the workflow stayed unchanged. [PR #5](https://github.com/mgd43b/plotroom-test/pull/5) · [PR run](https://github.com/mgd43b/plotroom-test/actions/runs/46033714518)
+- Main attempt 3 was a push workflow attempt on the same `refs/heads/main` and head `9a6ce8a89a15046c18dbfa5d7d2af88bb0edbc14`. Both named jobs, `140626663247` and `140626663921`, were observed queued, in progress, and completed successfully. Their IDs differed from attempt 2. Offline replay of saved provider responses through the normal projection produced two workflow-attempt events and eight check events, including six new transition facts, with no duplicates. Attempt 3 was the latest green main verdict, with image job `140626663921`. [Main attempt 3](https://github.com/mgd43b/plotroom-test/actions/runs/45846161353/attempts/3) · [Image job](https://github.com/mgd43b/plotroom-test/actions/runs/45846161353/job/140626663921)
+- Verify calls for a PR case and a main case with one event per observed check state change. The PR image job and both main jobs provide full cases. The prior #34, #56 and #57 observations stand. #63 has a recorded verdict and `as_of`. The cause of `overlap_unreadable` remains unconfirmed.
+- **#65 missing live input:** The dedicated fixture has no suitable recorded failure history to verify a flake candidate or its check-name and run-link fallback. The deterministic cases, including negative and fallback cases, remain covered. Verify permits recording the specific missing live input. #65 has no new live result from this exercise.
