@@ -8,7 +8,8 @@ hitl: false
 risk: low
 tracker_id: "45"
 remote: "https://github.com/mgd43b/plotroom/issues/45"
-tracker_status: backlog
+tracker_status: done
+status: built
 ---
 
 # Refactor sweep
@@ -24,3 +25,4 @@ Verify: Deferred findings are resolved or re-filed, and CI passes.
 ## References
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md
+- Built: https://github.com/mgd43b/plotroom/pull/223
