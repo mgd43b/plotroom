@@ -3,10 +3,12 @@
 import asyncio
 import json
 from http import HTTPStatus
+from pathlib import Path
 from typing import Any, Never, cast
 
 import httpx
 
+from plotroom._secret_file import read_secret_file
 from plotroom.ports.search import (
     EmbeddingError,
     EmbeddingModel,
@@ -25,10 +27,18 @@ class _BatchTooLarge(EmbeddingError):
 class HttpEmbedder:
     """POST model, input and dimensions, then restore the response's input order."""
 
-    def __init__(self, client: httpx.AsyncClient, url: str, model: EmbeddingModel) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        model: EmbeddingModel,
+        *,
+        key_file: Path | None = None,
+    ) -> None:
         self._client = client
         self._url = url
         self._model = model
+        self._key_file = key_file
 
     async def embed(self, texts: tuple[str, ...]) -> tuple[EmbeddingOutcome, ...]:
         try:
@@ -45,10 +55,20 @@ class HttpEmbedder:
         content = bytearray()
         try:
             async with asyncio.timeout(10):
+                headers = {"Accept-Encoding": "identity"}
+                if self._key_file is not None:
+                    endpoint = httpx.URL(self._url)
+                    if endpoint.scheme != "https" or not endpoint.host or endpoint.userinfo:
+                        raise EmbeddingError("embedding key file requires an HTTPS endpoint")
+                    key = await self._read_key(self._key_file)
+                    headers["Authorization"] = f"Bearer {key}"
                 async with self._client.stream(
                     "POST",
                     self._url,
-                    headers={"Accept-Encoding": "identity"},
+                    headers=headers,
+                    follow_redirects=(
+                        False if self._key_file is not None else httpx.USE_CLIENT_DEFAULT
+                    ),
                     json={
                         "model": self._model.name,
                         "input": texts,
@@ -72,9 +92,19 @@ class HttpEmbedder:
                         if len(content) + len(chunk) > MAX_RESPONSE_BYTES:
                             raise _BatchTooLarge("embedding endpoint response exceeded size limit")
                         content.extend(chunk)
-        except (httpx.HTTPError, httpx.InvalidURL, TimeoutError) as exc:
-            raise EmbeddingError("embedding endpoint request failed") from exc
+        except httpx.HTTPError, httpx.InvalidURL, TimeoutError:
+            raise EmbeddingError("embedding endpoint request failed") from None
         return await asyncio.to_thread(self._decode_batch, content, len(texts))
+
+    @staticmethod
+    async def _read_key(path: Path) -> str:
+        try:
+            key = await read_secret_file(path)
+        except OSError, ValueError:
+            raise EmbeddingError("embedding key file could not be read") from None
+        if not key or not key.isascii() or not key.isprintable() or any(c.isspace() for c in key):
+            raise EmbeddingError("embedding key file is invalid")
+        return key
 
     def _decode_batch(self, content: bytearray, size: int) -> tuple[tuple[float, ...], ...]:
         try:
