@@ -6,12 +6,14 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx2
 from mcp.client.client import Client
@@ -23,19 +25,27 @@ import json, sqlite3, sys
 from contextlib import closing
 with closing(sqlite3.connect("file:/data/bridge-fixture.db?mode=ro", uri=True)) as db:
     if sys.argv[1] == "event":
-        print(db.execute("SELECT count(*) FROM events WHERE kind = ? AND upstream_id = ?",
-                         ("switchboard.message", sys.argv[2])).fetchone()[0])
+        rows = db.execute("SELECT lane_id FROM events WHERE kind = ? AND upstream_id = ?",
+                          ("switchboard.message", sys.argv[2]))
+        print(json.dumps([lane for (lane,) in rows]))
+    elif sys.argv[1] == "claude":
+        rows = db.execute("SELECT id, kind, lane_id FROM events WHERE source = ? ORDER BY seq",
+                          ("claude",))
+        print(json.dumps(list(rows)))
     elif sys.argv[1] == "decision":
         print(db.execute("SELECT count(*) FROM events WHERE kind = ? AND upstream_id = ?",
                          ("core.decide", sys.argv[2])).fetchone()[0])
     else:
-        row = db.execute("SELECT state FROM actions WHERE action_key = ?", (sys.argv[2],)).fetchone()
+        row = db.execute("SELECT state FROM actions WHERE action_key = ?",
+                         (sys.argv[2],)).fetchone()
         print(json.dumps(row[0] if row else None))
 """
 
 
 def run(command, payload=None, *, env=None):
-    return subprocess.check_output(command, input=payload, text=True, env=env, timeout=180)
+    return subprocess.check_output(  # noqa: S603 - fixture command arguments, no shell
+        command, input=payload, text=True, env=env, timeout=180
+    )
 
 
 def marker(state: Path, name: str) -> None:
@@ -55,11 +65,100 @@ async def connect(url: str, token: str):
         yield client
 
 
-async def tool(client, name, arguments):
-    response = await client.call_tool(name, arguments)
+async def tool(client, name, arguments, **options):
+    response = await client.call_tool(name, arguments, **options)
     result = json.loads(response.content[0].text)
     assert result.get("ok"), name
     return result["data"]
+
+
+async def verify_worker(url, operator, worker, database) -> None:
+    assert urlsplit(url).hostname == "127.0.0.1"
+    async with (
+        connect(url, operator) as client,
+        connect(url, operator) as observer,
+        connect(url, worker) as ingress,
+    ):
+        cursor = (await tool(client, "snapshot", {}))["cursor"]
+        watcher = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-I",
+            "-m",
+            "plotroom",
+            "watch",
+            "--url",
+            url,
+            "--cursor",
+            str(cursor),
+            env={"PLOTROOM_TOKEN": operator},
+            start_new_session=True,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        armed = asyncio.Event()
+
+        async def progress(_elapsed, _cap, _message=None):
+            armed.set()
+
+        # A 20-second wait first rechecks at 10 seconds. Require the result earlier.
+        immediate_deadline = asyncio.get_running_loop().time() + 8
+        wait = asyncio.create_task(
+            tool(observer, "wait", {"cursor": cursor, "timeout": 20}, progress_callback=progress)
+        )
+        try:
+            async with asyncio.timeout(15):
+                payload = {
+                    "kind": "claude.turn_report",
+                    "session_id": "compose-fixture-session",
+                    "body": "Compose worker report",
+                    "turn_index": 1,
+                }
+                async with asyncio.timeout_at(immediate_deadline):
+                    await armed.wait()
+                    assert not wait.done()
+                    assert watcher.returncode is None
+                    report = await tool(ingress, "ingest", payload)
+                    observed = await wait
+                event = report["event"]
+                assert report["created"] is True
+                assert await tool(ingress, "ingest", payload) == {"event": event, "created": False}
+
+                stdout, stderr = await watcher.communicate()
+                assert watcher.returncode == 0, stderr.decode()
+                assert json.loads(stdout) == observed
+                assert observed["cursor"] > cursor
+                item = observed["item"]
+                assert item["kind"] == "inbound_message"
+                assert item["context"]["kind"] == payload["kind"]
+                assert item["context"]["body"] == payload["body"]
+                assert item["context"]["lane_id"] == "fixture-lane"
+            assert (
+                await tool(client, "ack", {"item": item["id"], "request_id": "ack-worker-report"})
+            )["state"] == "closed"
+            message = await tool(
+                ingress,
+                "ingest",
+                {
+                    "kind": "claude.session_message",
+                    "session_id": "compose-fixture-session",
+                    "upstream_id": "synthetic-peer-message",
+                    "body": "Compose worker session message",
+                },
+            )
+            assert message["created"] is True
+            durable = await asyncio.to_thread(database, "claude", "")
+            assert json.loads(durable) == [
+                [event, "claude.turn_report", "fixture-lane"],
+                [message["event"], "claude.session_message", "fixture-lane"],
+            ]
+        finally:
+            wait.cancel()
+            if watcher.returncode is None:
+                with suppress(ProcessLookupError):
+                    os.killpg(watcher.pid, signal.SIGKILL)
+                async with asyncio.timeout(5):
+                    await watcher.communicate()
+            await asyncio.gather(wait, return_exceptions=True)
 
 
 async def check_project(url, operator, decision_id=None):
@@ -132,11 +231,16 @@ async def queue_trigger(url, operator):
 
 
 def smoke(root: Path, name: str, tag: str) -> None:
+    image_id = run(["docker", "image", "inspect", "--format", "{{.Id}}", f"plotroom:{tag}"]).strip()
     board = name + "-board"
     config = root / "plotroom.toml"
     config.write_text(
+        "wait_cap = 20\n[projects.bridge-fixture]\nwatchers = []\n"
         f'[projects.bridge-fixture.switchboard]\nboard = "{board}"\nvia_bridge = true\n'
+        "[projects.bridge-fixture.session_reader]\n"
+        'claude_home = "/fixture/unused-claude"\napp_support = "/fixture/unused-desktop"\n'
         '[projects.bridge-fixture.workers.fixture]\nswitchboard_address = "fixture-peer"\n'
+        'claude_session = "compose-fixture-session"\n'
     )
     config.chmod(0o644)
     overlay = root / "compose.json"
@@ -145,6 +249,7 @@ def smoke(root: Path, name: str, tag: str) -> None:
             {
                 "services": {
                     "plotroom": {
+                        "image": image_id,
                         "environment": {"PLOTROOM_CONFIG": "/fixture/plotroom.toml"},
                         "volumes": [f"{config}:/fixture/plotroom.toml:ro"],
                     }
@@ -170,6 +275,7 @@ def smoke(root: Path, name: str, tag: str) -> None:
     }
     volume = name + "_data"
     assert not run(["docker", "volume", "ls", "-q", "--filter", f"name=^{volume}$"]).strip()
+    assert not run(["docker", "network", "ls", "-q", "--filter", f"name=^{name}_default$"]).strip()
     assert not run(
         ["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={name}"]
     ).strip()
@@ -182,6 +288,8 @@ def smoke(root: Path, name: str, tag: str) -> None:
             "run",
             "--rm",
             "--no-deps",
+            "--pull",
+            "never",
             "-T",
             "plotroom",
             "token",
@@ -200,14 +308,16 @@ def smoke(root: Path, name: str, tag: str) -> None:
         return command("exec", "-T", "plotroom", "python", "-c", DB_QUERY, which, value).strip()
 
     try:
-        command("up", "--detach", "--wait", "--no-build")
+        command("up", "--detach", "--wait", "--no-build", "--pull", "never")
+        container = command("ps", "-q", "plotroom").strip()
+        assert container
+        assert run(["docker", "inspect", "--format", "{{.Image}}", container]).strip() == image_id
+        print(f"Compose fixture is running local image {image_id}.", flush=True)
         url = "http://" + command("port", "plotroom", "8765").strip() + "/mcp"
         operator, bridge_token = token("orchestrator"), token("bridge")
         decision_id = asyncio.run(check_project(url, operator))
-        container = command("ps", "-q", "plotroom").strip()
-        assert container
         command("restart", "plotroom")
-        command("up", "--detach", "--wait", "--no-build", "--no-recreate")
+        command("up", "--detach", "--wait", "--no-build", "--no-recreate", "--pull", "never")
         assert command("ps", "-q", "plotroom").strip() == container
         url = "http://" + command("port", "plotroom", "8765").strip() + "/mcp"
         asyncio.run(check_project(url, operator, decision_id))
@@ -215,6 +325,11 @@ def smoke(root: Path, name: str, tag: str) -> None:
         print("Compose restart passed: readiness, original bearer, and one durable event.")
 
         verify_bridge(root, board, url, operator, bridge_token, database)
+        asyncio.run(verify_worker(url, operator, token("worker:fixture"), database))
+        print(
+            "Compose worker passed: one durable report on replay, session message, "
+            "armed MCP wake, CLI cursor observation, and acknowledgment."
+        )
     finally:
         if run(["docker", "volume", "ls", "-q", "--filter", f"name=^{volume}$"]).strip():
             label = run(
@@ -228,7 +343,7 @@ def smoke(root: Path, name: str, tag: str) -> None:
                 ]
             ).strip()
             assert label == name
-            command("down", "--volumes")
+        command("down", "--volumes")
 
 
 def verify_bridge(
@@ -245,7 +360,7 @@ def verify_bridge(
         asyncio.run(seed(url, operator, board))
 
         def launch(mode):
-            bridge = subprocess.Popen(
+            bridge = subprocess.Popen(  # noqa: S603 - fixed Python entry point, no shell
                 [
                     sys.executable,
                     "-m",
@@ -274,7 +389,7 @@ def verify_bridge(
         assert (state / "registrations").read_text().splitlines() == ["registered"]
         (state / "offer").touch()
         marker(state, "interrupted")
-        assert database("event", f"{board}:7") == "1"
+        assert json.loads(database("event", f"{board}:7")) == ["fixture-lane"]
         assert not (state / "acked").exists()
         first.kill()
         first.wait(timeout=10)
@@ -282,7 +397,7 @@ def verify_bridge(
         launch("legacy")
         marker(state, "acked")
         assert (state / "acked").read_text() == "redelivered"
-        assert database("event", f"{board}:7") == "1"
+        assert json.loads(database("event", f"{board}:7")) == ["fixture-lane"]
         time.sleep(6)
         assert (state / "registrations").read_text().splitlines() == ["registered", "registered"]
         asyncio.run(queue_trigger(url, operator))
@@ -301,7 +416,8 @@ def verify_bridge(
             "body": "hosted fixture send",
         }
         print(
-            "Bridge smoke passed: durable commit before ack, one inbound event on redelivery, and one leased outbound send."
+            "Bridge smoke passed: durable commit before ack, one inbound event on redelivery, "
+            "and one leased outbound send."
         )
     finally:
         for process in processes:
