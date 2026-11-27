@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import hashlib
 import json
+import os
 import re
+import stat
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
@@ -14,11 +19,14 @@ from pathlib import Path
 
 import httpx
 from deploy.epic_two_archived import (
+    MAX_RESPONSE,
     REPO,
     ArchiveReadError,
     PipeReader,
     ProviderReads,
     Reader,
+    ReadTransport,
+    Response,
     compose_witness,
 )
 
@@ -83,6 +91,58 @@ ISSUE_PAGE = "state=all&per_page=100&page=1"
 RELATION_PAGE = "per_page=100&page=1"
 RELATIONS = ("sub_issues", "dependencies/blocked_by")
 REFINED_METADATA = re.compile(r"\A```yaml[ \t]*\r?\n(.*?)^```[ \t]*\r?$", re.M | re.S)
+PUBLISHED_MILESTONE = 1
+PUBLISHED_EPIC = 6
+PUBLISHED_CHILD = 7
+PUBLISHED_BODY = "f9230748bc5b9a321a751c9a93a7b5ea9adbbe75684c29042f24d13d57e3bffc"
+MAX_TOKEN_BYTES = 4096
+
+
+def _read_token_file(path: Path) -> str:
+    try:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as file:
+            info = os.fstat(file.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
+                raise ArchiveReadError("the GitHub fixture token file must be private and owned")
+            raw = file.read(MAX_TOKEN_BYTES + 1)
+            token = raw.decode("ascii").strip()
+    except OSError, UnicodeError:
+        raise ArchiveReadError("cannot read the GitHub fixture token file") from None
+    if len(raw) > MAX_TOKEN_BYTES or not re.fullmatch(r"[!-~]+", token):
+        raise ArchiveReadError("the GitHub fixture token file is empty or invalid")
+    return token
+
+
+def _file_backed_read(
+    client: httpx.Client, token_file: Path, method: str, endpoint: str, body: bytes
+) -> tuple[int, Response]:
+    # ProviderReads applies the fixture-specific allowlist before calling this
+    # transport. Keep a separate fixed-origin GET guard around the credential.
+    root = f"repos/{REPO}"
+    if method != "GET" or body or not (endpoint == root or endpoint.startswith(root + "/")):
+        raise ArchiveReadError("the published fixture credential permits scoped GET requests only")
+    headers = {
+        "Authorization": f"Bearer {_read_token_file(token_file)}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2026-03-10",
+    }
+    deadline = time.monotonic() + 9
+    try:
+        with client.stream(
+            "GET", f"{GITHUB_API}/{endpoint}", headers=headers, follow_redirects=False
+        ) as response:
+            if response.status_code != 200:
+                return response.status_code, ({}, b"")
+            payload = bytearray()
+            for chunk in response.iter_bytes(65536):
+                if time.monotonic() > deadline:
+                    raise ArchiveReadError("GitHub fixture read exceeded the time bound")
+                payload.extend(chunk)
+                if len(payload) > MAX_RESPONSE:
+                    raise ArchiveReadError("GitHub fixture response exceeded the byte bound")
+            return response.status_code, (dict(response.headers), bytes(payload))
+    except httpx.HTTPError:
+        raise ArchiveReadError("GitHub fixture HTTPS read failed") from None
 
 
 def tree_scope(method: str, path: str, body: bytes) -> str:
@@ -124,9 +184,12 @@ async def tree_witness(read: Reader) -> tuple[WorkItem, ...]:
 
 
 class IssueScope:
-    def __init__(self, milestone: int, child: int) -> None:
+    def __init__(self, milestone: int, child: int, *, published: bool = False) -> None:
         if not all(type(value) is int and 0 < value < 2**63 for value in (milestone, child)):
             raise ValueError("milestone and child must be positive GitHub numbers")
+        if published and (milestone, child) != (PUBLISHED_MILESTONE, PUBLISHED_CHILD):
+            raise ValueError("the published fixture requires its fixed milestone and child")
+        self.published = published
         self.milestone_path = f"{PREFIX}/milestones/{milestone}"
         self.child_path = f"{PREFIX}/issues/{child}"
         self.page_path = f"{PREFIX}/issues?milestone={milestone}&{ISSUE_PAGE}"
@@ -183,6 +246,8 @@ async def issues_witness(read: Reader, scope: IssueScope, milestone: int, child:
     native_milestone = obj(json.loads(milestone_bytes))
     if (native_milestone.get("number"), native_milestone.get("state")) != (milestone, "open"):
         raise ArchiveReadError("the supplied fixture milestone is not open")
+    if scope.published and native_milestone.get("title") != "Plotroom #46 row 6 fixture":
+        raise ArchiveReadError("the published fixture milestone title differs")
 
     _, child_bytes = await fetch(scope.child_path)
     native_child = obj(json.loads(child_bytes))
@@ -196,6 +261,13 @@ async def issues_witness(read: Reader, scope: IssueScope, milestone: int, child:
         or not re.search(r"^refined:[ \t]*true[ \t]*\r?$", metadata[1], re.M)
     ):
         raise ArchiveReadError("the supplied fixture child is not an open refined backlog story")
+    if scope.published and (
+        native_child.get("title") != "Row 6 fixture story"
+        or native_child.get("milestone") is not None
+        or {label.get("name") for label in rows(native_child["labels"])} != {"story", "backlog"}
+        or hashlib.sha256(body.encode("utf-8")).hexdigest() != PUBLISHED_BODY
+    ):
+        raise ArchiveReadError("the published fixture story metadata or body differs")
 
     headers, page = await fetch(scope.page_path)
     issues = rows(json.loads(page))
@@ -218,6 +290,12 @@ async def issues_witness(read: Reader, scope: IssueScope, milestone: int, child:
     parent = parents[0].get("number")
     if type(parent) is not int or not 0 < parent < 2**63:
         raise ArchiveReadError("the fixture epic number is invalid")
+    if scope.published and (
+        parent != PUBLISHED_EPIC
+        or parents[0].get("title") != "Row 6 fixture epic"
+        or {label.get("name") for label in rows(parents[0]["labels"])} != {"epic", "backlog"}
+    ):
+        raise ArchiveReadError("the published fixture epic differs")
     if matched_children and (
         native_child.get("milestone") is None
         or issue_identity(matched_children[0]) != issue_identity(native_child)
@@ -338,16 +416,30 @@ async def compose_mirrors(
 
 
 async def work_item_mirrors(
-    tag: str, milestone: int | None, child: int | None, report: Callable[[str], None]
+    tag: str,
+    milestone: int | None,
+    child: int | None,
+    report: Callable[[str], None],
+    *,
+    transport: ReadTransport | None = None,
+    published: bool = False,
 ) -> bool:
-    scope = IssueScope(milestone, child) if milestone is not None and child is not None else None
+    if published and (milestone is None or child is None or transport is None):
+        raise ArchiveReadError(
+            "the published witness requires the fixed fixture and token transport"
+        )
+    scope = (
+        IssueScope(milestone, child, published=published)
+        if milestone is not None and child is not None
+        else None
+    )
 
     def scoped_endpoint(method: str, path: str, body: bytes) -> str:
         if path in TREE_READS or scope is None:
             return tree_scope(method, path, body)
         return scope.endpoint(method, path, body)
 
-    provider = ProviderReads(scoped_endpoint)
+    provider = ProviderReads(scoped_endpoint, transport=transport)
     await asyncio.to_thread(provider.preflight_public)
     local = await mirror_results(provider.read, milestone, child, scope)
     report("Local repo-store mirror PASS — 1.1 Fixture ticket, then 1.2 Fixture follow-up.")
@@ -368,6 +460,24 @@ async def work_item_mirrors(
     return scope is not None
 
 
+async def verify_published(tag: str, token_file: Path, report: Callable[[str], None]) -> None:
+    # Reject unusable credentials before running any Docker command. The host
+    # transport reads the private file itself, so no child receives the token.
+    await asyncio.to_thread(_read_token_file, token_file)
+    with httpx.Client(timeout=9, follow_redirects=False, trust_env=False) as client:
+        matched = await work_item_mirrors(
+            tag,
+            PUBLISHED_MILESTONE,
+            PUBLISHED_CHILD,
+            report,
+            transport=partial(_file_backed_read, client, token_file),
+            published=True,
+        )
+    if not matched:
+        raise ArchiveReadError("the host and Compose did not match the published fixture")
+    report("Published row 6 credential-backed witness PASS. Full #46 acceptance remains pending.")
+
+
 async def _replay_child(arguments: list[str]) -> dict[str, object]:
     if not __debug__:
         raise RuntimeError("the work-item mirror witness requires Python assertions")
@@ -377,5 +487,27 @@ async def _replay_child(arguments: list[str]) -> dict[str, object]:
     return await mirror_results(PipeReader().read, milestone, child, IssueScope(milestone, child))
 
 
+def _main(arguments: list[str]) -> int:
+    if not any(argument.startswith("--") for argument in arguments):
+        print(json.dumps({"result": asyncio.run(_replay_child(arguments))}), flush=True)
+        return 0
+    parser = argparse.ArgumentParser(description="Verify the published GitHub row 6 fixture.")
+    parser.add_argument("--verify-published", action="store_true", required=True)
+    parser.add_argument("--image-tag", required=True)
+    parser.add_argument("--token-file", type=Path, required=True)
+    args = parser.parse_args(arguments)
+    if not __debug__:
+        raise RuntimeError("the work-item mirror witness requires Python assertions")
+    try:
+        asyncio.run(verify_published(args.image_tag, args.token_file, print))
+    except ArchiveReadError as error:
+        print(f"Published row 6 witness failed: {error}", file=sys.stderr)
+        return 1
+    except Exception:
+        print("Published row 6 witness failed before completing verification.", file=sys.stderr)
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    print(json.dumps({"result": asyncio.run(_replay_child(sys.argv[1:]))}), flush=True)
+    raise SystemExit(_main(sys.argv[1:]))

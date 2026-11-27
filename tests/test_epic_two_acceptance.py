@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib
 import json
 import subprocess
@@ -707,3 +708,175 @@ async def test_native_mirror_reads_only_the_pinned_milestone_and_relationships(
     assert (ready.ref, ready.title) == ("25", "Fixture issue")
     assert set(calls) == set(values)
     assert len(calls) == len(values)
+
+
+@pytest.mark.parametrize("mode", ["missing", "public", "symlink", "empty", "whitespace"])
+async def test_published_mirror_requires_an_owned_private_token_file(
+    acceptance: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    mirror: Any = importlib.import_module(acceptance.work_item_mirrors.__module__)
+    path = tmp_path / "credential"
+    if mode == "symlink":
+        real = tmp_path / "real"
+        real.write_text("synthetic-pat\n", encoding="utf-8")
+        real.chmod(0o600)
+        path.symlink_to(real)
+    elif mode != "missing":
+        value = {"empty": "\n", "whitespace": "synthetic pat\n"}.get(mode, "synthetic-pat\n")
+        path.write_text(value, encoding="utf-8")
+        path.chmod(0o644 if mode == "public" else 0o600)
+
+    async def never_launch(*_args: object, **_kwargs: object) -> bool:
+        pytest.fail("an invalid credential must not launch a witness")
+
+    monkeypatch.setattr(mirror, "work_item_mirrors", never_launch)
+    with pytest.raises(RuntimeError, match="token file"):
+        await mirror.verify_published("fixture", path, print)
+
+
+def test_file_backed_read_does_not_follow_redirect_or_send_unscoped_token(
+    acceptance: Any, tmp_path: Path
+) -> None:
+    mirror: Any = importlib.import_module(acceptance.work_item_mirrors.__module__)
+    path = tmp_path / "credential"
+    path.write_text("unit-test-pat\n", encoding="utf-8")
+    path.chmod(0o600)
+    calls: list[str] = []
+
+    def redirect(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        assert request.headers["Authorization"] == "Bearer unit-test-pat"
+        return httpx.Response(302, headers={"location": "https://example.com/credential-target"})
+
+    endpoint = "repos/mgd43b/plotroom-test"
+    with httpx.Client(transport=httpx.MockTransport(redirect), follow_redirects=True) as client:
+        assert mirror._file_backed_read(client, path, "GET", endpoint, b"") == (302, ({}, b""))
+        for method, target in (("POST", endpoint), ("GET", "repos/other/repo")):
+            with pytest.raises(RuntimeError, match="scoped GET"):
+                mirror._file_backed_read(client, path, method, target, b"")
+    assert calls == ["https://api.github.com/" + endpoint]
+
+
+@pytest.mark.parametrize("fault", [None, "denied", "body-drift", "epic-drift", "replay-drift"])
+async def test_published_mirror_captures_auth_reads_and_replays_without_credentials(
+    acceptance: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str | None,
+) -> None:
+    mirror: Any = importlib.import_module(acceptance.work_item_mirrors.__module__)
+    archive: Any = importlib.import_module(acceptance.archived_checks.__module__)
+    path = tmp_path / "credential"
+    path.write_text("unit-test-pat\n", encoding="utf-8")
+    path.chmod(0o600)
+    repo = "/repos/mgd43b/plotroom-test"
+    native_body = "```yaml\r\ntype: story\r\nrefined: true\r\n```\r\n\r\nSynthetic 📌\r\n"
+    monkeypatch.setattr(mirror, "PUBLISHED_BODY", hashlib.sha256(native_body.encode()).hexdigest())
+    now = "2026-11-27T19:00:00Z"
+    epic = {
+        "number": 8 if fault == "epic-drift" else 6,
+        "title": "Row 6 fixture epic",
+        "state": "open",
+        "body": "",
+        "milestone": {"number": 1},
+        "labels": [{"name": "epic"}, {"name": "backlog"}],
+        "assignees": [],
+        "updated_at": now,
+    }
+    child = {
+        "number": 7,
+        "title": "Row 6 fixture story",
+        "state": "open",
+        "body": native_body.replace("\r\n", "\n") if fault == "body-drift" else native_body,
+        "milestone": None,
+        "labels": [{"name": "story"}, {"name": "backlog"}],
+        "assignees": [],
+        "updated_at": now,
+    }
+    relation = f"{repo}/issues/6/sub_issues?per_page=100&page=1"
+    data = {
+        repo: {"full_name": "mgd43b/plotroom-test", "visibility": "public", "private": False},
+        f"{repo}/branches/main": {},
+        f"{repo}/milestones/1": {
+            "number": 1,
+            "state": "open",
+            "title": "Plotroom #46 row 6 fixture",
+        },
+        f"{repo}/issues/7": child,
+        f"{repo}/issues?milestone=1&state=all&per_page=100&page=1": [epic],
+        relation: [{"number": 7, "repository_url": f"https://api.github.com{repo}"}],
+        f"{repo}/issues/7/sub_issues?per_page=100&page=1": [],
+        f"{repo}/issues/6/dependencies/blocked_by?per_page=100&page=1": [],
+        f"{repo}/issues/7/dependencies/blocked_by?per_page=100&page=1": [],
+    }
+    calls: list[str] = []
+    reports: list[str] = []
+    compose_calls: list[tuple[int, int]] = []
+
+    def read(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.host == "api.github.com"
+        assert request.headers["Authorization"] == "Bearer unit-test-pat"
+        target = request.url.raw_path.decode()
+        calls.append(target)
+        if target == relation and fault == "denied":
+            return httpx.Response(403, json={"message": "unit-test-pat"})
+        return httpx.Response(
+            200, json=data[target], headers={"authorization": "never-replay-this"}
+        )
+
+    real_client = httpx.Client
+
+    def client(**options: Any) -> httpx.Client:
+        assert options == {"timeout": 9, "follow_redirects": False, "trust_env": False}
+        return real_client(transport=httpx.MockTransport(read), **options)
+
+    async def tree(reader: Callable[[str, str, bytes], tuple[dict[str, str], bytes]]) -> object:
+        headers, _ = reader("GET", f"{repo}/branches/main", b"")
+        assert not headers
+        return mirror.EXPECTED_TREE
+
+    async def compose(
+        tag: str,
+        reader: Callable[[str, str, bytes], tuple[dict[str, str], bytes]],
+        milestone: int,
+        issue: int,
+    ) -> dict[str, object]:
+        assert tag == "fixture"
+        compose_calls.append((milestone, issue))
+        before = calls[:]
+        observed: dict[str, object] = await mirror.mirror_results(
+            reader, milestone, issue, mirror.IssueScope(milestone, issue)
+        )
+        assert calls == before
+        if fault == "replay-drift":
+            observed["issues"] = None
+        return observed
+
+    def never_use_gh(*_args: object) -> tuple[bytes, int]:
+        pytest.fail("the published witness must not use the gh auth session")
+
+    monkeypatch.setattr(mirror.httpx, "Client", client)
+    monkeypatch.setattr(mirror, "tree_witness", tree)
+    monkeypatch.setattr(mirror, "compose_mirrors", compose)
+    monkeypatch.setattr(archive, "_read_gh", never_use_gh)
+    if fault is None:
+        await mirror.verify_published("fixture", path, reports.append)
+        assert compose_calls == [(1, 7)]
+        assert set(calls) == set(data)
+        assert any("credential-backed witness PASS" in report for report in reports)
+    else:
+        message = {
+            "body-drift": "story metadata or body differs",
+            "epic-drift": "published fixture epic differs",
+            "replay-drift": "Compose work-item mirrors differed",
+        }.get(fault)
+        with pytest.raises(RuntimeError, match=message) as error:
+            await mirror.verify_published("fixture", path, reports.append)
+        if fault == "denied":
+            assert str(error.value) == "GitHub fixture read returned HTTP 403"
+        assert compose_calls == ([(1, 7)] if fault == "replay-drift" else [])
+        assert not any("credential-backed witness PASS" in report for report in reports)
+        assert not any("unit-test-pat" in report for report in reports)
+        if fault in {"body-drift", "epic-drift"}:
+            assert not any("sub_issues" in endpoint for endpoint in calls)

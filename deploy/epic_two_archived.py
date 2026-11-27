@@ -60,6 +60,7 @@ REST_RESOURCE = re.compile(
 )
 Response = tuple[dict[str, str], bytes]
 Reader = Callable[[str, str, bytes], Response]
+ReadTransport = Callable[[str, str, bytes], tuple[int, Response]]
 
 
 class ArchiveReadError(RuntimeError):
@@ -151,9 +152,51 @@ def _read_gh(command: list[str], body: bytes) -> tuple[bytes, int]:
                         child.kill()
 
 
+def _gh_transport(method: str, endpoint: str, body: bytes) -> tuple[int, Response]:
+    command = [
+        "gh",
+        "api",
+        "--include",
+        "--hostname",
+        "github.com",
+        "--method",
+        method,
+        "-H",
+        "X-GitHub-Api-Version: 2026-03-10",
+        endpoint,
+    ]
+    if method == "POST":
+        command += ["--input", "-"]
+    stdout, returncode = _read_gh(command, body)
+    parts = re.split(rb"\r?\n\r?\n", stdout, maxsplit=1)
+    lines = parts[0].splitlines()
+    if not lines or not (status := re.match(rb"HTTP/[0-9.]+ (\d{3})", lines[0])):
+        raise ArchiveReadError("gh did not return a GitHub fixture HTTP response")
+    code = int(status[1])
+    if returncode and code == 200:
+        raise ArchiveReadError("gh exited unsuccessfully while reading a fixture")
+    if code != 200:
+        return code, ({}, b"")
+    if len(parts) != 2:
+        raise ArchiveReadError("gh did not return a GitHub fixture response body")
+    headers = {}
+    for line in lines[1:]:
+        name, _, value = line.partition(b":")
+        key = name.decode("ascii").lower()
+        if key in SAFE_HEADERS:
+            headers[key] = value.decode("ascii").strip()
+    return code, (headers, parts[1])
+
+
 class ProviderReads:
-    def __init__(self, scope: Callable[[str, str, bytes], str] = _scoped_endpoint) -> None:
+    def __init__(
+        self,
+        scope: Callable[[str, str, bytes], str] = _scoped_endpoint,
+        *,
+        transport: ReadTransport | None = None,
+    ) -> None:
         self._scope = scope
+        self._transport = _gh_transport if transport is None else transport
         self._cache: dict[tuple[str, str, bytes], Response] = {}
         self.live = 0
         self.reused = 0
@@ -200,46 +243,24 @@ class ProviderReads:
             if self.live >= MAX_READS or time.monotonic() >= self._deadline:
                 raise ArchiveReadError("GitHub fixture read budget exhausted")
             self.live += 1
-            command = [
-                "gh",
-                "api",
-                "--include",
-                "--hostname",
-                "github.com",
-                "--method",
-                method,
-                "-H",
-                "X-GitHub-Api-Version: 2026-03-10",
-                endpoint,
-            ]
-            if method == "POST":
-                command += ["--input", "-"]
-            stdout, returncode = _read_gh(command, body)
-            parts = re.split(rb"\r?\n\r?\n", stdout, maxsplit=1)
-            lines = parts[0].splitlines()
-            if not lines or not (status := re.match(rb"HTTP/[0-9.]+ (\d{3})", lines[0])):
-                raise ArchiveReadError("gh did not return a GitHub fixture HTTP response")
-            code = int(status[1])
-            if code != 200 or returncode:
+            code, (headers, payload) = self._transport(method, endpoint, body)
+            if code != 200:
                 if code in (403, 429):
                     self._deadline = 0
                 raise ArchiveReadError(f"GitHub fixture read returned HTTP {code}")
-            if (
-                len(parts) != 2
-                or len(parts[1]) > MAX_RESPONSE
-                or self._bytes + len(parts[1]) > MAX_CAPTURE
-            ):
+            if len(payload) > MAX_RESPONSE or self._bytes + len(payload) > MAX_CAPTURE:
                 raise ArchiveReadError("GitHub fixture capture exceeded the configured byte bound")
-            json.loads(parts[1])
-            headers = {}
-            for line in lines[1:]:
-                name, _, value = line.partition(b":")
-                key_name = name.decode("ascii").lower()
-                if key_name in SAFE_HEADERS:
-                    headers[key_name] = value.decode("ascii").strip()
-            response = headers, parts[1]
+            json.loads(payload)
+            response = (
+                {
+                    name.lower(): value
+                    for name, value in headers.items()
+                    if name.lower() in SAFE_HEADERS
+                },
+                payload,
+            )
             self._cache[key] = response
-            self._bytes += len(parts[1])
+            self._bytes += len(payload)
             return response
 
     def replay(self, method: str, path: str, body: bytes) -> Response:
