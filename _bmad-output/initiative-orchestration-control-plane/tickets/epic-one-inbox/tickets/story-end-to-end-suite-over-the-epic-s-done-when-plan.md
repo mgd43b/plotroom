@@ -155,5 +155,9 @@ and fail-closed pagination coverage. Synthetic native cases exercised the produc
 fetchers, the committed SQLite projection and the Issues source. They verified inherited
 milestone membership and verbatim UTF-8/CRLF body round-tripping. The scoped tests reject
 unrefined stories, extra or foreign records, inconsistent reads, and later pages without
-making an out-of-scope call. Locked 3.14 and 3.15 each passed 56 focused tests. Ruff,
+making an out-of-scope call. Locked 3.14 and 3.15 each passed 57 focused tests. Ruff,
 Pyright, and whitespace checks passed.
+
+Automatic opening review on PR #226 strengthened the regressions. A valid ID pair is
+rejected without the mirror opt-in, an expressly provided unavailable milestone reports a
+failed check, and a body differing only by CRLF versus LF is rejected by the verbatim check.

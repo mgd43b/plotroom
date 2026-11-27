@@ -316,6 +316,7 @@ async def test_archive_loopback_requires_the_disposable_marker(acceptance: Any) 
     "args",
     [
         ["--milestone", "2"],
+        ["--milestone", "2", "--child", "4"],
         ["--work-item-mirrors", "--milestone", "2"],
         ["--work-item-mirrors", "--milestone", "0", "--child", "4"],
         ["--work-item-mirrors", "--synthetic"],
@@ -351,9 +352,9 @@ def test_row_six_mirror_observations_do_not_pass_full_acceptance(
     monkeypatch.setattr(acceptance, "local_checks", lambda: None)
     monkeypatch.setattr(acceptance, "compose_checks", compose)
     monkeypatch.setattr(acceptance, "work_item_mirrors", mirror)
-    numbers = ["--milestone", "6", "--child", "25"] if complete else []
+    numbers = ["--milestone", "6", "--child", "25"] if complete is not False else []
     assert acceptance.main(["--image-tag", "fixture", "--work-item-mirrors", *numbers]) == 1
-    assert seen == ([(6, 25)] if complete else [(None, None)])
+    assert seen == ([(6, 25)] if complete is not False else [(None, None)])
     captured = capsys.readouterr()
     output = captured.out
     row_six = output.split("\n6. ", 1)[1].split("\n7. ", 1)[0]
@@ -442,7 +443,7 @@ async def test_native_mirror_reads_only_the_pinned_milestone_and_relationships(
     listed = [parent]
     if fault != "inherited":
         listed.append(
-            {**child, "body": native_body + "changed"} if fault == "wrong-body" else child
+            {**child, "body": native_body.replace("\r\n", "\n")} if fault == "wrong-body" else child
         )
     if fault == "child-drift":
         child = {**child, "labels": [*child["labels"], {"name": "in-progress"}]}
@@ -490,7 +491,8 @@ async def test_native_mirror_reads_only_the_pinned_milestone_and_relationships(
         with pytest.raises(RuntimeError, match="outside"):
             scope.endpoint("GET", outside, b"")
     if fault is not None and fault != "inherited":
-        with pytest.raises(RuntimeError):
+        mismatch = "body differs from its native GitHub body" if fault == "wrong-body" else None
+        with pytest.raises(RuntimeError, match=mismatch):
             await mirror.issues_witness(reader, scope, 6, 25)
         if fault in {
             "closed",
