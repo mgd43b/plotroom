@@ -50,6 +50,7 @@ from plotroom.core.github import (
     PullRequest,
     apply_ask_comment_history,
     apply_comments,
+    apply_merge_sha_backfill,
 )
 from plotroom.core.github_projection import (
     ASK_COMMENT_HISTORY,
@@ -92,6 +93,8 @@ from plotroom.ports.clock import Clock
 log = logging.getLogger("plotroom.github")
 MAX_NEW_COMPARISONS = 4
 MAX_ASK_HISTORIES = 4
+MAX_MERGE_SHA_READS = 2
+MERGE_SHA_READ_TIMEOUT = 3
 _READ_ERRORS = (
     GitHubUnavailable,
     httpx.RequestError,
@@ -234,6 +237,7 @@ class GitHubDetailPoller:
         try:
             token = await self.credential.token()
             await self._poll_resources(client, token)
+            await self._backfill_merge_shas(client, token)
         except GitHubRateLimited as exc:
             await self.record_rate_limit(exc)
         except GitHubUnavailable:
@@ -244,6 +248,33 @@ class GitHubDetailPoller:
                 await self.ledger.run(
                     "system", lambda uow: uow.save_fetch_retry(repository, DETAILS, None)
                 )
+
+    async def _backfill_merge_shas(self, client: httpx.AsyncClient, token: str) -> None:
+        as_of = format_time(self.clock.now())
+        pending = await self.ledger.github_pending_merge_shas(
+            self.api.repository, as_of, MAX_MERGE_SHA_READS
+        )
+        for pull in pending:
+            sha = None
+            rate_limit = None
+            try:
+                async with asyncio.timeout(MERGE_SHA_READ_TIMEOUT):
+                    sha = await self.api.pull_merge_sha(client, token, pull)
+            except GitHubRateLimited as exc:
+                rate_limit = exc
+            except (*_READ_ERRORS, TimeoutError, RecursionError):
+                pass  # Optional evidence remains pending, with no provider payload in logs.
+            await self.ledger.run(
+                "system",
+                partial(
+                    apply_merge_sha_backfill,
+                    target=pull,
+                    merge_sha=sha,
+                    as_of=as_of,
+                ),
+            )
+            if rate_limit is not None:
+                raise rate_limit
 
     async def _poll_resources(self, client: httpx.AsyncClient, token: str) -> None:
         api = self.api

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -16,7 +15,14 @@ import httpx
 
 from plotroom._secret_file import read_secret_file
 from plotroom.core.events import format_time
-from plotroom.core.github import DETAILS, PULL_REQUESTS, FetchRetry, ObservedPull, apply_pull_poll
+from plotroom.core.github import (
+    DETAILS,
+    PULL_REQUESTS,
+    FetchRetry,
+    ObservedPull,
+    apply_pull_poll,
+    valid_git_sha,
+)
 from plotroom.core.ledger import Ledger
 from plotroom.ports.clock import Clock
 
@@ -185,11 +191,7 @@ def _pull(value: Any) -> ObservedPull:
     if draft is not None and type(draft) is not bool:
         raise ValueError("invalid pull request draft state")
     merge_sha = row.get("merge_commit_sha")
-    if (
-        merged_at is not None
-        and merge_sha is not None
-        and (not isinstance(merge_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", merge_sha))
-    ):
+    if merged_at is not None and merge_sha is not None and not valid_git_sha(merge_sha):
         raise ValueError("invalid merge commit SHA")
     return ObservedPull(
         number,

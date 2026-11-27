@@ -224,7 +224,12 @@ class Ledger:
         if (
             self._live_merge_controller
             and self.github_repository is not None
-            and (uow.all_merge_pulls or uow.merge_pull_numbers or uow.merge_check_heads)
+            and (
+                uow.all_merge_pulls
+                or uow.merge_pull_numbers
+                or uow.merge_check_heads
+                or uow.merge_observations
+            )
         ):
             clerk = await self._merge_clerk() if self._merge_clerk is not None else False
             await reconcile_merge_controller(
@@ -666,6 +671,11 @@ class Ledger:
 
     async def github_pull_targets(self, repository: str) -> tuple[PullRequest, ...]:
         return await self._store.github_pull_targets(repository)
+
+    async def github_pending_merge_shas(
+        self, repository: str, as_of: str, limit: int
+    ) -> tuple[PullRequest, ...]:
+        return await self._store.github_pending_merge_shas(repository, as_of, limit)
 
     async def fetch_cursor(self, repository: str, resource: str) -> FetchCursor | None:
         return await self._store.fetch_cursor(repository, resource)

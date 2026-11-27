@@ -262,7 +262,9 @@ class UnitOfWork:
     async def save_merge_verdict(self, repository: str, number: int, seq: int) -> None:
         await self._tx.save_merge_verdict(repository, number, seq)
 
-    async def save_pull_request(self, pull: PullRequest, *, historical: bool = False) -> None:
+    async def save_pull_request(
+        self, pull: PullRequest, *, historical: bool = False, merge_sha_only: bool = False
+    ) -> None:
         if pull.complete and pull.state == "merged" and not historical:
             prior = await self._tx.pull_request(pull.repository, pull.number)
             transition = prior is None or prior.state != "merged"
@@ -271,8 +273,9 @@ class UnitOfWork:
             ):
                 self.merge_observations[pull.number] = (pull, transition)
         await self._tx.save_pull_request(pull)
-        self.merge_pull_numbers.add(pull.number)
-        self.all_merge_pulls = True  # branch membership may change the first PR on a lane
+        if not merge_sha_only:
+            self.merge_pull_numbers.add(pull.number)
+            self.all_merge_pulls = True  # branch membership may change the first PR on a lane
 
     async def github_resource(
         self, repository: str, resource: str, scope: str = ""

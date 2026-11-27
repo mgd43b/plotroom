@@ -2,11 +2,13 @@
 
 import json
 from collections.abc import AsyncIterator, Mapping
+from datetime import datetime
 from typing import Any, cast
 
 import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable, is_rate_limited
+from plotroom.core.github import PullRequest, valid_git_sha
 
 type Row = dict[str, Any]
 MAX_PAGES = 30
@@ -39,6 +41,19 @@ def number(value: Any) -> int:
     if type(value) is not int or not 0 < value <= 2**63 - 1:
         raise ValueError("expected a positive integer")
     return value
+
+
+def _merged_at(value: Any) -> bool:
+    return datetime.fromisoformat(string(value)).utcoffset() is not None
+
+
+def _merge_oid(value: Any) -> str | None:
+    if value is None:
+        return None
+    oid = string(value)
+    if not valid_git_sha(oid):
+        raise ValueError("invalid merge OID")
+    return oid
 
 
 class GitHubNotFound(GitHubUnavailable):
@@ -280,6 +295,62 @@ class GitHubReadClient:
             prior = observed if verify_boundaries else None
         raise GitHubUnavailable("GitHub read exceeded the page limit")
 
+    async def pull_merge_sha(
+        self, client: httpx.AsyncClient, token: str, pull: PullRequest
+    ) -> str | None:
+        repository = self.repository.lower()
+        if pull.repository.lower() != repository or not valid_git_sha(pull.head_sha):
+            return None
+        owner, name = self.repository.split("/")
+        result, response = await self._read(
+            client,
+            token,
+            f"{self.api_url}/graphql",
+            query={
+                "query": PULL_MERGE_SHA_QUERY,
+                "variables": {"owner": owner, "name": name, "number": number(pull.number)},
+            },
+        )
+        document = obj(result)
+        if "errors" in document and (errors := rows(document["errors"])):
+            if response.headers.get("X-RateLimit-Remaining") == "0" or any(
+                error.get("type") == "RATE_LIMITED"
+                or (
+                    isinstance(message := error.get("message"), str)
+                    and "rate limit" in message.lower()
+                )
+                for error in errors
+            ):
+                raise GitHubRateLimited(response.headers)
+            return None
+        base = obj(obj(document["data"])["repository"])
+        current = obj(base["pullRequest"])
+        if (
+            string(base["nameWithOwner"]).lower() != repository
+            or string(obj(current["repository"])["nameWithOwner"]).lower() != repository
+            or number(current["number"]) != pull.number
+            or current["merged"] is not True
+            or current["state"] != "MERGED"
+            or not _merged_at(current["mergedAt"])
+            or string(current["headRefOid"]) != pull.head_sha
+        ):
+            return None
+        commit = current["mergeCommit"]
+        if commit is not None:
+            return _merge_oid(string(obj(commit)["oid"]))
+
+        detail = obj(await self.get(client, token, f"/pulls/{pull.number}"))
+        if (
+            number(detail["number"]) != pull.number
+            or detail["merged"] is not True
+            or detail["state"] != "closed"
+            or not _merged_at(detail["merged_at"])
+            or string(obj(obj(detail["base"])["repo"])["full_name"]).lower() != repository
+            or string(obj(detail["head"])["sha"]) != pull.head_sha
+        ):
+            return None
+        return _merge_oid(detail["merge_commit_sha"])
+
     async def review_threads(
         self, client: httpx.AsyncClient, token: str, pull: int, head_sha: str
     ) -> AsyncIterator[Row]:
@@ -332,6 +403,24 @@ class GitHubReadClient:
                 raise GitHubUnavailable("GitHub returned invalid review thread pagination")
             cursors.add(cursor)
         raise GitHubUnavailable("GitHub review threads exceeded the page limit")
+
+
+PULL_MERGE_SHA_QUERY = """
+query PullMergeSha($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    pullRequest(number: $number) {
+      repository { nameWithOwner }
+      number
+      merged
+      state
+      mergedAt
+      headRefOid
+      mergeCommit { oid }
+    }
+  }
+}
+"""
 
 
 REVIEW_THREADS_QUERY = """

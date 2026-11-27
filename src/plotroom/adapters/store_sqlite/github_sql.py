@@ -8,7 +8,14 @@ from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from plotroom.core.github import PULL_REQUESTS, FetchCursor, FetchRetry, GitHubSummary, PullRequest
+from plotroom.core.github import (
+    MERGE_SHA_ATTEMPT_PREFIX,
+    PULL_REQUESTS,
+    FetchCursor,
+    FetchRetry,
+    GitHubSummary,
+    PullRequest,
+)
 from plotroom.core.github_projection import GitHubRecord, GitHubResource
 from plotroom.core.lanes import Lane, with_projected_pr
 
@@ -212,6 +219,16 @@ PULL_TARGETS = text("""
     ORDER BY COALESCE(cursor.as_of, ''), pr.updated_at DESC, pr.number
     LIMIT 8
 """)
+PENDING_MERGE_SHAS = text("""
+    SELECT pr.* FROM github_pull_requests AS pr
+    LEFT JOIN github_fetch_cursors AS attempt
+      ON attempt.repository = pr.repository AND attempt.resource = :prefix || pr.number
+    WHERE pr.repository = :repository AND pr.complete AND pr.state = 'merged'
+      AND pr.merge_commit_sha IS NULL
+    ORDER BY MIN(COALESCE(attempt.as_of, pr.updated_at), :as_of),
+             COALESCE(attempt.generation, 0), pr.number
+    LIMIT :limit
+""")
 OPEN_PULLS = text(
     "SELECT * FROM github_pull_requests WHERE repository = :repository "
     "AND complete AND state = 'open' ORDER BY number"
@@ -268,4 +285,19 @@ async def github_pull_targets(
     connection: AsyncConnection, repository: str
 ) -> tuple[PullRequest, ...]:
     rows = await connection.execute(PULL_TARGETS, {"repository": repository})
+    return tuple(pull_from_row(row) for row in rows)
+
+
+async def github_pending_merge_shas(
+    connection: AsyncConnection, repository: str, as_of: str, limit: int
+) -> tuple[PullRequest, ...]:
+    rows = await connection.execute(
+        PENDING_MERGE_SHAS,
+        {
+            "repository": repository,
+            "prefix": MERGE_SHA_ATTEMPT_PREFIX,
+            "as_of": as_of,
+            "limit": limit,
+        },
+    )
     return tuple(pull_from_row(row) for row in rows)

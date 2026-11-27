@@ -5,7 +5,7 @@ title: "Known merged PRs stay pending when merge commit evidence arrives late"
 parent: epic-merge-controller
 covers: [R5]
 after: [5, "2.14"]
-refined: false
+refined: true
 hitl: false
 risk: medium
 tracker_id: "218"
@@ -46,3 +46,5 @@ The incremental scan may stop revisiting an already-merged row before its merge 
 ## Notes
 
 For the single public witness, the timeline value matched the independently confirmed merge SHA. GitHub documents the event field in terms of the merged HEAD and the PR merge SHA in terms of the merge method. This leaves the evidence source and supported methods to be established by tests. This work uses disposable fixtures.
+
+- Recovery uses the explicit merge identity on the exact merged PR. Prefer authenticated GraphQL merge evidence, with an exact REST detail fallback for a validated null result. Bound reads per repository and keep attempt history separate from the listing cursor. Missing or unverified identities remain pending. [GraphQL pull request fields](https://docs.github.com/en/graphql/reference/pulls#pullrequest)
