@@ -1,0 +1,74 @@
+name: GitHub fixture row 6
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Reviewed Plotroom main commit (full SHA)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-fixture-row-six
+  cancel-in-progress: false
+
+jobs:
+  row-six:
+    if: >-
+      github.server_url == 'https://github.com' &&
+      github.repository == 'mgd43b/plotroom' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'mgd43b' &&
+      github.triggering_actor == 'mgd43b'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UV_PYTHON: "3.14"
+      UV_PYTHON_PREFERENCE: only-managed
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify the reviewed source
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$EXPECTED_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse --verify HEAD)" = "$EXPECTED_SHA"
+          git diff --quiet HEAD --
+          remote_main=$(git ls-remote --exit-code https://github.com/mgd43b/plotroom.git refs/heads/main)
+          test "$remote_main" = "$EXPECTED_SHA"$'\trefs/heads/main'
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: "0.13.8"
+          require-checksums: true
+          enable-cache: false
+      - name: Install locked dependencies
+        run: uv sync --locked --no-dev
+      - name: Build the reviewed local image
+        run: docker build --tag "plotroom:row-six-$GITHUB_RUN_ID" .
+      - name: Verify published work-item mirrors
+        shell: bash
+        env:
+          FIXTURE_PAT: ${{ secrets.PLOTROOM_GITHUB_FIXTURE_GITHUB_TOKEN }}
+        run: |
+          set +x
+          test -n "$FIXTURE_PAT"
+          fixture_pat=$FIXTURE_PAT
+          export -n fixture_pat
+          unset FIXTURE_PAT PLOTROOM_GITHUB_FIXTURE_GITHUB_TOKEN
+          umask 077
+          token_dir=$(mktemp -d "$RUNNER_TEMP/plotroom-row-six.XXXXXX")
+          trap 'rm -rf -- "$token_dir"' EXIT
+          printf '%s\n' "$fixture_pat" > "$token_dir/github-token"
+          unset fixture_pat
+          uv run --locked --offline --no-dev python -m deploy.epic_two_mirrors \
+            --verify-published --image-tag "row-six-$GITHUB_RUN_ID" \
+            --token-file "$token_dir/github-token"

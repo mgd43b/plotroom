@@ -194,3 +194,31 @@ Python interpreter. Ruff, Pyright and whitespace checks passed.
 
 Opening review on PR #227 strengthened the tests against inspecting the wrong container
 and accepting a replay whose repo-store order alone differs. Both regressions passed.
+
+### Credential-backed CI for row 6
+
+The live no-write host and isolated Compose check passed on `40462a54` with fixture
+milestone 1, epic 6, and story 7. The child inherits its milestone and has no blockers.
+Both sources returned the expected ordered repo-store refs and the single native ready
+child, whose body SHA-256 is
+`f9230748bc5b9a321a751c9a93a7b5ea9adbbe75684c29042f24d13d57e3bffc`.
+The fixture main remained `9a6ce8a89a15046c18dbfa5d7d2af88bb0edbc14`. There were
+22 scoped host reads and zero additional Compose provider reads.
+
+Add one bounded manual owner/main-only CI workflow with exact reviewed revision gating.
+Use the existing scoped secret through a private temporary token file scoped to the
+host witness process. Retain the request allowlist, exact published native fixture IDs
+and body, pinned repo-store tree, captured-only Compose replay and isolation check.
+The dedicated row 6 entry point succeeds only for matching actual host and Compose
+results. Full mode remains nonzero while the integrated suite and other live criteria
+are incomplete. Verify with synthetic provider and workflow tests before any dispatch.
+
+The dry workflow tests exercised malformed/stale source pins, the attempt guard, missing
+credentials, failure propagation, and token-file cleanup. The shell unexports the PAT
+before any subprocess starts, writes it with an owner-only mask, and clears its remaining
+shell variable before the dedicated witness starts. A real disposable Compose dry run
+used a synthetic token file and 22 scoped published fixture responses obtained through
+the existing host read session. It verified both source results with zero fresh Compose
+reads. The Actions secret was not used for this run. Independent review and actionlint
+passed, as did 98 focused tests on each locked Python, Ruff, Pyright and whitespace checks.
+An exact-main credential-backed run remains pending.
