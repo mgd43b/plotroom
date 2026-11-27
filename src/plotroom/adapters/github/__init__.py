@@ -9,7 +9,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -22,6 +23,7 @@ from plotroom.ports.clock import Clock
 log = logging.getLogger("plotroom.github")
 RECONCILE_EVERY = 60
 POLL_OVERLAP = timedelta(minutes=5)
+GITHUB_API = "https://api.github.com"
 
 
 class GitHubUnavailable(Exception):
@@ -70,6 +72,29 @@ def is_rate_limited(response: httpx.Response) -> bool:
         return False
     message = cast("dict[str, Any]", payload).get("message") if isinstance(payload, dict) else None
     return isinstance(message, str) and "rate limit" in message.lower()
+
+
+def is_github_api_url(value: str) -> bool:
+    if value == GITHUB_API:
+        return True
+    try:
+        url = urlsplit(value)
+        return (
+            url.scheme == "http"
+            and url.hostname in ("127.0.0.1", "::1")
+            and url.port is not None
+            and url.username is None
+            and not (url.path or url.query or url.fragment)
+            and value == f"http://{url.netloc}"
+        )
+    except ValueError:
+        return False
+
+
+class GitHubCredential(Protocol):
+    """Supply the bearer for repository reads."""
+
+    async def token(self) -> str: ...
 
 
 def github_secret_name(project_id: str) -> str:
@@ -222,7 +247,7 @@ class GitHubPoller:
         ledger: Ledger,
         clock: Clock,
         repo: str,
-        credential: LocalGitHubCredential,
+        credential: GitHubCredential,
         fetcher: PullRequestFetcher,
         seconds: int,
     ) -> None:

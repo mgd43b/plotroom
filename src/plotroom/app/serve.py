@@ -25,11 +25,13 @@ from uvicorn.protocols.http.h11_impl import H11Protocol
 from plotroom.adapters.claude_desktop import ClaudeDesktopReader
 from plotroom.adapters.embedding_http import HttpEmbedder
 from plotroom.adapters.github import (
+    GitHubCredential,
     GitHubPoller,
     LocalGitHubCredential,
     PullRequestFetcher,
     github_secret_name,
 )
+from plotroom.adapters.github.app_credential import GitHubAppCredential
 from plotroom.adapters.github.details import GitHubDetailPoller
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.github.ticket_tree import GitHubTicketTree
@@ -548,9 +550,21 @@ class Daemon:
             )
             inputs.append(intake.run)
         if github is not None:
-            credential = LocalGitHubCredential(
-                github_secret_name(project_id), os.environ, github.token_file
-            )
+            credential: GitHubCredential
+            if github.app is not None:
+                app = github.app
+                credential = GitHubAppCredential(
+                    app.client_id,
+                    app.installation_id,
+                    app.private_key_file,
+                    github.repository,
+                    github.api_url,
+                    self._clock,
+                )
+            else:
+                credential = LocalGitHubCredential(
+                    github_secret_name(project_id), os.environ, github.token_file
+                )
             api = GitHubReadClient(github.api_url, github.repository)
             poller = GitHubPoller(
                 project.ledger,

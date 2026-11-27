@@ -16,6 +16,28 @@ poll_seconds = 60
 image_jobs = ["build image"]
 ```
 
+### GitHub App credentials
+
+For a project using an installed GitHub App, add its public client ID and
+installation ID and point to its mounted private-key file. For example:
+
+```toml
+[projects.example.github]
+repository = "owner/repository"
+
+[projects.example.github.app]
+client_id = "Iv1.example"
+installation_id = 123456
+private_key_file = "secrets/github-app.pem"
+```
+
+The path is relative to the config file. App mode uses the mounted key and
+keeps installation tokens in memory until refresh. Projects without this
+table use the PAT configuration above. The App needs the repository selected
+in its installation and read access to Actions, Checks, Contents, Deployments,
+Issues, and Pull requests. Plotroom requests those permissions for the configured
+repository only. Keep private-key bytes out of TOML and the project data directory.
+
 To mirror work items, select one source in the project table. A local BMad tree
 uses `ticket_tree`. A tree pinned to the repository's default branch uses
 `github_ticket_tree`, with a repository-relative path. Both take a trusted

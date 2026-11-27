@@ -13,12 +13,16 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlsplit
 
 import httpx
 
 from plotroom.adapters.claude_desktop import SESSION_ID
-from plotroom.adapters.github import RECONCILE_EVERY, github_secret_name
+from plotroom.adapters.github import (
+    GITHUB_API,
+    RECONCILE_EVERY,
+    github_secret_name,
+    is_github_api_url,
+)
 from plotroom.adapters.github.ticket_tree import validate_tree_path
 from plotroom.adapters.openrouter import OpenRouterRun
 from plotroom.core.briefs import BriefSettings
@@ -42,7 +46,6 @@ _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 _REPOSITORY = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+")
 _WORKFLOW = re.compile(r"[A-Za-z0-9_.-]+\.ya?ml|[1-9][0-9]{0,18}")
 _GITHUB_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
-GITHUB_API = "https://api.github.com"
 _TOP_LEVEL_KEYS = {
     "data_dir",
     "backup_dir",
@@ -84,6 +87,13 @@ class SessionReaderConfig:
 
 
 @dataclass(frozen=True)
+class GitHubAppConfig:
+    client_id: str
+    installation_id: int
+    private_key_file: Path
+
+
+@dataclass(frozen=True)
 class GitHubConfig:
     repository: str
     token_file: Path | None
@@ -91,6 +101,7 @@ class GitHubConfig:
     poll_seconds: int
     image_jobs: tuple[str, ...] = ()
     merge_gate_policy: GatePolicy = field(default_factory=GatePolicy)
+    app: GitHubAppConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -645,20 +656,9 @@ def _github_projects(projects: tuple[str, ...], table: Any, base: Path) -> dict[
                 base / Path(_string(f"{label}.token_file", settings["token_file"])).expanduser()
             )
         api_url = _string(f"{label}.api_url", settings.get("api_url", GITHUB_API)).rstrip("/")
-        if api_url != GITHUB_API:
-            try:
-                url = urlsplit(api_url)
-                local = (
-                    url.scheme == "http"
-                    and url.hostname in ("127.0.0.1", "::1")
-                    and url.port is not None
-                    and url.username is None
-                    and not (url.path or url.query or url.fragment)
-                )
-            except ValueError:
-                local = False
-            if not local:
-                raise ConfigError(f"{label}.api_url must be the GitHub API or a loopback fixture")
+        if not is_github_api_url(api_url):
+            raise ConfigError(f"{label}.api_url must be the GitHub API or a loopback fixture")
+        app = _github_app(settings, label, base)
         poll_seconds = _integer(
             f"{label}.poll_seconds", settings.get("poll_seconds", 60), minimum=1
         )
@@ -669,8 +669,31 @@ def _github_projects(projects: tuple[str, ...], table: Any, base: Path) -> dict[
             poll_seconds,
             _string_list(f"{label}.image_jobs", settings.get("image_jobs"), ()),
             _merge_gate_policy(label, settings, poll_seconds),
+            app,
         )
     return configured
+
+
+def _github_app(settings: dict[str, Any], label: str, base: Path) -> GitHubAppConfig | None:
+    if "app" not in settings:
+        return None
+    label = f"{label}.app"
+    raw = settings["app"]
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{label} must be a table")
+    if "token_file" in settings:
+        raise ConfigError(f"{label} and token_file cannot be combined")
+    app = cast("dict[str, Any]", raw)
+    if app.keys() != {"client_id", "installation_id", "private_key_file"}:
+        raise ConfigError(f"{label} requires client_id, installation_id, and private_key_file")
+    client_id = _string(f"{label}.client_id", app["client_id"])
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", client_id):
+        raise ConfigError(f"{label}.client_id must be a GitHub App client ID")
+    installation = _integer(f"{label}.installation_id", app["installation_id"], minimum=1)
+    if installation > 2**63 - 1:
+        raise ConfigError(f"{label}.installation_id is too large")
+    key = Path(_string(f"{label}.private_key_file", app["private_key_file"])).expanduser()
+    return GitHubAppConfig(client_id, installation, base / key)
 
 
 def _merge_gate_policy(label: str, settings: dict[str, Any], poll_seconds: int) -> GatePolicy:

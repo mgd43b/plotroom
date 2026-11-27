@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable, LocalGitHubCredential
+from plotroom.adapters.github import GitHubCredential, GitHubRateLimited, GitHubUnavailable
 from plotroom.adapters.github.ci import (
     JUnitBudget,
     fetch_checks,
@@ -103,7 +103,7 @@ class GitHubDetailPoller:
         ledger: Ledger,
         clock: Clock,
         api: GitHubReadClient,
-        credential: LocalGitHubCredential,
+        credential: GitHubCredential,
         image_jobs: tuple[str, ...] = (),
         *,
         include_issue_tree: bool = False,

@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 import httpx
 
-from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable, LocalGitHubCredential
+from plotroom.adapters.github import GitHubCredential, GitHubRateLimited, GitHubUnavailable
 from plotroom.adapters.github.read import GitHubReadClient, Row, obj
 from plotroom.ports.work_items import MAX_WORK_ITEM_BODY_BYTES, WorkItem
 
@@ -205,7 +205,7 @@ class GitHubTicketTree:
     def __init__(
         self,
         api: GitHubReadClient,
-        credential: LocalGitHubCredential,
+        credential: GitHubCredential,
         tree: str,
         read_tree: Callable[[Path, Path], Awaitable[tuple[WorkItem, ...]]],
         *,
