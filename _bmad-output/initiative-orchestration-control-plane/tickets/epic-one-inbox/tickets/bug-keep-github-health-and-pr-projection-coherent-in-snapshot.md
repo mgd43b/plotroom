@@ -5,12 +5,13 @@ title: "Keep GitHub health and PR projection coherent in snapshot()"
 parent: epic-one-inbox
 covers: [R1]
 after: [2, "1.6"]
-refined: false
+refined: true
 hitl: false
 risk: medium
 tracker_id: "235"
 remote: "https://github.com/mgd43b/plotroom/issues/235"
-tracker_status: backlog
+tracker_status: done
+status: built
 ---
 
 # Keep GitHub health and PR projection coherent in snapshot()
@@ -38,3 +39,13 @@ The snapshot reads the committed board and GitHub summary, then reads the live h
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-one-inbox/epic-one-inbox.md, R1
 - projection and mounted-PAT witness — https://github.com/mgd43b/plotroom/issues/29
 - snapshot contract — https://github.com/mgd43b/plotroom/issues/17
+
+## Notes
+
+MCP captures GitHub health with the role-filtered committed board, PR count, and watermark.
+The per-project guard covers observation capture, poll commit and health publication.
+Provider requests stay outside the guard. A canceled poll waiting for the guard queues no
+write, and a commit already in progress can finish publishing before it releases the guard.
+Synthetic tests exercise startup, an empty successful poll, provider failure and recovery,
+and a first poll forced between the MCP capture and render. The existing mounted-PAT
+smoke uses its original assertions.
