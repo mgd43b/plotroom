@@ -16,7 +16,7 @@ import pytest
 
 from conftest import BRIEF_TICKET_BODY, BRIEF_TICKET_REF, make_brief_ticket, write_config
 from drain_standin import DrainStandIn
-from fakes import FixedClock
+from fakes import FixedClock, commit_status_evidence
 from plotroom.adapters.github import GitHubPoller
 from plotroom.adapters.work_items_bmad import BmadTicketTree
 from plotroom.app.config import load_config
@@ -26,6 +26,7 @@ from plotroom.core.events import NewEvent
 from plotroom.core.github import ObservedPull, apply_comments, apply_pull_poll
 from plotroom.core.github_projection import (
     CHECKS,
+    COMMIT_STATUSES,
     ISSUE_PAGINATION_VERIFIED,
     ISSUE_TREE,
     ISSUES,
@@ -229,12 +230,19 @@ async def endpoint(
             {"id": 1, "name": "fixture", "status": "in_progress", "head_sha": head},
             details={"pull_numbers": [1]},
         )
-        await ledger.run(
-            "system",
-            lambda uow: apply_resource(
+
+        async def apply_checks(uow: UnitOfWork) -> None:
+            await apply_resource(
                 uow, FIXTURE_REPO, CHECKS, head, GitHubResource((check,)), CHECK_TIME
-            ),
-        )
+            )
+            await uow.save_github_resource(
+                FIXTURE_REPO,
+                COMMIT_STATUSES,
+                head,
+                commit_status_evidence(FIXTURE_REPO, head, CHECK_TIME, checks_generation=1),
+            )
+
+        await ledger.run("system", apply_checks)
         ledger.github_error = None
         issue = GitHubRecord(
             "issue/3",

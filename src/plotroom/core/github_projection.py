@@ -13,6 +13,13 @@ if TYPE_CHECKING:
 
 
 CHECKS = "checks"
+COMMIT_STATUSES = "commit_statuses"
+COMMIT_STATUS_BUCKETS = {
+    "success": "pass",
+    "pending": "pending",
+    "failure": "fail",
+    "error": "fail",
+}
 MAIN = "main_runs"
 MAIN_CI = "main_ci"
 MAIN_CI_WINDOW = 30
@@ -150,9 +157,9 @@ async def apply_resource(
         bindings[number] = (
             await infer_lane(uow, branch=pr.branch) if pr.head_repository == repository else None
         )
-    # The gate's workflow-scoped history is a read model. Workflow events still
-    # come from the existing all-workflow monitor.
-    for row in () if resource == MAIN_CI else fresh.values():
+    # Gate-only resources never emit trigger events. Workflow events still come
+    # from the existing all-workflow monitor.
+    for row in () if resource in (MAIN_CI, COMMIT_STATUSES) else fresh.values():
         prior = previous.get(row.key)
         if prior is not None and (
             row.fact == prior.fact

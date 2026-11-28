@@ -9,7 +9,7 @@ import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from fakes import FixedClock
+from fakes import FixedClock, commit_status_evidence
 from plotroom.adapters.github import GitHubUnavailable
 from plotroom.adapters.github.ci import fetch_checks
 from plotroom.adapters.github.read import GitHubReadClient
@@ -19,7 +19,7 @@ from plotroom.core import merge_gate
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import LedgerError, format_time
 from plotroom.core.github import PULL_REQUESTS, FetchCursor, PullRequest
-from plotroom.core.github_projection import CHECKS, GitHubRecord, GitHubResource
+from plotroom.core.github_projection import CHECKS, COMMIT_STATUSES, GitHubRecord, GitHubResource
 from plotroom.core.ledger import Ledger
 from plotroom.core.merge_gate import GatePolicy, GateSnapshot, evaluate_gate
 
@@ -178,7 +178,11 @@ def test_clerk_rule_1(
     detail: str,
 ) -> None:
     monkeypatch.setattr(merge_gate, "GATE_RULES", (merge_gate._rule_checks,))  # pyright: ignore[reportPrivateUsage]
-    snapshot = GateSnapshot(PULL, GitHubResource(records, as_of=format_time(NOW)))
+    snapshot = GateSnapshot(
+        PULL,
+        GitHubResource(records, as_of=format_time(NOW)),
+        commit_statuses=commit_status_evidence(REPOSITORY, HEAD, format_time(NOW)),
+    )
     verdict = evaluate_gate(snapshot, GatePolicy(minimum, ignored), NOW)
     assert (verdict.head_sha, verdict.as_of, verdict.exit_class) == (HEAD, AS_OF, exit_class)
     assert verdict.verdict == ("MERGE" if code is None else "REFUSE")
@@ -187,6 +191,147 @@ def test_clerk_rule_1(
     else:
         [reason] = verdict.reasons
         assert (reason.code, reason.detail, reason.exit_class) == (code, detail, exit_class)
+
+
+def legacy_status(identifier: int, context: str, state: str, *, creator: int = 1) -> GitHubRecord:
+    return GitHubRecord(
+        str(identifier),
+        "commit_status",
+        {"id": identifier, "context": context, "state": state, "creator_id": creator},
+    )
+
+
+@pytest.mark.parametrize(
+    ("checks", "statuses", "minimum", "ignored", "code"),
+    [
+        ((), (legacy_status(1, "legacy", "success"),), 1, (), None),
+        (
+            (),
+            (legacy_status(2, "Lint", "success"), legacy_status(1, "lint", "failure")),
+            1,
+            (),
+            None,
+        ),
+        (
+            (),
+            (
+                legacy_status(2, "Lint", "success", creator=2),
+                legacy_status(1, "lint", "failure"),
+            ),
+            1,
+            (),
+            "checks_failing",
+        ),
+        (
+            (),
+            (
+                legacy_status(2, "Lint", "success", creator=2),
+                legacy_status(1, "lint", "success"),
+            ),
+            2,
+            (),
+            "checks_below_minimum",
+        ),
+        (
+            (check(1, "lint", "success"),),
+            (legacy_status(1, "Lint", "success"),),
+            2,
+            (),
+            "checks_below_minimum",
+        ),
+        (
+            (check(1, "lint", "failure"),),
+            (legacy_status(1, "lint", "success"),),
+            1,
+            (),
+            "checks_failing",
+        ),
+        (
+            (check(1, "lint", "success"),),
+            (legacy_status(1, "lint", "error"),),
+            1,
+            (),
+            "checks_failing",
+        ),
+        (
+            (check(1, "lint", "success"),),
+            (legacy_status(1, "lint", "error"),),
+            1,
+            ("Lint",),
+            "checks_failing",
+        ),
+        (
+            (check(1, "lint", "success"),),
+            (legacy_status(1, "lint", "error"),),
+            1,
+            ("lint",),
+            None,
+        ),
+        (
+            (check(1, "lint", "success"),),
+            (legacy_status(1, "lint", "pending"),),
+            1,
+            ("lint",),
+            "checks_pending",
+        ),
+    ],
+)
+def test_rule_1_keeps_check_and_legacy_producers_independent(
+    monkeypatch: pytest.MonkeyPatch,
+    checks: tuple[GitHubRecord, ...],
+    statuses: tuple[GitHubRecord, ...],
+    minimum: int,
+    ignored: tuple[str, ...],
+    code: str | None,
+) -> None:
+    monkeypatch.setattr(merge_gate, "GATE_RULES", merge_gate.GATE_RULES[:1])
+    snapshot = GateSnapshot(
+        PULL,
+        GitHubResource(checks, as_of=AS_OF),
+        commit_statuses=commit_status_evidence(REPOSITORY, HEAD, AS_OF, *statuses),
+    )
+    result = evaluate_gate(snapshot, GatePolicy(minimum, ignored), NOW)
+    assert result.verdict == ("MERGE" if code is None else "REFUSE")
+    assert [reason.code for reason in result.reasons] == ([] if code is None else [code])
+
+
+@pytest.mark.parametrize(
+    ("statuses", "code"),
+    [
+        (None, "commit_statuses_unreadable"),
+        (GitHubResource((), as_of=AS_OF, complete=False), "commit_statuses_unreadable"),
+        (commit_status_evidence("other/repo", HEAD, AS_OF), "commit_statuses_unreadable"),
+        (commit_status_evidence(REPOSITORY, "2" * 40, AS_OF), "commit_statuses_unreadable"),
+        (
+            commit_status_evidence(REPOSITORY, HEAD, AS_OF, checks_generation=1),
+            "commit_statuses_unreadable",
+        ),
+        (
+            commit_status_evidence(REPOSITORY, HEAD, "2026-11-23T11:55:00Z"),
+            "commit_statuses_stale",
+        ),
+        (
+            commit_status_evidence(REPOSITORY, HEAD, AS_OF, legacy_status(1, "lint", "skipped")),
+            "commit_statuses_unreadable",
+        ),
+        (
+            commit_status_evidence(
+                REPOSITORY, HEAD, AS_OF, legacy_status(1, "lint", "success", creator=0)
+            ),
+            "commit_statuses_unreadable",
+        ),
+    ],
+)
+def test_rule_1_refuses_unverified_legacy_status_evidence(
+    statuses: GitHubResource | None, code: str
+) -> None:
+    checks = GitHubResource((check(1, "lint", "success"),), as_of=AS_OF)
+    snapshot = GateSnapshot(PULL, checks, commit_statuses=statuses)
+    result = evaluate_gate(snapshot, GatePolicy(1), NOW)
+    assert result.reasons[0].code == code
+    if code == "commit_statuses_stale":
+        assert statuses is not None
+        assert result.as_of == format_time(datetime.fromisoformat(statuses.as_of))
 
 
 @pytest.mark.parametrize(
@@ -224,7 +369,12 @@ def test_fresh_incremental_poll_can_cover_an_unchanged_pull() -> None:
     pull = replace(PULL, as_of="2026-11-23T11:55:00Z")
     checks = GitHubResource((check(1, "test", None),), as_of=AS_OF)
     policy = GatePolicy(1, pull_max_age=timedelta(minutes=60))
-    with_cursor = GateSnapshot(pull, checks, FetchCursor(AS_OF, AS_OF, 2))
+    with_cursor = GateSnapshot(
+        pull,
+        checks,
+        FetchCursor(AS_OF, AS_OF, 2),
+        commit_statuses=commit_status_evidence(REPOSITORY, HEAD, AS_OF),
+    )
     assert evaluate_gate(with_cursor, policy, NOW).reasons[0].code == "checks_pending"
     assert evaluate_gate(replace(with_cursor, pull_cursor=None), policy, NOW).reasons[0].code == (
         "pr_stale"
@@ -267,6 +417,9 @@ async def test_merge_gate_reads_one_database_snapshot(
             await tx.save_pull_request(PULL)
             await tx.save_fetch_cursor(REPOSITORY, PULL_REQUESTS, FetchCursor(AS_OF, AS_OF, 1))
             await tx.save_github_resource(REPOSITORY, CHECKS, HEAD, observation("success"))
+            await tx.save_github_resource(
+                REPOSITORY, COMMIT_STATUSES, HEAD, commit_status_evidence(REPOSITORY, HEAD, AS_OF)
+            )
         monkeypatch.setattr(github_sql, "pull_request", pause_after_pull)
         async with asyncio.timeout(5), asyncio.TaskGroup() as tasks:
             reader = tasks.create_task(store.read_merge_gate(REPOSITORY, 4))
@@ -281,6 +434,7 @@ async def test_merge_gate_reads_one_database_snapshot(
         assert snapshot.pull == PULL
         assert snapshot.pull_cursor == FetchCursor(AS_OF, AS_OF, 1)
         assert snapshot.checks == observation("success")
+        assert snapshot.commit_statuses == commit_status_evidence(REPOSITORY, HEAD, AS_OF)
         assert await store.head_seq() == 0
     finally:
         await store.close()
@@ -301,6 +455,9 @@ async def test_read_only_ledger_query_is_scoped_to_the_operator_roles(tmp_path: 
             await tx.save_pull_request(PULL)
             await tx.save_github_resource(
                 REPOSITORY, CHECKS, HEAD, GitHubResource((check(1, "test", None),), as_of=AS_OF)
+            )
+            await tx.save_github_resource(
+                REPOSITORY, COMMIT_STATUSES, HEAD, commit_status_evidence(REPOSITORY, HEAD, AS_OF)
             )
         ledger.github_error = None
         for role in ("clerk", "orchestrator"):

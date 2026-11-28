@@ -9,8 +9,11 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from plotroom.core.github import (
+    ACTIVE_PULL_DETAIL_BUDGET,
     MERGE_SHA_ATTEMPT_PREFIX,
+    PULL_DETAIL_ATTEMPT_PREFIX,
     PULL_REQUESTS,
+    TERMINAL_PULL_DETAIL_BUDGET,
     FetchCursor,
     FetchRetry,
     GitHubSummary,
@@ -207,17 +210,29 @@ SAVE_RESOURCE = text("""
       attributes = excluded.attributes, complete = excluded.complete,
       generation = excluded.generation, as_of = excluded.as_of
 """)
-PULL_TARGETS = text("""
+_DETAIL_TARGETS = """
     SELECT pr.* FROM github_pull_requests AS pr
     LEFT JOIN github_fetch_cursors AS cursor
-      ON cursor.repository = pr.repository AND cursor.resource = 'pull_details/' || pr.number
+      ON cursor.repository = pr.repository AND cursor.resource = :prefix || pr.number
     WHERE pr.repository = :repository AND pr.complete
-      AND (
-        pr.state = 'open' OR cursor.watermark IS NULL
-        OR cursor.watermark != (pr.updated_at || ':' || pr.version)
-      )
-    ORDER BY COALESCE(cursor.as_of, ''), pr.updated_at DESC, pr.number
-    LIMIT 8
+"""
+_DETAIL_ORDER = """
+    ORDER BY COALESCE(cursor.as_of, ''), COALESCE(cursor.generation, 0), pr.number
+    LIMIT :limit
+"""
+ACTIVE_DETAIL_TARGETS = text(_DETAIL_TARGETS + "AND pr.state = 'open'" + _DETAIL_ORDER)
+TERMINAL_DETAIL_TARGETS = text(
+    _DETAIL_TARGETS
+    + """
+    AND pr.state IN ('closed', 'merged')
+    AND (cursor.watermark IS NULL OR cursor.watermark != (pr.updated_at || ':' || pr.version))
+    """
+    + _DETAIL_ORDER
+)
+DETAIL_CAPACITY_EXCEEDED = text("""
+    SELECT 1 FROM github_pull_requests
+    WHERE repository = :repository AND state = 'open' AND complete
+    LIMIT 1 OFFSET :budget
 """)
 PENDING_MERGE_SHAS = text("""
     SELECT pr.* FROM github_pull_requests AS pr
@@ -238,6 +253,13 @@ OPEN_PULLS = text(
 async def open_pulls(connection: AsyncConnection, repository: str) -> tuple[PullRequest, ...]:
     rows = await connection.execute(OPEN_PULLS, {"repository": repository})
     return tuple(pull_from_row(row) for row in rows)
+
+
+async def detail_capacity_exceeded(connection: AsyncConnection, repository: str) -> bool:
+    rows = await connection.execute(
+        DETAIL_CAPACITY_EXCEEDED, {"repository": repository, "budget": ACTIVE_PULL_DETAIL_BUDGET}
+    )
+    return rows.first() is not None
 
 
 async def github_resource(
@@ -284,8 +306,14 @@ async def save_github_resource(
 async def github_pull_targets(
     connection: AsyncConnection, repository: str
 ) -> tuple[PullRequest, ...]:
-    rows = await connection.execute(PULL_TARGETS, {"repository": repository})
-    return tuple(pull_from_row(row) for row in rows)
+    keys = {"repository": repository, "prefix": PULL_DETAIL_ATTEMPT_PREFIX}
+    active = await connection.execute(
+        ACTIVE_DETAIL_TARGETS, {**keys, "limit": ACTIVE_PULL_DETAIL_BUDGET}
+    )
+    terminal = await connection.execute(
+        TERMINAL_DETAIL_TARGETS, {**keys, "limit": TERMINAL_PULL_DETAIL_BUDGET}
+    )
+    return tuple(pull_from_row(row) for rows in (active, terminal) for row in rows)
 
 
 async def github_pending_merge_shas(

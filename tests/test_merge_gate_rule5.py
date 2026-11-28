@@ -6,6 +6,7 @@ from datetime import timedelta
 import httpx
 import pytest
 
+from fakes import commit_status_evidence
 from plotroom.adapters.github.pr_details import fetch_pull_text
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.core.events import format_time
@@ -20,6 +21,7 @@ TEXT_OBSERVED = format_time(CHECKED_AT - timedelta(seconds=10))
 SNAPSHOT = GateSnapshot(
     PULL,
     GitHubResource((CHECK,), as_of=NOW),
+    commit_statuses=commit_status_evidence(REPO, FIRST, NOW),
     threads=EMPTY_THREADS,
     main_ci=main(record(3, "success")),
     main=GitHubResource((), as_of=NOW, attributes={"branch": BRANCH, "head_sha": MAIN_SHA}),

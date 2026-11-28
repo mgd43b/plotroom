@@ -4,13 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from fakes import FixedClock
+from fakes import FixedClock, commit_status_evidence
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import LedgerError, format_time
 from plotroom.core.github import PullRequest
 from plotroom.core.github_projection import (
     CHECKS,
+    COMMIT_STATUSES,
     MAIN,
     MAIN_CI,
     PULL_TEXT,
@@ -99,6 +100,12 @@ async def test_freeze_persists_and_unfreeze_restores_each_verdict(tmp_path: Path
                     as_of=observed_at,
                 )
                 await tx.save_github_resource(REPOSITORY, CHECKS, head, checks)
+                await tx.save_github_resource(
+                    REPOSITORY,
+                    COMMIT_STATUSES,
+                    head,
+                    commit_status_evidence(REPOSITORY, head, observed_at),
+                )
                 pin = {"head_sha": head, "pull_version": 1, "pull_updated_at": observed_at}
                 await tx.save_github_resource(
                     REPOSITORY,

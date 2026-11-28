@@ -5,12 +5,12 @@ title: "Require completed Kodus review evidence in the Plotroom merge gate"
 parent: epic-merge-controller
 covers: [R1, R2, R5]
 after: [1, 11, 14]
-refined: false
+refined: true
 hitl: false
 risk: medium
 tracker_id: "230"
 remote: "https://github.com/mgd43b/plotroom/issues/230"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Require completed Kodus review evidence in the Plotroom merge gate
@@ -35,6 +35,4 @@ Add a project-scoped requirement for completed review from the configured truste
 
 ## Notes
 
-The current product projection records a check's App ID and state and resolves threads on the current PR head. It does not yet establish the complete trusted review, opening-head, cadence and thread-answer evidence required here. The build must prove any added bounded evidence source. A first poll, an arbitrary prior SHA or a check name cannot establish the opening head. The bootstrap clerk's private state is not a product dependency.
-
-The proposed scope is opt-in per project. The exact application identity and enablement may be selected for Plotroom once separately routed. Keep the merge-only policy from changing branch-update behavior. If maintaining existing Rule 4 ordering requires a different policy, route that choice before changing it.
+[PR #231](https://github.com/mgd43b/plotroom/pull/231) implemented the opt-in, merge-only policy. The default behavior and Rule 4 ordering are unchanged. A completed check with an explicitly empty PR association requires a submitted review from the configured App bot for the exact PR and commit inside the check interval. A cadence skip requires a direct same-PR association, independently established opening evidence, and answered and resolved current threads. Missing corroboration leaves the gate refused. The project setting was not activated.

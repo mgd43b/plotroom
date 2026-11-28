@@ -67,6 +67,15 @@ class ReviewThreadPull:
     author_login: str
 
 
+@dataclass(frozen=True)
+class _ObservedPage:
+    records: list[Any]
+    more: bool
+    etag: str | None
+    last_page: int | None
+    has_next: bool
+
+
 class GitHubReadClient:
     def __init__(self, api_url: str, repository: str) -> None:
         self.api_url = api_url
@@ -199,8 +208,7 @@ class GitHubReadClient:
             verify_terminal=verify_terminal,
         )
         assert result is not None
-        records, more, _ = result
-        return records, more
+        return result.records, result.more
 
     async def _observe_page(
         self,
@@ -214,7 +222,7 @@ class GitHubReadClient:
         verify_total: bool,
         verify_terminal: bool,
         etag: str | None = None,
-    ) -> tuple[list[Any], bool, str | None] | None:
+    ) -> _ObservedPage | None:
         value, response = await self._read(
             client,
             token,
@@ -236,25 +244,29 @@ class GitHubReadClient:
                 total == covered if link is None else len(records) == 100 and total > covered
             ):
                 raise GitHubUnavailable("GitHub returned an incomplete result count")
+        last = response.links.get("last") if verify_terminal else None
+        last_page = None
+        if last is not None:
+            try:
+                last_page = int(httpx.URL(last["url"]).params["page"])
+            except KeyError, ValueError, httpx.InvalidURL:
+                raise GitHubUnavailable("GitHub returned invalid pagination") from None
+            valid_last = last_page == page if link is None else last_page > page
+            if not valid_last:
+                raise GitHubUnavailable("GitHub returned incomplete pagination")
         if link is None:
             # Array endpoints cannot give a total. A full page might be the
             # last one, so probe by number instead of trusting an absent Link.
-            last = response.links.get("last") if verify_terminal else None
-            if last is not None:
-                try:
-                    last_page = int(httpx.URL(last["url"]).params["page"])
-                except KeyError, ValueError, httpx.InvalidURL:
-                    raise GitHubUnavailable("GitHub returned invalid pagination") from None
-                if last_page != page:
-                    raise GitHubUnavailable("GitHub returned incomplete pagination")
-            return records, verify_terminal and len(records) == 100, current_etag
+            return _ObservedPage(
+                records, verify_terminal and len(records) == 100, current_etag, last_page, False
+            )
         try:
             next_page = int(httpx.URL(link["url"]).params["page"])
         except KeyError, ValueError, httpx.InvalidURL:
             raise GitHubUnavailable("GitHub returned invalid pagination") from None
         if next_page != page + 1:
             raise GitHubUnavailable("GitHub returned invalid pagination")
-        return records, True, current_etag
+        return _ObservedPage(records, True, current_etag, last_page, True)
 
     async def pages(
         self,
@@ -268,10 +280,10 @@ class GitHubReadClient:
         verify_total: bool = False,
         verify_terminal: bool = False,
         verify_boundaries: bool = False,
+        max_pages: int = MAX_PAGES,
+        require_full_pages: bool = False,
     ) -> AsyncIterator[Row]:
-        async def read(
-            index: int, etag: str | None = None
-        ) -> tuple[list[Any], bool, str | None] | None:
+        async def read(index: int, etag: str | None = None) -> _ObservedPage | None:
             return await self._observe_page(
                 client,
                 token,
@@ -284,16 +296,46 @@ class GitHubReadClient:
                 etag=etag,
             )
 
-        prior: tuple[list[Any], bool, str | None] | None = None
-        for page in range(1, MAX_PAGES + 1 + verify_terminal):
+        prior = None
+        advertised_last = None
+        expected_nonempty = False
+        for page in range(1, max_pages + 1 + verify_terminal):
             observed = await read(page)
             assert observed is not None
-            records, more, _ = observed
-            if page > MAX_PAGES and (records or more):
+            records, more = observed.records, observed.more
+            if page > max_pages and (records or more):
                 break
+            if require_full_pages:
+                if expected_nonempty and not records:
+                    raise GitHubUnavailable("GitHub returned an empty advertised page")
+                expected_nonempty = observed.has_next
+                if more and len(records) != 100:
+                    raise GitHubUnavailable("GitHub returned a short nonterminal page")
+                if observed.last_page is not None:
+                    if observed.last_page > max_pages:
+                        raise GitHubUnavailable("GitHub read exceeded the page limit")
+                    if advertised_last not in (None, observed.last_page):
+                        raise GitHubUnavailable("GitHub returned conflicting last pages")
+                    advertised_last = observed.last_page
+                if advertised_last is not None and (
+                    (page < advertised_last and not more)
+                    or (
+                        page == advertised_last
+                        and (observed.has_next or (page > 1 and not records))
+                    )
+                    or (page > advertised_last and (records or more))
+                ):
+                    raise GitHubUnavailable("GitHub returned incomplete pagination")
             if verify_boundaries and prior is not None:
-                confirmed = await read(page - 1, prior[2])
-                if confirmed is not None and confirmed[:2] != prior[:2]:
+                confirmed = await read(page - 1, prior.etag)
+                if confirmed is not None and (
+                    (confirmed.records, confirmed.more) != (prior.records, prior.more)
+                    or (
+                        require_full_pages
+                        and (confirmed.last_page, confirmed.has_next)
+                        != (prior.last_page, prior.has_next)
+                    )
+                ):
                     raise GitHubUnavailable("GitHub pages shifted during the read")
             for row in rows(records):
                 yield row

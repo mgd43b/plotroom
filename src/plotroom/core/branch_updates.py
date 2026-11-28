@@ -1,6 +1,6 @@
 """Fixture branch updates staged and reconciled in the project writer."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from plotroom.core.actions import BRANCH_UPDATE, Action, finish_action, record_attempt
@@ -62,7 +62,8 @@ def eligible_branch_update(
         )
     ):
         return None
-    verdict = evaluate_gate(snapshot, policy, now)
+    # The project capacity hold applies to merges. Rule 4 still uses this PR's gate evidence.
+    verdict = evaluate_gate(replace(snapshot, detail_capacity_exceeded=False), policy, now)
     if not verdict.reasons or verdict.reasons[0].code != STALE_CI:
         return None
     main = determine_main_verdict(snapshot, policy, now)

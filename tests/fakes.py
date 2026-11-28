@@ -27,8 +27,11 @@ from plotroom.core.commands import Command, CommandError, CommandRegistry
 from plotroom.core.events import AppendResult, EventKind, EventRegistry, FieldSpec, NewEvent
 from plotroom.core.events import Event as StoredEvent
 from plotroom.core.github import (
+    ACTIVE_PULL_DETAIL_BUDGET,
     MERGE_SHA_ATTEMPT_PREFIX,
+    PULL_DETAIL_ATTEMPT_PREFIX,
     PULL_REQUESTS,
+    TERMINAL_PULL_DETAIL_BUDGET,
     FetchCursor,
     FetchRetry,
     GitHubSummary,
@@ -39,6 +42,7 @@ from plotroom.core.github_projection import (
     COMMENTS,
     ISSUE_TREE,
     ISSUES,
+    GitHubRecord,
     GitHubResource,
 )
 from plotroom.core.goal_projection import (
@@ -61,6 +65,24 @@ from plotroom.ports.work_items import WorkItem
 
 FIXTURES = Path(__file__).parent / "fixtures"
 START = datetime(2026, 11, 22, 12, 0, 0, tzinfo=UTC)
+
+
+def commit_status_evidence(
+    repository: str,
+    head: str,
+    as_of: str,
+    *records: GitHubRecord,
+    checks_generation: int = 0,
+) -> GitHubResource:
+    return GitHubResource(
+        records,
+        attributes={
+            "repository": repository,
+            "head_sha": head,
+            "checks_generation": checks_generation,
+        },
+        as_of=as_of,
+    )
 
 
 def _visible_claims(
@@ -294,6 +316,9 @@ class _MemoryTransaction:
             for _, pull in sorted(self.pulls.items())
             if pull.repository == repository and pull.state == "open" and pull.complete
         )
+
+    async def detail_capacity_exceeded(self, repository: str) -> bool:
+        return len(await self.open_pulls(repository)) > ACTIVE_PULL_DETAIL_BUDGET
 
     async def open_branch_pull(self, repository: str, branch: str) -> PullRequest | None:
         self._live()
@@ -941,11 +966,35 @@ class MemoryStore:
         return copy.deepcopy(self._github_resources.get((repository, resource, scope)))
 
     async def github_pull_targets(self, repository: str) -> tuple[PullRequest, ...]:
-        rows = [
-            row for row in self._pulls.values() if row.repository == repository and row.complete
-        ]
-        rows.sort(key=lambda row: (row.state == "open", row.updated_at, row.number), reverse=True)
-        return tuple(rows[:100])
+        def cursor(row: PullRequest) -> FetchCursor | None:
+            return self._fetch_cursors.get(
+                (repository, f"{PULL_DETAIL_ATTEMPT_PREFIX}{row.number}")
+            )
+
+        def priority(row: PullRequest) -> tuple[str, int, int]:
+            attempt = cursor(row)
+            return (
+                attempt.as_of if attempt else "",
+                attempt.generation if attempt else 0,
+                row.number,
+            )
+
+        active: list[PullRequest] = []
+        terminal: list[PullRequest] = []
+        for row in self._pulls.values():
+            if row.repository != repository or not row.complete:
+                continue
+            if row.state == "open":
+                active.append(row)
+            elif row.state in {"closed", "merged"} and (
+                (attempt := cursor(row)) is None
+                or attempt.watermark != f"{row.updated_at}:{row.version}"
+            ):
+                terminal.append(row)
+        return (
+            *sorted(active, key=priority)[:ACTIVE_PULL_DETAIL_BUDGET],
+            *sorted(terminal, key=priority)[:TERMINAL_PULL_DETAIL_BUDGET],
+        )
 
     async def github_pending_merge_shas(
         self, repository: str, as_of: str, limit: int

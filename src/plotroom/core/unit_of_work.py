@@ -31,6 +31,7 @@ from plotroom.core.github_projection import (
     ASK_COMMENT_HISTORY,
     CHECKS,
     COMMENTS,
+    COMMIT_STATUSES,
     ISSUES,
     KODUS_REVIEW,
     LABELS,
@@ -234,6 +235,9 @@ class UnitOfWork:
     async def open_pulls(self, repository: str) -> tuple[PullRequest, ...]:
         return await self._tx.open_pulls(repository)
 
+    async def detail_capacity_exceeded(self, repository: str) -> bool:
+        return await self._tx.detail_capacity_exceeded(repository)
+
     async def lane_claims(self, lane: str | None = None) -> list[Claim]:
         return await self._tx.lane_claims(lane)
 
@@ -299,7 +303,7 @@ class UnitOfWork:
                     await self.index_search_record(record, only_if_absent=True)
         if resource in (MAIN, MAIN_CI):
             self.all_merge_pulls = True
-        elif resource == CHECKS:
+        elif resource in (CHECKS, COMMIT_STATUSES):
             self.merge_check_heads.add(scope)
         elif resource in (LABELS, THREADS, PULL_COMPARISON, PULL_TEXT, KODUS_REVIEW):
             self.merge_pull_numbers.add(int(scope))

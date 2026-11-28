@@ -187,3 +187,25 @@ after = [1, 11, 14]
 hitl = false
 risk = "medium"
 refine = true
+
+[[entry]]
+id = 17
+type = "bug"
+title = "Recognize legacy Commit Status contexts in the merge gate"
+description = "The product gate evaluates Check Runs only. Repositories that also report legacy Commit Status contexts can receive a different Rule 1 verdict from the clerk."
+verify = "Verify with both provider sources that current legacy contexts affect Rule 1 and preserve producer-safe Check Runs and advisory/live/execution agreement."
+covers = ["R1", "R2"]
+after = [1, "2.3"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 18
+type = "bug"
+title = "Keep merge gate detail evidence fresh across bounded polling"
+description = "The per-cycle pull-detail budget can leave an active PR with periodically stale gate evidence even when all provider reads succeed."
+verify = "Verify bounded fair refresh and continued refusal of stale evidence using a deterministic multi-PR clock fixture under healthy, pressured and recovering conditions."
+covers = ["R1", "R2"]
+after = [1, "2.14"]
+hitl = false
+risk = "medium"

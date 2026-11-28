@@ -77,6 +77,8 @@ The genuine #229 opening and final checks had empty PR lists. GitHub GraphQL ass
 
 ## Verification
 
+Built: [PR #231](https://github.com/mgd43b/plotroom/pull/231). All four [exact-main CI jobs](https://github.com/mgd43b/plotroom/actions/runs/46104766728) and 182 focused tests on each locked Python passed on the merge.
+
 - Read-only GitHub responses for PR #231 showed a stable opening check SHA and a nested PR association whose head moved. An offline replay of those responses verified both App checks and both answered threads. The daemon fixture covers the same payload shape and refuses an unrelated nested SHA.
 
 - The opening revision passed all 1,479 tests on locked Python 3.14.10. Ruff lint and formatting, Pyright, and the core dependency check passed.

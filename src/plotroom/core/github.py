@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 
 PULL_REQUESTS = "pull_requests"
 DETAILS = "details"
+PULL_DETAIL_ATTEMPT_PREFIX = "pull_details/"
+ACTIVE_PULL_DETAIL_BUDGET = 17
+TERMINAL_PULL_DETAIL_BUDGET = 2
 MERGE_SHA_ATTEMPT_PREFIX = "pull_merge_sha/"
 PR_OPENED = "github.pr_opened"
 PR_MERGED = "github.pr_merged"

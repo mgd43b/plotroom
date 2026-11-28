@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from fakes import FixedClock
+from fakes import FixedClock, commit_status_evidence
 from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.app.config import ConfigError, load_config
 from plotroom.app.runtime import ProjectRuntime
@@ -15,6 +15,7 @@ from plotroom.core.catalog import build_catalog
 from plotroom.core.events import format_time
 from plotroom.core.github_projection import (
     CHECKS,
+    COMMIT_STATUSES,
     KODUS_REVIEW,
     THREADS,
     GitHubRecord,
@@ -135,6 +136,26 @@ async def test_fresh_pins_revision_and_lost_response_recovery(tmp_path: Path) ->
         await observe(ledger, overlap=False)
         ready = await store.read_merge_gate(REPO, 7)
         assert ready.threads is not None
+        assert ready.commit_statuses is not None
+        pending = GitHubRecord(
+            "20",
+            "commit_status",
+            {
+                "id": 20,
+                "context": "tests",
+                "state": "pending",
+                "creator_id": 8,
+            },
+        )
+        fixture.snapshot = replace(
+            ready,
+            commit_statuses=commit_status_evidence(
+                REPO, HEAD, ready.commit_statuses.as_of, pending
+            ),
+        )
+        assert not await runtime.run_one_action()
+        assert not fixture.merge_calls
+
         fixture.snapshot = replace(
             ready,
             threads=replace(
@@ -439,6 +460,21 @@ async def test_kodus_gate_rechecks_evidence_and_pins_before_fixture_execution(
         assert snapshot.checks is not None
         assert snapshot.threads is not None
         pull, checks, threads = snapshot.pull, snapshot.checks, snapshot.threads
+        named_status = GitHubRecord(
+            "88",
+            "commit_status",
+            {"id": 88, "context": app.check_name, "state": "success", "creator_id": app.app_id},
+        )
+        legacy = commit_status_evidence(
+            REPO, HEAD, checks.as_of, named_status, checks_generation=checks.generation
+        )
+        await ledger.run(
+            "system", lambda uow: uow.save_github_resource(REPO, COMMIT_STATUSES, HEAD, legacy)
+        )
+        assert (await ledger.merge_gate("orchestrator", 7)).reasons[
+            0
+        ].code == "kodus_review_unverified"
+        assert not await runtime.run_one_action()
         fingerprint = "5" * 64
         run = GitHubRecord(
             "88",
