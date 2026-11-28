@@ -330,6 +330,14 @@ async def test_cadence_skip_started_before_opening_review_completed_is_refused()
     assert "/graphql" not in provider.paths
 
 
+async def test_opening_review_with_conflicting_associated_head_is_refused() -> None:
+    provider = Provider(cadence=True)
+    provider.opening["pull_requests"][0]["head"]["sha"] = "f" * 40
+    with pytest.raises(GitHubUnavailable, match="lacks a verified review or cadence skip"):
+        await provider.read()
+    assert "/graphql" not in provider.paths
+
+
 async def test_kodus_poll_prioritizes_ordinary_evidence_and_rotates_budgeted_open_pulls(
     tmp_path: Path, repository: Repository, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -461,7 +469,9 @@ async def test_cadence_provider_matches_advisory_live_and_pinned_confirmation(
     current = check(pull, pull.head, skipped=True)
     current["started_at"] = LATER
     repository.review_runs[pull.head] = [current]
-    repository.review_runs[OPENING] = [check(pull, OPENING)]
+    opening_check = check(pull, OPENING)
+    opening_check["pull_requests"][0]["head"]["sha"] = pull.head
+    repository.review_runs[OPENING] = [opening_check]
     repository.cadence_threads[pull.number] = [Provider(cadence=True).thread]
     opening = OpeningHeadAttestation(REPO, pull.number, pull.row()["id"], CREATED_AT, OPENING)
     policy = replace(APP, opening_heads=(opening,))

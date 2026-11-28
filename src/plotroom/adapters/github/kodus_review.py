@@ -231,12 +231,13 @@ async def _check(
         or not identity.created_at <= check.started_at <= check.completed_at
     ):
         raise GitHubUnavailable("Kodus check does not prove an exact completed-head outcome")
-    if check.association == (
-        pull.number,
-        identity.pull_id,
-        identity.base_repository_id,
-        identity.head_repository_id,
-        sha,
+    # The association may contain GitHub's current PR snapshot. The run's own head is pinned above.
+    association = check.association
+    if (
+        association is not None
+        and association[:4]
+        == (pull.number, identity.pull_id, identity.base_repository_id, identity.head_repository_id)
+        and association[4] in (sha, pull.head_sha)
     ):
         return check
     if (
