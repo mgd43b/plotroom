@@ -3,7 +3,7 @@ title: 'Epic 2 acceptance runner'
 type: feature
 ticket: 13
 created: '2026-11-27'
-status: in-progress
+status: built
 baseline_revision: '481757f70cb489ffd0afc9bf35e041b67de80dfc'
 route: full
 route_source: auto
@@ -19,11 +19,11 @@ context: [AGENTS.md]
 
 ## Intent
 
-Build one bounded Epic 2 acceptance entry point that runs the repeatable local-daemon and Compose witnesses available today, with a row for each of the nine epic Done-when clauses. Preserve the original live-fixture and CI credential requirements. Full acceptance must fail closed until the missing real witnesses can run.
+Build one bounded Epic 2 acceptance entry point that runs the repeatable local-daemon and Compose witnesses available today, with a row for each of the nine epic Done-when clauses. Preserve the original Epic 2 live-fixture and CI credential requirements. The full Epic 2 runner must fail closed until the missing live witnesses can run.
 
 ## Boundaries & Constraints
 
-Reuse existing tests, Compose, bridge, and scripted relay helpers. Use synthetic credentials and inputs exclusively. No live provider calls, owner key access, credential or workflow setup, GitHub fixture writes, deployments, hosted rollout, or publishing. Keep issue #46 and its canonical story open. Do not change production code.
+Reuse existing tests, Compose, bridge, and scripted relay helpers. Use synthetic credentials and inputs exclusively. No live provider calls, owner key access, credential or workflow setup, GitHub fixture writes, deployments, hosted rollout, or publishing. This initial synthetic increment kept #46 open. The November 28 owner decision below supersedes that issue disposition after the authorized integrated witness passed. Do not change production code.
 
 | Scenario | Expected |
 | --- | --- |
@@ -50,12 +50,12 @@ Reuse existing tests, Compose, bridge, and scripted relay helpers. Use synthetic
 
 ## Implementation Notes
 
-This plan remains in progress for full #46 acceptance. Build a local image from the checked-out
+Build a local image from the checked-out
 source and select its tag. The runner verifies the exact image ID Compose uses. The local daemon
 test gates the actual CLI waiter. Compose gates an MCP waiter, checks that the CLI independently
 reads the same item from a saved cursor, and acknowledges the item through MCP.
 
-Remaining full inputs are the approved fixture GitHub run and PAT in CI, a hosted bridge and App-refresh run using the approved CI App credential path, a BMad-shaped GitHub Issues fixture on the same repository as the default-branch tree, a real recorded deployment and lane report in the suite, and live projected branch/PR/check/thread identity. The fixture currently has zero milestones and deployments. Existing separated acceptance runs and synthetic checks corroborate individual behavior.
+At the initial synthetic milestone, the integrated CI run, published Issues fixture, hosted witnesses and recorded deployment evidence were pending. Subsequent sections record the published fixture and protected integrated witness. The hosted bridge, hosted App refresh, and recorded deployment plus owned lane report remain Epic 2 acceptance.
 
 ## Plan Change Log
 
@@ -241,14 +241,14 @@ sources. Reuse the private temporary PAT file and the existing archive query all
 cache-only isolated Compose replay. A denial fails the included witness and reports the
 sanitized read boundary. Preserve the standalone row 6 default and the full suite's nonzero
 result. Report all nine rows with source and scope, identifying hosted bridge, hosted App,
-and recorded deployment acceptance as deferred. One green limited run cannot close #46.
+and recorded deployment acceptance as deferred. A green integrated run leaves full Epic 2 acceptance pending.
 
 A complete local dry run passed with a synthetic credential file and 60 scoped public
 fixture reads, including five exact approved GraphQL read requests. The local and
 scripted Compose witnesses passed. Both archive ledgers retained 36 events and zero actions
 after a second observation. The work-item views matched and the two isolated Compose
 replays made zero fresh provider reads. All three disposable projects were removed.
-The dry run never used the Actions PAT. The real integrated dispatch remains pending.
+The dry run never used the Actions PAT. See the later protected integrated dispatch below.
 
 The manual workflow still defaults to the standalone row 6 path. Independent reviews
 verified the scope and added duplicate-key rejection in the archive's GraphQL envelope.
@@ -262,3 +262,22 @@ limit. The scripted Compose stage and the two GitHub witness stages each have fo
 execution budgets. Cleanup keeps independent command limits, with the synchronous alarm
 paused for teardown. Synthetic timeouts prove the remaining stages still run and the report
 fails the integrated job.
+
+### Accepted #46 scope (2026-11-28)
+
+Built: [PR #224](https://github.com/mgd43b/plotroom/pull/224) for the local and Compose
+runner, [PR #229](https://github.com/mgd43b/plotroom/pull/229) for integrated CI, and
+[PR #238](https://github.com/mgd43b/plotroom/pull/238) for the archived replay correction.
+
+The owner decision in the story Notes accepts the verified local daemon, isolated Compose,
+and available integrated CI witnesses for #46. The protected [integrated run
+46114285478](https://github.com/mgd43b/plotroom/actions/runs/46114285478) passed on
+`0a60033e3e2807904b943e6c10d81f0699310d19`. Rows 1 and 9 used archived terminal
+provider facts. Rows 3, 4, and 8 used local and Compose runtime checks, and row 6 used
+the published read-only mirrors with captured inputs for isolated Compose. The archive
+witness retained 36 events, zero actions, and pull cursor generation 3 in both environments.
+The run produced zero artifacts. The #236 worker separately verified 254 focused tests on each
+locked Python at `cb8dc6a06001b2d0d0ac9acf06216e8890d7cdc2`, including the original
+mounted-PAT smoke and archived replay, with [green exact-main CI](https://github.com/mgd43b/plotroom/actions/runs/46115319948).
+Rows 2, 5, and 7 retain their deferred live witnesses under Epic #2. Full Epic 2
+exit status and behavior stay the same.

@@ -80,3 +80,13 @@ Every signal the orchestrator used to collect from four channels arrives in one 
 - Decision: 2026-11-23, the coordinator lifted its own pre-PR hold and allowed fixture verification for the inbox batch to enter normal review and CI. The [#29 GitHub comment](https://github.com/mgd43b/plotroom/issues/29#issuecomment-7094580644), posted under the repository account, records that split and leaves #29 open. It does not independently establish who authored the comment or any owner approval of live credentials. The coordinator later released the verified fixture completions for #32, #37, #40, and #52 after [#145](https://github.com/mgd43b/plotroom/pull/145), [#147](https://github.com/mgd43b/plotroom/pull/147), [#154](https://github.com/mgd43b/plotroom/pull/154), and [#148](https://github.com/mgd43b/plotroom/pull/148), respectively. #29 retains the live re-check for those four outcomes.
 - Decision: 2026-11-23, the coordinator released the fixture-backed completions for #34, #56, #57, #63, and #65 after [#147](https://github.com/mgd43b/plotroom/pull/147), [#154](https://github.com/mgd43b/plotroom/pull/154), and [#152](https://github.com/mgd43b/plotroom/pull/152). The [#33 workflow ask](https://github.com/mgd43b/plotroom/issues/33#issuecomment-7103539911) kept the dedicated-repository check open. Separate prior owner authorization to waive live acceptance or to take these specific fixture closures was not located. #33 retains the live re-check for those five outcomes.
 - Native acceptance dependency: #39 supplies hosted GitHub App polling across an installation-token refresh required by R2 and Done when.
+
+### Deferred live acceptance (2026-11-28)
+
+The owner's decision in [#46](https://github.com/mgd43b/plotroom/issues/46) accepts the local daemon, isolated Compose, and available integrated CI suite for that story. Epic #2 remains open. The following Done-when evidence stays with this epic.
+
+- Hosted bridge delivery, including upstream acknowledgment after commit.
+- Hosted GitHub App polling across an installation token refresh, with a clean credential scan. The accepted #39 refresh was local.
+- A recorded GitHub deployment and an owned lane deploy report, each appearing once. The dedicated fixture had no recorded deployments and the integrated suite exercised synthetic deployment cases.
+
+Live pilot, deployment, and publishing remain deferred.
