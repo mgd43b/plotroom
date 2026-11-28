@@ -15,10 +15,12 @@ import pytest
 from mcp.client.client import Client
 from mcp.client.stdio import StdioServerParameters
 
-from conftest import child_env, start_plotroom, tool_json, write_config
+from conftest import authenticated_client, child_env, start_plotroom, tool_json, write_config
 from fakes import FixedClock
 from plotroom.adapters.github import GitHubPoller, LocalGitHubCredential, PullRequestFetcher
 from plotroom.adapters.store_sqlite import SqliteStore
+from plotroom.app.config import load_config
+from plotroom.app.serve import Daemon
 from plotroom.app.tokens import TokenRegistry
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import LedgerError, format_time
@@ -231,6 +233,163 @@ async def test_on_demand_daemon_reads_the_mounted_pat(
             assert board["github"]["available"]
     finally:
         await asyncio.to_thread(stop_owner, data_dir)
+
+
+@pytest.mark.parametrize("first_empty", [False, True])
+async def test_mcp_snapshot_captures_github_health_with_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_empty: bool
+) -> None:
+    config = write_config(tmp_path, projects=("demo", "plain"))
+    config.write_text(
+        config.read_text()
+        + f'\n[projects.demo.github]\nrepository = "{REPO}"\n'
+        + 'api_url = "http://127.0.0.1:9"\n'
+    )
+    settings = load_config(config, {})
+    tokens = TokenRegistry(settings.data_dir)
+    operator = tokens.issue("demo", "orchestrator", local=False)
+    plain = tokens.issue("plain", "orchestrator", local=False)
+    clock = FixedClock()
+    daemon = Daemon(settings, clock=clock)
+
+    async def park_polling(_self: GitHubPoller, _after_pull: object = None) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(GitHubPoller, "run", park_polling)
+    serving = asyncio.create_task(daemon.run())
+    released = asyncio.Event()
+    captured = asyncio.Event()
+    try:
+        async with asyncio.timeout(10):
+            port = await daemon.wait_started()
+        ledger = daemon.ledgers["demo"]
+        current_rows = [] if first_empty else [pull()]
+        status = 200
+
+        def read(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(status, json=current_rows)
+
+        poller = GitHubPoller(
+            ledger,
+            clock,
+            REPO,
+            LocalGitHubCredential(SECRET, {SECRET: TOKEN}, None),
+            PullRequestFetcher("http://127.0.0.1:9", REPO),
+            1,
+        )
+        url = f"http://127.0.0.1:{port}/mcp"
+        async with authenticated_client(url, plain.bearer) as client:
+            unconfigured = tool_json(await client.call_tool("snapshot"))["data"]
+            assert "github" not in unconfigured
+            assert "open_prs" not in unconfigured
+
+        async with (
+            authenticated_client(url, operator.bearer) as client,
+            httpx.AsyncClient(transport=httpx.MockTransport(read), trust_env=False) as http,
+        ):
+            startup = tool_json(await client.call_tool("snapshot"))["data"]
+            assert startup["open_prs"] == 0
+            assert startup["github"] == {
+                "available": False,
+                "as_of": None,
+                "error": "waiting for the first GitHub poll",
+            }
+
+            snapshot_observation = Ledger.snapshot_observation
+
+            async def pause_after_capture(
+                self: Ledger, role: str, *, checklist_lane: str | None = None
+            ):
+                observation = await snapshot_observation(self, role, checklist_lane=checklist_lane)
+                if self is ledger and not captured.is_set():
+                    captured.set()
+                    await released.wait()
+                return observation
+
+            monkeypatch.setattr(Ledger, "snapshot_observation", pause_after_capture)
+            # The real tool is paused after capture but before rendering. A
+            # full production poll must be able to commit before render resumes.
+            async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
+                straddling = tasks.create_task(client.call_tool("snapshot"))
+                try:
+                    await captured.wait()
+                    assert await poller.poll(http)
+                finally:
+                    released.set()
+
+            first = tool_json(straddling.result())["data"]
+            assert first["github"] == startup["github"]
+            assert first["open_prs"] == startup["open_prs"]
+            synced = tool_json(await client.call_tool("snapshot"))["data"]
+            assert synced["github"] == {"available": True, "as_of": format_time(clock.now())}
+            assert synced["open_prs"] == (0 if first_empty else 1)
+
+            status = 401
+            assert not await poller.poll(http)
+            failed = tool_json(await client.call_tool("snapshot"))["data"]
+            assert failed["github"] == {
+                "available": False,
+                "as_of": synced["github"]["as_of"],
+                "error": "GitHub denied access to the configured repository",
+            }
+            assert failed["open_prs"] == synced["open_prs"]
+
+            status = 200
+            clock.advance(1)
+            current_rows = [pull(state="open" if first_empty else "closed", seconds=1)]
+            assert await poller.poll(http)
+            recovered = tool_json(await client.call_tool("snapshot"))["data"]
+            assert recovered["github"] == {"available": True, "as_of": format_time(clock.now())}
+            assert recovered["open_prs"] == (1 if first_empty else 0)
+    finally:
+        released.set()
+        daemon.stop()
+        async with asyncio.timeout(10):
+            await serving
+
+
+async def test_canceled_poll_waiting_for_snapshot_does_not_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    clock = FixedClock()
+    ledger = Ledger(store, build_catalog(), clock, github_repository=REPO)
+    ledger.start()
+    notification = ledger.commit_signal
+    reading = asyncio.Event()
+    release = asyncio.Event()
+    attempted = asyncio.Event()
+    original = ledger.snapshot_summary
+
+    async def pause_read(role: str, *, checklist_lane: str | None = None):
+        reading.set()
+        await release.wait()
+        return await original(role, checklist_lane=checklist_lane)
+
+    async def poll() -> bool:
+        attempted.set()
+        return await ledger.commit_github_pull_poll(REPO, None, (), format_time(clock.now()))
+
+    monkeypatch.setattr(ledger, "snapshot_summary", pause_read)
+    try:
+        async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
+            snapshot = tasks.create_task(ledger.snapshot_observation("orchestrator"))
+            try:
+                await reading.wait()
+                polling = tasks.create_task(poll())
+                await attempted.wait()
+                polling.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await polling
+            finally:
+                release.set()
+        assert snapshot.result()[-1] == "waiting for the first GitHub poll"
+        assert await ledger.fetch_cursor(REPO, PULL_REQUESTS) is None
+        assert not notification.is_set()
+    finally:
+        await ledger.stop()
+        await store.close()
 
 
 @pytest.mark.parametrize("limit", ["reset", "retry_after", "secondary"])

@@ -214,7 +214,8 @@ def build_app(
                 trigger_counts,
                 claim_count,
                 freeze_reason,
-            ) = await caller.ledger.snapshot_summary(caller.identity.role, checklist_lane=lane)
+                github_error,
+            ) = await caller.ledger.snapshot_observation(caller.identity.role, checklist_lane=lane)
             if lane is not None:
                 for detail in details:
                     if detail.id == lane:
@@ -230,7 +231,7 @@ def build_app(
                     lane_details=details,
                     lane_offset=lane_offset,
                     github=github,
-                    github_error=caller.ledger.github_error,
+                    github_error=github_error,
                     claim_count=claim_count,
                     trigger_counts=trigger_counts,
                     freeze_reason=freeze_reason,

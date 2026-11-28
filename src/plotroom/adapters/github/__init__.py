@@ -20,7 +20,6 @@ from plotroom.core.github import (
     PULL_REQUESTS,
     FetchRetry,
     ObservedPull,
-    apply_pull_poll,
     valid_git_sha,
 )
 from plotroom.core.ledger import Ledger
@@ -318,11 +317,8 @@ class GitHubPoller:
             await self._ledger.set_github_error(reason)
             return False
         as_of = format_time(self._clock.now())
-        committed = await self._ledger.run(
-            "system", lambda uow: apply_pull_poll(uow, self._repo, baseline, pulls, as_of)
-        )
+        committed = await self._ledger.commit_github_pull_poll(self._repo, baseline, pulls, as_of)
         if committed:
-            await self._ledger.set_github_error(None)
             self._retry_at = None
         return committed
 

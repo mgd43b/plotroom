@@ -26,7 +26,14 @@ from plotroom.core.events import (
     is_json,
     validate_fields,
 )
-from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
+from plotroom.core.github import (
+    FetchCursor,
+    FetchRetry,
+    GitHubSummary,
+    ObservedPull,
+    PullRequest,
+    apply_pull_poll,
+)
 from plotroom.core.github_projection import GitHubResource
 from plotroom.core.merge_controller import ACTIVE_MERGE_ITEMS, reconcile_merge_controller
 from plotroom.core.merge_gate import GatePolicy, GateSnapshot, GateVerdict, evaluate_gate
@@ -112,6 +119,7 @@ class Ledger:
         self._fixture_merge_enabled = fixture_merge_enabled
         self._fixture_branch_updates = fixture_branch_updates
         self.github_error = "waiting for the first GitHub poll" if github_repository else None
+        self._github_observation_lock = asyncio.Lock()
         self.session_workers = dict(session_workers or {})
         self._drain_enabled = drain_enabled
         self._brief_settings = brief_settings or BriefSettings()
@@ -208,9 +216,49 @@ class Ledger:
         return replace(snapshot, github_unavailable=self.github_error is not None)
 
     async def set_github_error(self, error: str | None) -> None:
+        async with self._github_observation_lock:
+            await self._set_github_error(error)
+
+    async def _set_github_error(self, error: str | None) -> None:
         if self.github_error != error:
             self.github_error = error
             await self.refresh_merge_controller()
+
+    async def commit_github_pull_poll(
+        self,
+        repository: str,
+        baseline: FetchCursor | None,
+        pulls: tuple[ObservedPull, ...],
+        as_of: str,
+    ) -> bool:
+        async def commit_observation() -> bool:
+            try:
+                committed = await self.run(
+                    "system",
+                    partial(
+                        apply_pull_poll,
+                        repository=repository,
+                        baseline=baseline,
+                        pulls=pulls,
+                        as_of=as_of,
+                    ),
+                )
+                if committed:
+                    await self._set_github_error(None)
+                return committed
+            finally:
+                self._github_observation_lock.release()
+
+        # Cancellation while waiting for the observation lock must not queue a write.
+        await self._github_observation_lock.acquire()
+        # The project writer may finish a running transaction after the poll
+        # task is canceled. Finish publication before the poller shuts down.
+        task = asyncio.create_task(commit_observation())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.shield(asyncio.gather(task, return_exceptions=True))
+            raise
 
     async def refresh_merge_controller(self) -> None:
         if self._live_merge_controller:
@@ -515,6 +563,13 @@ class Ledger:
         return await self._store.read_snapshot(
             role, self.github_repository, checklist_lane=checklist_lane
         )
+
+    async def snapshot_observation(
+        self, role: str, *, checklist_lane: str | None = None
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None, str | None]:
+        async with self._github_observation_lock:
+            summary = await self.snapshot_summary(role, checklist_lane=checklist_lane)
+            return (*summary, self.github_error)
 
     async def snapshot_with_triggers(
         self, role: str
