@@ -8,6 +8,7 @@ after: [2, 4.5, 1.9, 3.6, 3.7, 6.3, 6.4]
 hitl: true
 risk: high
 tracker_id: "110"
+assignee: "mgd43b"
 remote: "https://github.com/mgd43b/plotroom/issues/110"
 tracker_status: backlog
 ---

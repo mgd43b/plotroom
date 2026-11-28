@@ -8,6 +8,7 @@ after: [2, 2.15, 1.7]
 hitl: true
 risk: high
 tracker_id: "67"
+assignee: "mgd43b"
 remote: "https://github.com/mgd43b/plotroom/issues/67"
 tracker_status: backlog
 ---

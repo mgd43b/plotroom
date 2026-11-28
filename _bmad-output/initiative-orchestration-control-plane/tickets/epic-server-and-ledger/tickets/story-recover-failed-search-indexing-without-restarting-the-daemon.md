@@ -9,6 +9,7 @@ refined: false
 hitl: false
 risk: medium
 tracker_id: "172"
+assignee: "mgd43b"
 remote: "https://github.com/mgd43b/plotroom/issues/172"
 tracker_status: done
 ---
