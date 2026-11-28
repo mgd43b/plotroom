@@ -5,12 +5,12 @@ title: "Recognize legacy Commit Status contexts in the merge gate"
 parent: epic-merge-controller
 covers: [R1, R2]
 after: [1, "2.3"]
-refined: false
+refined: true
 hitl: false
 risk: medium
 tracker_id: "232"
 remote: "https://github.com/mgd43b/plotroom/issues/232"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Recognize legacy Commit Status contexts in the merge gate
@@ -27,3 +27,7 @@ Use bounded read-only evidence from the configured repository and exact head. A 
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-merge-controller/epic-merge-controller.md, R1 and R2
 - routed finding — https://github.com/mgd43b/plotroom/pull/155
+
+## Verification
+
+The verified implementation pairs current legacy evidence with Check Runs, independently re-reads both at confirmation, and preserves check producers and trusted-App attribution.

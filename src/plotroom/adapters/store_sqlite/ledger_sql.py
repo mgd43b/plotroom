@@ -387,6 +387,9 @@ class SqliteTransaction:
     async def open_pulls(self, repository: str) -> tuple[PullRequest, ...]:
         return await github_sql.open_pulls(self._live(), repository)
 
+    async def detail_capacity_exceeded(self, repository: str) -> bool:
+        return await github_sql.detail_capacity_exceeded(self._live(), repository)
+
     async def save_pull_request(self, pull: PullRequest) -> None:
         await github_sql.save_pull_request(self._live(), pull)
         self._branch_candidates.pop(pull.repository, None)

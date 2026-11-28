@@ -25,6 +25,7 @@ from plotroom.adapters.github.ci import (
     fetch_main,
     fetch_main_ci,
 )
+from plotroom.adapters.github.commit_statuses import fetch_commit_statuses
 from plotroom.adapters.github.deployments import poll_deployments
 from plotroom.adapters.github.issue_details import (
     IssueRelationshipReadError,
@@ -46,6 +47,7 @@ from plotroom.adapters.github.read import GitHubReadClient, obj, string
 from plotroom.core.events import format_time
 from plotroom.core.github import (
     DETAILS,
+    PULL_DETAIL_ATTEMPT_PREFIX,
     PULL_REQUESTS,
     FetchCursor,
     FetchRetry,
@@ -59,6 +61,7 @@ from plotroom.core.github_projection import (
     CHECKS,
     COMMENT_BACKFILL,
     COMMENTS,
+    COMMIT_STATUSES,
     FILES,
     ISSUE_PAGINATION_VERIFIED,
     ISSUE_RELATION_RETRY,
@@ -111,6 +114,17 @@ _READ_ERRORS = (
 
 class _KodusReviewBudgetExhausted(Exception):
     """There is no time left to attempt another review read."""
+
+
+async def _pull_revision_current(uow: UnitOfWork, pull: PullRequest) -> bool:
+    current = await uow.pull_request(pull.repository, pull.number)
+    return current is not None and (
+        current.head_sha,
+        current.version,
+        current.updated_at,
+        current.state,
+        current.complete,
+    ) == (pull.head_sha, pull.version, pull.updated_at, pull.state, pull.complete)
 
 
 class GitHubDetailPoller:
@@ -186,6 +200,12 @@ class GitHubDetailPoller:
             include_junit=False,
             kodus_review=self.ledger.merge_gate_policy.kodus_review,
         )
+        try:
+            statuses = await fetch_commit_statuses(api, client, token, pull.head_sha)
+        except GitHubRateLimited:
+            raise
+        except _READ_ERRORS:
+            statuses = GitHubResource((), complete=False)
         labels = await fetch_labels(api, client, token, pull)
         threads = await fetch_threads(api, client, token, pull)
         text = await fetch_pull_text(api, client, token, pull)
@@ -225,6 +245,11 @@ class GitHubDetailPoller:
             pull=replace(pull, draft=draft, as_of=observed_at),
             pull_cursor=None,
             checks=replace(checks, as_of=observed_at),
+            commit_statuses=replace(
+                statuses,
+                attributes={**statuses.attributes, "checks_generation": checks.generation},
+                as_of=observed_at,
+            ),
             main_ci=replace(main_ci, as_of=observed_at),
             main=main,
             threads=replace(threads, as_of=observed_at),
@@ -328,7 +353,7 @@ class GitHubDetailPoller:
             )
             await self._poll_comments(client, token, numbers)
             await self._poll_ask_histories(client, token, issues)
-        targets: dict[str, list[int]] = {}
+        targets: dict[str, list[PullRequest]] = {}
         history = tuple(
             sorted(
                 {
@@ -352,93 +377,60 @@ class GitHubDetailPoller:
             targets.setdefault(run.fields["head_sha"], [])
         pulls = await self.ledger.github_pull_targets(api.repository)
         for pull in pulls:
-            targets.setdefault(pull.head_sha, []).append(pull.number)
+            targets.setdefault(pull.head_sha, []).append(pull)
         checks: dict[str, GitHubResource] = {}
+        minimum_checks = self.ledger.merge_gate_policy.min_checks
+        status_heads = (
+            {pull.head_sha for pull in pulls if pull.state == "open"}
+            if minimum_checks is not None and minimum_checks > 0
+            else set[str]()
+        )
         recoveries = main_recovery_check_ids(history)
         junit_budget = JUnitBudget()
         junit_start = self._junit_offset % max(1, len(targets))
-        next_junit_start = 0
-        for index, (sha, numbers) in enumerate(targets.items()):
+        for index, (sha, candidates) in enumerate(targets.items()):
             attempts_before = junit_budget.attempts_left
-            result = await self._refresh(
-                CHECKS,
-                sha,
-                lambda previous, sha=sha, allow_lookup=index >= junit_start: fetch_checks(
-                    api,
-                    client,
-                    token,
-                    sha,
-                    previous,
-                    recovery_check_ids=recoveries.get(sha, ()),
-                    junit_budget=junit_budget,
-                    allow_junit_lookup=allow_lookup,
-                    kodus_review=self.ledger.merge_gate_policy.kodus_review,
-                ),
-                pulls=tuple(numbers),
-            )
-            if result is not None:
-                checks[sha] = result
-            if junit_budget.attempts_left != attempts_before:
-                next_junit_start = index + 1
-        # Rotate optional work only. Required observations still run in their usual order.
-        self._junit_offset = next_junit_start if junit_budget.exhausted else 0
-        for pull in pulls:
-            complete = True
-            files = None
-            for resource, read in (
-                (THREADS, fetch_threads),
-                (FILES, fetch_files),
-                (LABELS, fetch_labels),
-            ):
+            try:
                 result = await self._refresh(
-                    resource,
-                    str(pull.number),
-                    lambda _, read=read, pull=pull: read(api, client, token, pull),
-                    pulls=(pull.number,),
-                    pull=pull,
-                )
-                complete = complete and result is not None
-                if resource == FILES:
-                    files = result
-            if main is not None and main.complete and self.ci_workflow is not None:
-                await self._refresh(
-                    PULL_COMPARISON,
-                    str(pull.number),
-                    lambda previous, pull=pull: fetch_pull_comparison(
+                    CHECKS,
+                    sha,
+                    lambda previous, sha=sha, allow_lookup=index >= junit_start: fetch_checks(
                         api,
                         client,
                         token,
-                        pull,
-                        main.attributes["branch"],
-                        main.attributes["head_sha"],
+                        sha,
                         previous,
+                        recovery_check_ids=recoveries.get(sha, ()),
+                        junit_budget=junit_budget,
+                        allow_junit_lookup=allow_lookup,
+                        kodus_review=self.ledger.merge_gate_policy.kodus_review,
                     ),
-                    pull=pull,
+                    pulls=tuple(pull.number for pull in candidates),
+                    read_statuses=partial(fetch_commit_statuses, api, client, token, sha)
+                    if sha in status_heads
+                    else None,
                 )
-            if files is not None and (observed := checks.get(pull.head_sha)) is not None:
-                await self.ledger.run(
-                    "system",
-                    partial(
-                        record_pull_flakes,
-                        repository=api.repository,
-                        pull=pull,
-                        checks=observed,
-                        files=files,
-                    ),
+            except GitHubRateLimited:
+                for pull in candidates:
+                    await self._record_pull_attempt(pull, complete=False)
+                raise
+            if result is not None:
+                checks[sha] = result
+            if junit_budget.exhausted and junit_budget.attempts_left != attempts_before:
+                self._junit_offset = index + 1
+            # Finish this head's selected pulls before a later head can stop the pass.
+            for pull in candidates:
+                await self._poll_pull_details(
+                    client,
+                    token,
+                    pull,
+                    main,
+                    result,
+                    needs_statuses=pull.state == "open" and sha in status_heads,
                 )
-            check = await self.ledger.github_resource(api.repository, CHECKS, pull.head_sha)
-            complete = complete and check is not None and check.complete
-            watermark = f"{pull.updated_at}:{pull.version}" if complete else ""
-            await self._record_pull_attempt(pull.number, watermark)
+        if not junit_budget.exhausted:
+            self._junit_offset = 0
         await self._poll_main_flakes(client, token, history, checks)
-        if self.ci_workflow is not None:
-            for pull in pulls:
-                await self._refresh(
-                    PULL_TEXT,
-                    str(pull.number),
-                    lambda _, pull=pull: fetch_pull_text(api, client, token, pull),
-                    pull=pull,
-                )
         if self.on_merge_evidence is not None:
             for pull in pulls:
                 await self.on_merge_evidence(pull.number)
@@ -455,6 +447,78 @@ class GitHubDetailPoller:
         await poll_deployments(self.ledger, api, client, token, format_time(self.clock.now()))
         if self.ledger.merge_gate_policy.kodus_review is not None:
             await self._poll_kodus_reviews(client, token, pulls)
+
+    async def _poll_pull_details(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+        pull: PullRequest,
+        main: GitHubResource | None,
+        checks: GitHubResource | None,
+        *,
+        needs_statuses: bool,
+    ) -> None:
+        api = self.api
+        complete = False
+        try:
+            observations: dict[str, GitHubResource | None] = {}
+            for resource, read in (
+                (THREADS, fetch_threads),
+                (FILES, fetch_files),
+                (LABELS, fetch_labels),
+            ):
+                observations[resource] = await self._refresh(
+                    resource,
+                    str(pull.number),
+                    lambda _, read=read: read(api, client, token, pull),
+                    pulls=(pull.number,),
+                    pull=pull,
+                )
+            if self.ci_workflow is not None:
+                if pull.state == "open":
+                    observations[PULL_COMPARISON] = (
+                        await self._refresh(
+                            PULL_COMPARISON,
+                            str(pull.number),
+                            lambda previous: fetch_pull_comparison(
+                                api,
+                                client,
+                                token,
+                                pull,
+                                main.attributes["branch"],
+                                main.attributes["head_sha"],
+                                previous,
+                            ),
+                            pull=pull,
+                        )
+                        if main is not None and main.complete
+                        else None
+                    )
+                observations[PULL_TEXT] = await self._refresh(
+                    PULL_TEXT,
+                    str(pull.number),
+                    lambda _: fetch_pull_text(api, client, token, pull),
+                    pull=pull,
+                )
+            files = observations[FILES]
+            if files is not None and checks is not None:
+                await self.ledger.run(
+                    "system",
+                    partial(
+                        record_pull_flakes,
+                        repository=api.repository,
+                        pull=pull,
+                        checks=checks,
+                        files=files,
+                    ),
+                )
+            complete = (
+                checks is not None
+                and checks.complete
+                and all(value is not None and value.complete for value in observations.values())
+            )
+        finally:
+            await self._record_pull_attempt(pull, complete, needs_statuses=needs_statuses)
 
     async def _poll_kodus_reviews(
         self, client: httpx.AsyncClient, token: str, pulls: tuple[PullRequest, ...]
@@ -545,16 +609,42 @@ class GitHubDetailPoller:
                 ),
             )
 
-    async def _record_pull_attempt(self, number: int, watermark: str) -> None:
-        repository = self.api.repository
-        await self.ledger.run(
-            "system",
-            lambda uow: uow.save_fetch_cursor(
-                repository,
-                f"pull_details/{number}",
-                FetchCursor(watermark, format_time(self.clock.now()), 1),
-            ),
-        )
+    async def _record_pull_attempt(
+        self, pull: PullRequest, complete: bool, *, needs_statuses: bool = False
+    ) -> None:
+        async def write(uow: UnitOfWork) -> None:
+            if not await _pull_revision_current(uow, pull):
+                return
+            if complete and needs_statuses:
+                checks = await uow.github_resource(pull.repository, CHECKS, pull.head_sha)
+                statuses = await uow.github_resource(
+                    pull.repository, COMMIT_STATUSES, pull.head_sha
+                )
+                statuses_complete = (
+                    checks is not None
+                    and checks.complete
+                    and statuses is not None
+                    and statuses.complete
+                    and statuses.attributes.get("repository") == pull.repository
+                    and statuses.attributes.get("head_sha") == pull.head_sha
+                    and statuses.attributes.get("checks_generation") == checks.generation
+                )
+            else:
+                statuses_complete = not needs_statuses
+            scope = f"{PULL_DETAIL_ATTEMPT_PREFIX}{pull.number}"
+            prior = await uow.fetch_cursor(pull.repository, scope)
+            watermark = (
+                f"{pull.updated_at}:{pull.version}" if complete and statuses_complete else ""
+            )
+            await uow.save_fetch_cursor(
+                pull.repository,
+                scope,
+                FetchCursor(
+                    watermark, format_time(self.clock.now()), prior.generation + 1 if prior else 1
+                ),
+            )
+
+        await self.ledger.run("system", write)
 
     async def _poll_comments(
         self, client: httpx.AsyncClient, token: str, numbers: frozenset[int]
@@ -644,9 +734,12 @@ class GitHubDetailPoller:
         pulls: tuple[int, ...] = (),
         *,
         retry_issues: tuple[int, ...] = (),
+        pull: PullRequest | None = None,
     ) -> None:
         async def write(uow: UnitOfWork) -> None:
             repository = self.api.repository
+            if pull is not None and not await _pull_revision_current(uow, pull):
+                return
             attributes: dict[str, Any] = (
                 {ISSUE_PAGINATION_VERIFIED: False} if resource == ISSUE_TREE else {}
             )
@@ -676,9 +769,11 @@ class GitHubDetailPoller:
         *,
         pulls: tuple[int, ...] = (),
         pull: PullRequest | None = None,
+        read_statuses: Callable[[], Awaitable[GitHubResource]] | None = None,
     ) -> GitHubResource | None:
         repository = self.api.repository
         previous = await self.ledger.github_resource(repository, resource, scope)
+        started_at = format_time(self.clock.now()) if read_statuses is not None else None
         try:
             result = await read(previous)
         except IssueRelationshipReadError as exc:
@@ -691,7 +786,7 @@ class GitHubDetailPoller:
             )
             return None
         except GitHubRateLimited:
-            await self._mark_incomplete(resource, scope, pulls)
+            await self._mark_incomplete(resource, scope, pulls, pull=pull)
             raise
         except _READ_ERRORS:
             if previous is None or previous.complete:
@@ -700,8 +795,26 @@ class GitHubDetailPoller:
                     extra={"project": self.ledger.project_id, "resource": resource},
                 )
             if resource in (ISSUE_TREE, KODUS_REVIEW) or previous is None or previous.complete:
-                await self._mark_incomplete(resource, scope, pulls)
+                await self._mark_incomplete(resource, scope, pulls, pull=pull)
             return None
+
+        statuses = None
+        if read_statuses is not None:
+            try:
+                statuses = await read_statuses()
+            except GitHubRateLimited:
+                await self._mark_incomplete(COMMIT_STATUSES, scope)
+                raise
+            except _READ_ERRORS:
+                statuses = GitHubResource((), complete=False)
+                prior_statuses = await self.ledger.github_resource(
+                    repository, COMMIT_STATUSES, scope
+                )
+                if prior_statuses is None or prior_statuses.complete:
+                    log.warning(
+                        "GitHub projection refresh failed",
+                        extra={"project": self.ledger.project_id, "resource": COMMIT_STATUSES},
+                    )
 
         async def write(uow: UnitOfWork) -> None:
             if (
@@ -709,27 +822,38 @@ class GitHubDetailPoller:
                 and await uow.github_resource(repository, resource, scope) != previous
             ):
                 return
-            if pull is not None:
-                current = await uow.pull_request(repository, pull.number)
-                if current is None or (pull.head_sha, pull.version, pull.updated_at) != (
-                    current.head_sha,
-                    current.version,
-                    current.updated_at,
-                ):
-                    return
+            if pull is not None and not await _pull_revision_current(uow, pull):
+                return
             observed = result
             if resource == LABELS and pull is not None:
                 previous_labels = await uow.github_resource(repository, LABELS, scope)
                 observed = bind_overlap_labels(result, previous_labels, pull)
+            as_of = started_at or format_time(self.clock.now())
             await apply_resource(
                 uow,
                 repository,
                 resource,
                 scope,
                 observed,
-                format_time(self.clock.now()),
+                as_of,
                 pulls=pulls,
             )
+            if statuses is not None:
+                # Bind the two sources in the same transaction, including when
+                # only the Check Runs read succeeded.
+                checks = await uow.github_resource(repository, CHECKS, scope)
+                assert checks is not None
+                await apply_resource(
+                    uow,
+                    repository,
+                    COMMIT_STATUSES,
+                    scope,
+                    replace(
+                        statuses,
+                        attributes={**statuses.attributes, "checks_generation": checks.generation},
+                    ),
+                    as_of,
+                )
             if resource == CHECKS:
                 await record_same_head(uow, repository, result)
 

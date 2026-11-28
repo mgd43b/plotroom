@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import httpx
 import pytest
 
+from fakes import commit_status_evidence
 from plotroom.adapters.github.pr_details import fetch_threads
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.core import merge_gate
@@ -23,6 +24,7 @@ CHECK = GitHubRecord(
     "check_run",
     {"id": 1, "name": "test", "head_sha": FIRST, "status": "completed", "conclusion": "success"},
 )
+EMPTY_STATUS_EVIDENCE = commit_status_evidence(REPO, FIRST, NOW)
 EMPTY_THREADS = GitHubResource(
     (), attributes={"head_sha": FIRST, "pull_version": PULL.version}, as_of=THREADS_OBSERVED
 )
@@ -36,7 +38,9 @@ async def test_gate_evaluates_every_review_thread_and_its_refreshed_resolution(
     fixture.first_thread_page_size = 100
     fixture.step = 1
     api = GitHubReadClient(API, REPO)
-    snapshot = GateSnapshot(PULL, GitHubResource((CHECK,), as_of=NOW))
+    snapshot = GateSnapshot(
+        PULL, GitHubResource((CHECK,), as_of=NOW), commit_statuses=EMPTY_STATUS_EVIDENCE
+    )
     async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handle)) as client:
         unresolved = await fetch_threads(api, client, "fixture", PULL)
         assert len(unresolved.records) == 101
@@ -71,7 +75,9 @@ async def test_gate_requires_new_thread_observation_after_same_sha_reopen(
     async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handle)) as client:
         original = await fetch_threads(api, client, "fixture", PULL)
         original = replace(original, as_of=THREADS_OBSERVED)
-        snapshot = GateSnapshot(PULL, checks, threads=original)
+        snapshot = GateSnapshot(
+            PULL, checks, threads=original, commit_statuses=EMPTY_STATUS_EVIDENCE
+        )
         assert evaluate_gate(snapshot, GatePolicy(1), CHECKED_AT).verdict == "MERGE"
 
         snapshot = replace(snapshot, pull=reopened)
@@ -98,7 +104,12 @@ async def test_gate_requires_new_thread_observation_after_same_sha_reopen(
 def test_missing_incomplete_wrong_head_or_stale_threads_refuse(
     threads: GitHubResource | None,
 ) -> None:
-    snapshot = GateSnapshot(PULL, GitHubResource((CHECK,), as_of=NOW), threads=threads)
+    snapshot = GateSnapshot(
+        PULL,
+        GitHubResource((CHECK,), as_of=NOW),
+        commit_statuses=EMPTY_STATUS_EVIDENCE,
+        threads=threads,
+    )
     decision = evaluate_gate(snapshot, GatePolicy(1), CHECKED_AT)
     assert (decision.verdict, decision.exit_class) == ("REFUSE", 2)
     [reason] = decision.reasons
@@ -110,6 +121,8 @@ def test_missing_incomplete_wrong_head_or_stale_threads_refuse(
 
 def test_rule_1_failure_precedes_missing_thread_evidence() -> None:
     failure = replace(CHECK, fields={**CHECK.fields, "conclusion": "failure"})
-    snapshot = GateSnapshot(PULL, GitHubResource((failure,), as_of=NOW))
+    snapshot = GateSnapshot(
+        PULL, GitHubResource((failure,), as_of=NOW), commit_statuses=EMPTY_STATUS_EVIDENCE
+    )
     [reason] = evaluate_gate(snapshot, GatePolicy(1), CHECKED_AT).reasons
     assert reason.code == "checks_failing"

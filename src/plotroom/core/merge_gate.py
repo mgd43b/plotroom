@@ -9,9 +9,11 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from plotroom.core.events import format_time
-from plotroom.core.github import PULL_REQUESTS, FetchCursor, PullRequest
+from plotroom.core.github import ACTIVE_PULL_DETAIL_BUDGET, PULL_REQUESTS, FetchCursor, PullRequest
 from plotroom.core.github_projection import (
     CHECKS,
+    COMMIT_STATUS_BUCKETS,
+    COMMIT_STATUSES,
     KODUS_REVIEW,
     LABELS,
     MAIN,
@@ -90,6 +92,8 @@ class GateSnapshot:
     ambiguous_lane: bool = False
     pull_text: GitHubResource | None = None
     kodus_review: GitHubResource | None = None
+    commit_statuses: GitHubResource | None = None
+    detail_capacity_exceeded: bool = False
 
 
 @dataclass(frozen=True)
@@ -178,6 +182,33 @@ def _check_buckets(checks: GitHubResource, head_sha: str) -> list[tuple[str, str
     return buckets
 
 
+def _commit_status_buckets(statuses: GitHubResource) -> list[tuple[str, str]] | None:
+    # The provider lists statuses newest first. Keep other creators' reports
+    # even when they reuse a context name.
+    latest: dict[tuple[str, int], tuple[str, str]] = {}
+    seen: set[int] = set()
+    for row in statuses.records:
+        context, state = row.fields.get("context"), row.fields.get("state")
+        identifier, creator = row.fields.get("id"), row.fields.get("creator_id")
+        if (
+            row.kind != "commit_status"
+            or type(identifier) is not int
+            or not 0 < identifier <= 2**63 - 1
+            or identifier in seen
+            or row.key != str(identifier)
+            or type(creator) is not int
+            or not 0 < creator <= 2**63 - 1
+            or not isinstance(context, str)
+            or not context.strip()
+            or not isinstance(state, str)
+            or state not in COMMIT_STATUS_BUCKETS
+        ):
+            return None
+        seen.add(identifier)
+        latest.setdefault((context.casefold(), creator), (context, COMMIT_STATUS_BUCKETS[state]))
+    return list(latest.values())
+
+
 def _rule_checks(snapshot: GateSnapshot, policy: GatePolicy, now: datetime) -> GateReason | None:
     pull, checks = snapshot.pull, snapshot.checks
     if pull is None or checks is None or not checks.complete:
@@ -187,11 +218,30 @@ def _rule_checks(snapshot: GateSnapshot, policy: GatePolicy, now: datetime) -> G
     buckets = _check_buckets(checks, pull.head_sha)
     if buckets is None:
         return GateReason("checks_unreadable", "could not read the checks")
+    statuses = snapshot.commit_statuses
+    unreadable = GateReason("commit_statuses_unreadable", "could not read the commit statuses")
+    if (
+        statuses is None
+        or not statuses.complete
+        or statuses.attributes.get("repository") != pull.repository
+        or statuses.attributes.get("head_sha") != pull.head_sha
+        or type(statuses.attributes.get("checks_generation")) is not int
+        or statuses.attributes["checks_generation"] != checks.generation
+    ):
+        return unreadable
+    if not fresh(statuses.as_of, now, policy.max_age):
+        return GateReason("commit_statuses_stale", "commit status evidence is stale")
+    status_buckets = _commit_status_buckets(statuses)
+    if status_buckets is None:
+        return unreadable
+    check_names = {name for name, _ in buckets}
+    status_names = {context.casefold() for context, _ in status_buckets}
+    buckets.extend(status_buckets)
     pending = sum(bucket == "pending" for _, bucket in buckets)
     if pending:
         return GateReason("checks_pending", f"{pending} checks pending")
     minimum = policy.min_checks
-    total = len({name for name, _ in buckets})
+    total = len(check_names) + len(status_names - {name.casefold() for name in check_names})
     if minimum is not None and total < minimum:
         return GateReason(
             "checks_below_minimum",
@@ -325,6 +375,10 @@ async def load_gate_snapshot(
         ambiguous_lane=ambiguous_lane,
         pull_text=await reader.github_resource(repository, PULL_TEXT, scope),
         kodus_review=await reader.github_resource(repository, KODUS_REVIEW, scope),
+        commit_statuses=await reader.github_resource(repository, COMMIT_STATUSES, pull.head_sha)
+        if pull is not None
+        else None,
+        detail_capacity_exceeded=await reader.detail_capacity_exceeded(repository),
     )
 
 
@@ -609,6 +663,7 @@ def evaluate_gate(
             pull,
             cursor,
             checks,
+            snapshot.commit_statuses,
             snapshot.threads,
             snapshot.main_ci,
             snapshot.labels,
@@ -640,6 +695,12 @@ def evaluate_gate(
         determine_main_verdict(snapshot, policy, now).head_sha != expected_main_sha
     ):
         reason = GateReason("main_moved", "the default branch moved", 1)
+        return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
+    if snapshot.detail_capacity_exceeded:
+        reason = GateReason(
+            "detail_capacity_exceeded",
+            f"more than {ACTIVE_PULL_DETAIL_BUDGET} open PRs exceed merge detail polling capacity",
+        )
         return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
     for rule in GATE_RULES:
         if (reason := rule(snapshot, policy, now)) is not None:

@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from fakes import FixedClock
+from fakes import FixedClock, commit_status_evidence
 from plotroom.adapters.github.pull_comparison import fetch_pull_comparison
 from plotroom.adapters.github.read import GitHubReadClient
 from plotroom.adapters.store_sqlite import SqliteStore
@@ -20,9 +20,10 @@ from plotroom.core.branch_updates import (
 )
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import NewEvent, format_time
-from plotroom.core.github import PULL_REQUESTS, FetchCursor, PullRequest
+from plotroom.core.github import ACTIVE_PULL_DETAIL_BUDGET, PULL_REQUESTS, FetchCursor, PullRequest
 from plotroom.core.github_projection import (
     CHECKS,
+    COMMIT_STATUSES,
     LABELS,
     MAIN,
     MAIN_CI,
@@ -184,6 +185,7 @@ async def observe(
         )
         for resource, scope, snapshot in (
             (CHECKS, head, GitHubResource((check,), as_of=now)),
+            (COMMIT_STATUSES, head, commit_status_evidence(REPO, head, now)),
             (MAIN, "", GitHubResource((), attributes=refs, as_of=now)),
             (
                 MAIN_CI,
@@ -301,6 +303,31 @@ async def test_earlier_open_lane_pull_blocks_queued_update_and_gate(tmp_path: Pa
         await ledger.run("system", lambda uow: close(uow, 5))
         assert (await store.read_merge_gate(REPO, 7)).earlier_pull is None
         assert (await ledger.merge_gate("clerk", 7)).verdict == "MERGE"
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+async def test_overloaded_merge_capacity_preserves_eligible_branch_updates(tmp_path: Path) -> None:
+    port = FixtureWrite()
+    store, ledger, runtime = await setup(tmp_path, FixedClock(), port)
+
+    async def overload(uow: UnitOfWork) -> None:
+        candidate = await uow.pull_request(REPO, 7)
+        assert candidate is not None
+        for number in range(100, 100 + ACTIVE_PULL_DETAIL_BUDGET):
+            await uow.save_pull_request(replace(candidate, number=number, branch=f"pr-{number}"))
+
+    try:
+        await observe(ledger, pending=True)
+        await ledger.run("system", overload)
+        verdict = await ledger.merge_gate("clerk", 7)
+        assert [reason.code for reason in verdict.reasons] == ["detail_capacity_exceeded"]
+        assert not await runtime.stage_branch_update(7)
+        await observe(ledger)
+        assert await runtime.stage_branch_update(7)
+        assert await runtime.run_one_action()
+        assert port.calls == [KEY]
     finally:
         await ledger.stop()
         await store.close()

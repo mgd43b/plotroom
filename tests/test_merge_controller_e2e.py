@@ -21,14 +21,22 @@ from conftest import authenticated_client, tool_json
 from fakes import FixedClock
 from plotroom.adapters.github import GitHubPoller, github_secret_name
 from plotroom.adapters.github.details import GitHubDetailPoller
-from plotroom.adapters.github.read import CADENCE_THREADS_QUERY, REVIEW_THREADS_QUERY
+from plotroom.adapters.github.pr_details import fetch_pull_text
+from plotroom.adapters.github.read import (
+    CADENCE_THREADS_QUERY,
+    REVIEW_THREADS_QUERY,
+    GitHubReadClient,
+)
 from plotroom.app.config import Config, GitHubConfig
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import TokenRegistry
-from plotroom.core.events import Event
+from plotroom.core.events import Event, format_time
+from plotroom.core.github import PULL_DETAIL_ATTEMPT_PREFIX, PullRequest
+from plotroom.core.github_projection import PULL_TEXT, GitHubResource
 from plotroom.core.kodus_review import KodusReviewPolicy
 from plotroom.core.merge_flakes import MAIN_FLAKE_EVENT
 from plotroom.core.merge_gate import GatePolicy, GateSnapshot
+from plotroom.core.unit_of_work import UnitOfWork
 
 REPO = "fixture/epic4"
 API = "https://epic4.invalid"
@@ -158,10 +166,15 @@ class Repository:
     main_paths: tuple[str, ...] = ("shared.py",)
     main_head: str = MAIN
     main_reads: list[str] = field(default_factory=list[str])
+    statuses: dict[str, list[Row] | int] = field(default_factory=dict[str, list[Row] | int])
     review_runs: dict[str, list[Row]] = field(default_factory=dict[str, list[Row]])
     cadence_threads: dict[int, list[Row]] = field(default_factory=dict[int, list[Row]])
-    cycles: asyncio.Queue[asyncio.Future[None]] = field(
-        default_factory=asyncio.Queue[asyncio.Future[None]]
+    thread_reads: list[int] = field(default_factory=list[int])
+    request_clock: FixedClock | None = None
+    request_count: int = 0
+    last_head_rate_limit: int | None = None
+    cycles: asyncio.Queue[tuple[asyncio.Future[None], bool]] = field(
+        default_factory=asyncio.Queue[tuple[asyncio.Future[None], bool]]
     )
 
     def add(self, *pulls: Pull) -> None:
@@ -192,6 +205,9 @@ class Repository:
         return pull.merge_commit
 
     def handle(self, request: httpx.Request) -> httpx.Response:
+        self.request_count += 1
+        if self.request_clock is not None:
+            self.request_clock.advance(0.006)
         assert str(request.url.copy_with(path="", query=None)).rstrip("/") == API
         assert request.headers["authorization"] == "Bearer fixture"
         if request.url.path == "/graphql":
@@ -203,6 +219,10 @@ class Repository:
             assert variables["name"] == "epic4"
             assert variables["after"] is None
             pull = self.pulls[variables["number"]]
+            if query["query"] == REVIEW_THREADS_QUERY:
+                self.thread_reads.append(pull.number)
+            if pull.unreadable == "rate-limited":
+                return httpx.Response(429, headers={"Retry-After": "20"})
             if pull.unreadable == "threads":
                 return httpx.Response(503)
             if pull.number in self.cadence_threads:
@@ -248,9 +268,21 @@ class Repository:
         if path == "/branches/main":
             tip = self.main_reads.pop(0) if self.main_reads else self.main_head
             return httpx.Response(200, json={"commit": {"sha": tip}})
+        if path.startswith("/commits/") and path.endswith("/statuses"):
+            sha = path.split("/")[2]
+            assert any(pull.head == sha for pull in self.pulls.values()), sha
+            result = self.statuses.get(sha, [])
+            return (
+                httpx.Response(result)
+                if isinstance(result, int)
+                else httpx.Response(200, json=result)
+            )
         if path.startswith("/commits/") and path.endswith("/check-runs"):
             sha = path.split("/")[2]
             if pull := next((row for row in self.pulls.values() if row.head == sha), None):
+                if pull.unreadable == "rate-limited-checks":
+                    self.last_head_rate_limit = self.request_count
+                    return httpx.Response(429, headers={"Retry-After": "20"})
                 if pull.unreadable == "checks":
                     return httpx.Response(503)
                 checks = [
@@ -309,6 +341,8 @@ class Repository:
             )
             if pull.unreadable == "overlap" and path == f"/compare/{pull.head}...{MAIN}":
                 return httpx.Response(503)
+            if pull.unreadable == "text" and path == f"/pulls/{pull.number}/commits":
+                return httpx.Response(503)
         assert path in rows, (request.method, request.url)
         return httpx.Response(200, json=rows[path])
 
@@ -321,10 +355,11 @@ class Repository:
             "files": [file_change(path) for path in paths],
         }
 
-    async def refresh(self) -> None:
+    async def refresh(self, *, expect_commit: bool = True) -> None:
         finished = asyncio.get_running_loop().create_future()
-        self.cycles.put_nowait(finished)
-        await asyncio.wait_for(finished, 10)
+        self.cycles.put_nowait((finished, expect_commit))
+        # The test clock owns evidence age. Allow a full 19-target local SQLite pass.
+        await asyncio.wait_for(finished, 30)
 
 
 @pytest.fixture
@@ -339,10 +374,12 @@ def repository(monkeypatch: pytest.MonkeyPatch) -> Repository:
         assert after_pull is not None
         async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handle)) as client:
             while True:
-                finished = await fixture.cycles.get()
+                finished, expect_commit = await fixture.cycles.get()
                 try:
-                    assert await poller.poll(client)
-                    await after_pull(client)
+                    committed = await poller.poll(client)
+                    assert committed == expect_commit
+                    if committed:
+                        await after_pull(client)
                 except Exception as exc:
                     finished.set_exception(exc)
                 else:
@@ -365,6 +402,8 @@ async def running_daemon(
     *,
     kodus_review: KodusReviewPolicy | None = None,
     max_age: timedelta = timedelta(minutes=2),
+    clock: FixedClock | None = None,
+    poll_seconds: int = 60,
 ) -> AsyncGenerator[tuple[Daemon, Client, Client, Client]]:
     secret = directory / "token"
     secret.write_text("fixture", encoding="utf-8")
@@ -382,7 +421,7 @@ async def running_daemon(
                 REPO,
                 secret,
                 API,
-                60,
+                poll_seconds,
                 merge_gate_policy=GatePolicy(
                     2,
                     ignore_checks=("check-2",),
@@ -400,7 +439,7 @@ async def running_daemon(
     orch = tokens.issue("epic4", "orchestrator", local=False)
     clerk = tokens.issue("epic4", "clerk", local=False)
     worker = tokens.issue("epic4", "worker:worker", local=False)
-    daemon = Daemon(config, clock=FixedClock(datetime.fromisoformat(LATER)))
+    daemon = Daemon(config, clock=clock or FixedClock(datetime.fromisoformat(LATER)))
     task = asyncio.create_task(daemon.run())
     try:
         port = await asyncio.wait_for(daemon.wait_started(), 10)
@@ -700,7 +739,6 @@ async def test_dry_and_live_gate_agree_on_all_six_rules(
     repository.add(*(pull for pull, *_ in cases), red)
     async with running_daemon(tmp_path) as (daemon, orch, clerk, _):
         await repository.refresh()
-        await repository.refresh()  # The detail poller reads eight PRs per pass.
         for pull, reason, exit_code, _ in cases:
             dry = await call(clerk, "merge_gate", pr=pull.number)
             assert dry["exit_class"] == exit_code, dry
@@ -761,6 +799,70 @@ async def assert_live_verdict(daemon: Daemon, pull: Pull, dry: Row) -> None:
     assert {key: live[-1][key] for key in dry} == dry
     assert dry["head_sha"] == pull.head
     assert dry["as_of"] is not None
+
+
+async def test_legacy_statuses_update_live_and_refresh_at_pinned_confirmation(
+    tmp_path: Path, repository: Repository
+) -> None:
+    pull = Pull(1, checks=("success", "failure"))
+    repository.add(pull)
+
+    def legacy(identifier: int, state: str) -> Row:
+        return {
+            "id": identifier,
+            "context": "external",
+            "state": state,
+            "creator": {"id": 7},
+            "url": f"{API}/repos/{REPO}/statuses/{pull.head}",
+        }
+
+    repository.statuses[pull.head] = [legacy(1, "success")]
+    async with running_daemon(tmp_path) as (daemon, _, clerk, _):
+        await repository.refresh()
+        dry = await call(clerk, "merge_gate", pr=pull.number)
+        assert dry["reasons"][0]["detail"] == "failing: check-1"
+        await assert_live_verdict(daemon, pull, dry)
+
+        # Replacing Check Runs alone would combine two successes and stage MERGE.
+        pull.checks = ("success", "success")
+        repository.statuses[pull.head] = [legacy(2, "failure"), legacy(1, "success")]
+        await repository.refresh()
+        dry = await call(clerk, "merge_gate", pr=pull.number)
+        assert dry["reasons"][0]["detail"] == "failing: external"
+        await assert_live_verdict(daemon, pull, dry)
+        assert await next_items(clerk, "merge_ready") == []
+        assert all(
+            event.fields["verdict"] == "REFUSE"
+            for event in await events(daemon, "core.merge_verdict")
+        )
+
+        repository.statuses[pull.head] = [legacy(3, "success"), legacy(2, "failure")]
+        await repository.refresh()
+        [offer] = await next_items(clerk, "merge_ready")
+        pins = offer["context"]["merge_gate"]
+        assert await call(clerk, "merge_gate", **pins) == await call(clerk, "merge_gate", pr=1)
+
+        repository.statuses[pull.head] = [legacy(4, "pending")]
+        assert (await call(clerk, "merge_gate", pr=1))["verdict"] == "MERGE"
+        authoritative = await call(clerk, "merge_gate", **pins)
+        assert authoritative["reasons"][0]["code"] == "checks_pending"
+        await repository.refresh()
+        dry = await call(clerk, "merge_gate", pr=1)
+        assert dry == authoritative
+        await assert_live_verdict(daemon, pull, dry)
+        assert await next_items(clerk, "merge_ready") == []
+
+        repository.statuses[pull.head] = []
+        await repository.refresh()
+        assert (await call(clerk, "merge_gate", pr=1))["verdict"] == "MERGE"
+        repository.statuses[pull.head] = 403
+        denied = await call(clerk, "merge_gate", **pins)
+        assert denied["reasons"][0]["code"] == "commit_statuses_unreadable"
+        await repository.refresh()
+        dry = await call(clerk, "merge_gate", pr=1)
+        assert dry == denied
+        await assert_live_verdict(daemon, pull, dry)
+        assert await next_items(clerk, "merge_ready") == []
 
 
 async def test_clerk_next_and_observed_merges(
@@ -969,7 +1071,6 @@ async def test_projection_and_clerk_shell_agree_on_fixture_repository(
     repository.add(*(pull for pull, *_ in cases))
     async with running_daemon(tmp_path) as (_, _, clerk, _):
         await repository.refresh()
-        await repository.refresh()  # The detail poller reads eight PRs per pass.
         for pull, reason, _, fragment in cases:
             exit_code, first_line = await asyncio.to_thread(shell_gate, tmp_path, repository, pull)
             dry = await call(clerk, "merge_gate", pr=pull.number, expected_head_sha=pull.head)
@@ -1005,3 +1106,201 @@ async def test_projection_and_clerk_shell_agree_on_fixture_repository(
             assert exit_code == dry["exit_class"] == expected_exit
             assert fragment in first_line
             assert reason in {entry["code"] for entry in dry["reasons"]}
+
+
+async def test_seventeen_pull_details_remain_fresh_and_overload_retracts_offers(
+    tmp_path: Path, repository: Repository
+) -> None:
+    clock = FixedClock(datetime.fromisoformat(LATER))
+    repository.request_clock = clock
+    active = [Pull(number) for number in range(1, 18)]
+    repository.add(*active, *(Pull(number, closed=True) for number in range(101, 105)))
+
+    async with running_daemon(
+        tmp_path, clock=clock, poll_seconds=10, max_age=timedelta(seconds=20)
+    ) as (
+        daemon,
+        _,
+        clerk,
+        _,
+    ):
+        ledger = daemon.ledgers["epic4"]
+        for terminals in ([101, 102], [103, 104], []):
+            repository.thread_reads.clear()
+            started = clock.now()
+            await repository.refresh()
+            assert timedelta() < clock.now() - started <= timedelta(seconds=5)
+            assert repository.thread_reads == [*range(1, 18), *terminals]
+            # Check at the end of the sleep, before the following pass renews anything.
+            clock.advance(10)
+            for pull in active:
+                assert (await ledger.merge_gate("clerk", pull.number)).verdict == "MERGE"
+        assert len(await next_items(clerk, "merge_ready")) == 17
+
+        repository.add(Pull(18))
+        await repository.refresh()
+        assert await next_items(clerk, "merge_ready") == []
+        for head_pin in (None, active[0].head):
+            verdict = await ledger.merge_gate(
+                "clerk",
+                1,
+                expected_head_sha=head_pin,
+                expected_main_sha=MAIN if head_pin is not None else None,
+            )
+            assert [reason.code for reason in verdict.reasons] == ["detail_capacity_exceeded"]
+
+        repository.pulls[18].closed = True
+        active[0].unreadable = "threads"
+        clock.advance(10)
+        await repository.refresh()
+        verdict = await ledger.merge_gate("clerk", 1)
+        assert [reason.code for reason in verdict.reasons] == ["review_threads_incomplete"]
+        assert {
+            item["context"]["number"] for item in await next_items(clerk, "merge_ready")
+        } == set(range(2, 18))
+        active[0].unreadable = ""
+        clock.advance(10)
+        await repository.refresh()
+        assert (
+            await ledger.merge_gate(
+                "clerk", 1, expected_head_sha=active[0].head, expected_main_sha=MAIN
+            )
+        ).verdict == "MERGE"
+        clock.advance(21)
+        expired = await ledger.merge_gate("clerk", 1)
+        assert [reason.code for reason in expired.reasons] == ["pr_stale"]
+
+
+async def test_detail_rotation_survives_restart_and_cooldown(
+    tmp_path: Path, repository: Repository
+) -> None:
+    clock = FixedClock(datetime.fromisoformat(LATER))
+    terminal = Pull(101, closed=True, unreadable="text")
+    repository.add(
+        *(Pull(number) for number in range(1, 21)),
+        terminal,
+        *(Pull(number, closed=True) for number in range(102, 105)),
+    )
+    terminal_scope = f"{PULL_DETAIL_ATTEMPT_PREFIX}{terminal.number}"
+    async with running_daemon(tmp_path, clock=clock) as (daemon, _, _, _):
+        await repository.refresh()
+        assert repository.thread_reads == [*range(1, 18), 101, 102]
+        attempt = await daemon.ledgers["epic4"].fetch_cursor(REPO, terminal_scope)
+        assert attempt is not None
+        assert attempt.watermark == ""
+        assert attempt.generation == 1
+
+    clock.advance(10)
+    repository.pulls[18].unreadable = "rate-limited"
+    async with running_daemon(tmp_path, clock=clock) as (daemon, _, _, _):
+        ledger = daemon.ledgers["epic4"]
+        repository.thread_reads.clear()
+        await repository.refresh()
+        assert repository.thread_reads == [18]
+        rate_limited_scope = f"{PULL_DETAIL_ATTEMPT_PREFIX}18"
+        failed = await ledger.fetch_cursor(REPO, rate_limited_scope)
+        assert failed is not None
+        assert failed.watermark == ""
+
+        repository.thread_reads.clear()
+        requests_before = repository.request_count
+        await repository.refresh(expect_commit=False)
+        assert repository.request_count == requests_before
+        assert repository.thread_reads == []
+        assert await ledger.fetch_cursor(REPO, rate_limited_scope) == failed
+        assert await ledger.fetch_cursor(REPO, terminal_scope) == attempt
+
+        repository.pulls[18].unreadable = ""
+        terminal.unreadable = ""
+        clock.advance(21)
+        await repository.refresh()
+        assert repository.thread_reads == [19, 20, *range(1, 16), 103, 104]
+        repository.thread_reads.clear()
+        clock.advance(10)
+        await repository.refresh()
+        assert repository.thread_reads[:3] == [16, 17, 18]
+        assert repository.thread_reads[17:] == [101]
+        completed = await ledger.fetch_cursor(REPO, terminal_scope)
+        assert completed is not None
+        assert completed.watermark
+        assert completed.generation == 2
+
+
+async def test_head_rate_limit_preserves_healthy_detail_progress_across_resumes(
+    tmp_path: Path, repository: Repository
+) -> None:
+    clock = FixedClock(datetime.fromisoformat(LATER))
+    limited = Pull(2, unreadable="rate-limited-checks")
+    repository.add(Pull(1), limited, Pull(3), Pull(101, closed=True))
+
+    async with running_daemon(tmp_path, clock=clock) as (daemon, _, _, _):
+        ledger = daemon.ledgers["epic4"]
+        healthy_scope = f"{PULL_DETAIL_ATTEMPT_PREFIX}3"
+        limited_scope = f"{PULL_DETAIL_ATTEMPT_PREFIX}2"
+        for expected in ([1], [3, 1]):
+            repository.thread_reads.clear()
+            await repository.refresh()
+            assert repository.thread_reads == expected
+            assert repository.last_head_rate_limit == repository.request_count
+            clock.advance(21)
+
+        healthy = await ledger.fetch_cursor(REPO, healthy_scope)
+        assert healthy is not None
+        assert healthy.watermark
+        interrupted = await ledger.fetch_cursor(REPO, limited_scope)
+        assert interrupted is not None
+        assert interrupted.watermark == ""
+        assert interrupted.generation == 2
+        assert await ledger.fetch_cursor(REPO, f"{PULL_DETAIL_ATTEMPT_PREFIX}101") is None
+
+        limited.unreadable = ""
+        repository.thread_reads.clear()
+        await repository.refresh()
+        assert 101 in repository.thread_reads
+
+
+async def test_pull_detail_attempt_cannot_complete_a_different_revision(
+    tmp_path: Path, repository: Repository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pull = Pull(1)
+    repository.add(pull)
+    async with running_daemon(tmp_path) as (daemon, _, _, _):
+        await repository.refresh()
+        ledger = daemon.ledgers["epic4"]
+        scope = f"{PULL_DETAIL_ATTEMPT_PREFIX}1"
+        attempt = await ledger.fetch_cursor(REPO, scope)
+        assert attempt is not None
+        assert attempt.watermark
+
+        async def move_during_text_read(
+            api: GitHubReadClient, client: httpx.AsyncClient, token: str, pinned: PullRequest
+        ) -> GitHubResource:
+            result = await fetch_pull_text(api, client, token, pinned)
+            pull.head_version += 1
+
+            async def advance(uow: UnitOfWork) -> None:
+                await uow.save_pull_request(
+                    replace(
+                        pinned,
+                        head_sha=pull.head,
+                        version=pinned.version + 1,
+                        updated_at=format_time(datetime.fromisoformat(LATER)),
+                    )
+                )
+
+            await ledger.run("system", advance)
+            return result
+
+        with monkeypatch.context() as patches:
+            patches.setattr(
+                "plotroom.adapters.github.details.fetch_pull_text", move_during_text_read
+            )
+            await repository.refresh()
+
+        assert await ledger.fetch_cursor(REPO, scope) == attempt
+        text_projection = await ledger.github_resource(REPO, PULL_TEXT, "1")
+        assert text_projection is not None
+        assert text_projection.attributes["head_sha"] != pull.head
+        assert (await ledger.merge_gate("clerk", 1)).verdict == "REFUSE"
+        await repository.refresh()
+        assert (await ledger.merge_gate("clerk", 1)).verdict == "MERGE"

@@ -5,12 +5,12 @@ title: "Keep merge gate detail evidence fresh across bounded polling"
 parent: epic-merge-controller
 covers: [R1, R2]
 after: [1, "2.14"]
-refined: false
+refined: true
 hitl: false
 risk: medium
 tracker_id: "233"
 remote: "https://github.com/mgd43b/plotroom/issues/233"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Keep merge gate detail evidence fresh across bounded polling
@@ -27,3 +27,7 @@ Prevent periodic stale refusals caused by scheduler rotation within supported ca
 
 - parent — _bmad-output/initiative-orchestration-control-plane/tickets/epic-merge-controller/epic-merge-controller.md, R1 and R2
 - routed finding — https://github.com/mgd43b/plotroom/pull/155
+
+## Verification
+
+The verified implementation caps active and terminal work, honors the existing freshness window and cooldown, and refuses project merges above capacity. Rule 4 retains its own eligibility checks.

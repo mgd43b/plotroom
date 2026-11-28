@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
-from fakes import FixedClock
+from fakes import FixedClock, commit_status_evidence
 from plotroom.adapters.github import GitHubUnavailable, LocalGitHubCredential
 from plotroom.adapters.github.ci import fetch_main_ci
 from plotroom.adapters.github.details import GitHubDetailPoller
@@ -209,6 +209,7 @@ async def test_only_a_current_configured_human_label_can_waive_red(
     snapshot = GateSnapshot(
         PULL,
         GitHubResource((CHECK,), as_of=NOW),
+        commit_statuses=commit_status_evidence(REPO, PULL.head_sha, NOW),
         threads=EMPTY_THREADS,
         labels=labels,
         main_ci=main(record(3, "startup_failure")),

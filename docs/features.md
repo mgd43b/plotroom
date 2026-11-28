@@ -76,7 +76,11 @@ authorized_label_logins = ["maintainer"]
 ```
 
 `min_checks` has no default. An ignored check still holds the gate while
-pending. `ci_workflow` selects a workflow filename or numeric ID. The optional
+pending. Rule 1 reads both Check Runs and legacy Commit Status contexts for the
+exact PR head. Private repository status reads require Commit Status read
+access. GitHub allows public status reads without that permission. The gate
+holds when the status list is unavailable, incomplete, or stale.
+`ci_workflow` selects a workflow filename or numeric ID. The optional
 fix label waives a red main verdict when a configured GitHub user applied it.
 An authorized user can apply `allow-overlap` after Plotroom has observed the
 current PR head. The waiver applies to that head occurrence. Controller branch
@@ -94,6 +98,18 @@ using the configured merge method. GitHub enforces the PR head pin on the
 printed command. Controller-run merges default to off and require an injected
 loopback test fixture, where both refs are checked at dispatch. With a live
 repository, use the verdict and pinned command for a human or clerk to act on.
+
+Each polling pass refreshes details for up to 17 complete open PRs and up to
+two terminal PRs awaiting enrichment. The gate refuses while the known open
+population exceeds 17, and both groups continue rotating by their last
+attempt. The poller sleeps for the configured interval after each pass.
+To keep every required observation within its two-interval age limit in the
+worst case, each healthy pass must finish within half the configured polling
+interval. Longer delays can still expire evidence. When configured, optional
+Kodus review reads also have their own time budget.
+GitHub rate limits stop the pass and suppress reads during cooldown. Completed
+attempts retain their place in the rotation. A repeatedly interrupted pass can
+delay either group's remaining work, including terminal enrichment.
 
 Projects can require completed Kodus review before a MERGE verdict. Configure
 the numeric GitHub App ID, App slug, and exact check name in the trusted

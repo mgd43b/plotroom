@@ -232,6 +232,8 @@ class Fixture:
             "/milestones": [{"number": 1, "state": "open", "title": "plan"}],
             "/issues/9/sub_issues": [],
             "/issues/9/dependencies/blocked_by": [],
+            f"/commits/{FIRST}/statuses": [],
+            f"/commits/{SECOND}/statuses": [],
             f"/commits/{FIRST}/check-runs": {
                 "check_runs": [check, rerun] if self.step > 0 else [check],
                 "total_count": 2 if self.step > 0 else 1,
