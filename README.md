@@ -79,16 +79,27 @@ refused. A worker that tries to start a lane, or to claim paths in another worke
 
 ## Status
 
-Plotroom is pre-release: run it from a checkout. Nearly all of the planned work is built and
-tested. The remaining items are mostly checks against live services and the release itself.
+Plotroom is usable from a checkout today. Start sessions in Claude Code or Codex,
+then connect them to a local Plotroom daemon to assign lanes, record claims and
+decisions, and track follow-up work. Start with the credential-free tour below, or
+[connect your own sessions](#run-your-own).
 
-| Works now | Not yet |
-|---|---|
-| The local daemon and its MCP tools | A tested run against a live GitHub repository ([#29](https://github.com/mgd43b/plotroom/issues/29)) |
-| Real Claude Code and Codex clients against the local daemon and the chart in disposable local kind | Releases to PyPI and ghcr.io ([#25](https://github.com/mgd43b/plotroom/issues/25)) |
-| Docker Compose, and the Helm chart on a local kind cluster | Live GitHub App fixture acceptance ([#39](https://github.com/mgd43b/plotroom/issues/39)) and a published chart ([#125](https://github.com/mgd43b/plotroom/issues/125)) |
-| Restart safety, migration backups, scheduled backups, and OpenRouter spend readings | Direct Anthropic Console metering |
-| The Switchboard bridge | Plotroom coordinating its own development for a working day ([#110](https://github.com/mgd43b/plotroom/issues/110)) |
+- **Verified so far.** The GitHub poller was exercised against a dedicated live test
+  repository ([#29](https://github.com/mgd43b/plotroom/issues/29)). A local daemon
+  refreshed a GitHub App installation token using a mounted key
+  ([#39](https://github.com/mgd43b/plotroom/issues/39)). The local daemon, isolated
+  Docker Compose run, and available integrated CI checks passed
+  ([#46](https://github.com/mgd43b/plotroom/issues/46)). CI also exercises the Helm
+  chart on disposable kind clusters, where Claude Code and Codex connections
+  have also been verified ([#123](https://github.com/mgd43b/plotroom/issues/123)).
+- **Live acceptance still open.** Hosted GitHub App refresh, hosted Switchboard
+  bridge delivery, and live deployment evidence remain in
+  [Epic #2](https://github.com/mgd43b/plotroom/issues/2). The live pilot for
+  coordinating Plotroom's own development is deferred
+  ([#110](https://github.com/mgd43b/plotroom/issues/110)).
+- **Publishing still open.** The first public release to PyPI and GHCR
+  ([#25](https://github.com/mgd43b/plotroom/issues/25)) and the published Helm chart
+  ([#125](https://github.com/mgd43b/plotroom/issues/125)) are pending.
 
 ## Try it in a minute
 
@@ -146,6 +157,10 @@ TOML path and replace `YOUR_TOKEN_ID` with the ID for that client's role.
 uv --directory /path/to/plotroom run --locked plotroom connect --stdio \
   --config /path/to/plotroom.toml --token-id YOUR_TOKEN_ID
 ```
+
+Call `snapshot()` in each connected MCP client. The response should show
+`data.project` as `example`. The token commands generate the credentials locally. Use
+the returned `token_id` in the client command and keep the bearer `token` private.
 
 ### Track OpenRouter spend
 
