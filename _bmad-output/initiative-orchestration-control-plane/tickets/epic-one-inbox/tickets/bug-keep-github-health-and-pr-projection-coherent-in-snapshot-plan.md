@@ -67,6 +67,7 @@ and that an error-only update does not wake commit waiters.
 
 ## Verification
 
+- Built: https://github.com/mgd43b/plotroom/pull/236
 - Locked Python 3.14 and 3.15 each passed 69 focused GitHub, snapshot and merge lifecycle
   tests after the canceled-wait fix. The broader check before that refinement included
   merge-controller end-to-end coverage and passed 72 tests per version.
@@ -86,3 +87,9 @@ and retains the separate controller refresh. Deterministic tests exercised both 
 On the final revision, 173 targeted tests passed on each locked Python. Pyright, Ruff,
 core dependency, and whitespace checks passed. Independent review found no remaining
 ordering, cancellation, scope, or gate interaction issue.
+
+Merged forward onto reviewed #238 main `0a60033e3e2807904b943e6c10d81f0699310d19`.
+The #235 product patch and canonical story remained unchanged. Both locked Python versions
+passed 254 focused tests, including the archived replay regression alongside the snapshot,
+mounted-PAT, writer, SQLite and adjacent gate checks. Independent inspection found no
+cross-lane interaction. Pyright, Ruff and the core dependency check passed.
