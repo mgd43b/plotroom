@@ -33,18 +33,20 @@ empty successful poll, failure, recovery, and a forced commit between capture an
 
 ## Tasks & Acceptance
 
-- Serialize capture against the PR observation commit and provider health changes without
-  serializing GitHub network requests or turning snapshots into writer transactions.
+- Commit snapshot health with the PR observation and capture it in the same read transaction
+  as the other snapshot fields. Keep GitHub calls and snapshot reads outside the writer queue.
 - Pass the captured health into the unchanged snapshot renderer.
 - Force a poll to commit after the MCP snapshot capture. Verify the straddling response,
   a subsequent snapshot, empty results, provider failure and recovery, and the unconfigured shape.
 
 ## Implementation Notes
 
-The observation lock covers the existing SQLite snapshot read and in-memory health together.
-Successful poll publication holds it across the existing writer commit and the existing
-merge-controller health refresh. Availability still uses the original public error strings.
-Provider calls stay outside the lock. Snapshot reads remain outside the writer queue.
+Successful polls record health in the same transaction as the PR projection watermark.
+MCP reads it alongside the board using the existing SQLite snapshot boundary. Snapshot
+health is scoped to the current ledger lifetime, so reopening with an older projection
+still reports startup unavailability. Provider failure uses the original public errors
+and gate refresh behavior. A health-only commit needs no notification when the controller
+is disabled.
 
 ## Plan Change Log
 
@@ -55,6 +57,13 @@ waiter enqueue a write later. The fix makes acquisition cancellable and gives th
 publication task responsibility for releasing the lock. The regression checks no watermark
 and no writer notification after the canceled wait. Follow-up concurrency and independent
 acceptance inspections found no material issues.
+
+The installed opening review on PR #236 found a second cancellation case and a reader
+latency problem with the initial lock. The final change uses committed snapshot health
+instead. A deterministic regression holds the writer, queues a poll, reads the prior
+snapshot without waiting, then cancels the poll and verifies no watermark was committed.
+Another regression checks that an older ledger's health is unavailable after reopening
+and that an error-only update does not wake commit waiters.
 
 ## Verification
 
@@ -69,3 +78,11 @@ the code patches were unchanged. The mounted-PAT smoke, MCP coherence and cancel
 regressions, and adjacent GitHub detail, Commit Status, snapshot, and merge gate checks
 passed on both locked Python versions. Each run passed 127 tests, with Pyright and Ruff
 clean. Independent review found no new lock ordering or gate interaction on the rebased range.
+
+Final review also covered a newer provider error observed during an earlier commit
+and a cancellation after the writer starts. The writer publishes successful health before
+notifying its waiters, checks the provider observation revision before clearing errors,
+and retains the separate controller refresh. Deterministic tests exercised both races.
+On the final revision, 173 targeted tests passed on each locked Python. Pyright, Ruff,
+core dependency, and whitespace checks passed. Independent review found no remaining
+ordering, cancellation, scope, or gate interaction issue.

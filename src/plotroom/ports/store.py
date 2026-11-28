@@ -241,8 +241,15 @@ class Store(Protocol):
     async def read_board(self, role: str) -> Board: ...
 
     async def read_snapshot(
-        self, role: str, repository: str | None, *, checklist_lane: str | None = None
-    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]: ...
+        self,
+        role: str,
+        repository: str | None,
+        *,
+        checklist_lane: str | None = None,
+        include_github_health: bool = False,
+    ) -> tuple[
+        Board, GitHubSummary | None, dict[str, int], int, str | None, FetchCursor | None
+    ]: ...
 
     async def read_claims(
         self, role: str, lane: str | None, offset: int, limit: int

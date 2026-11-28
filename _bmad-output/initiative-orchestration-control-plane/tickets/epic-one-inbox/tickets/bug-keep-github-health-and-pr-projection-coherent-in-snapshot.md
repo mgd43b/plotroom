@@ -43,9 +43,10 @@ The snapshot reads the committed board and GitHub summary, then reads the live h
 ## Notes
 
 MCP captures GitHub health with the role-filtered committed board, PR count, and watermark.
-The per-project guard covers observation capture, poll commit and health publication.
-Provider requests stay outside the guard. A canceled poll waiting for the guard queues no
-write, and a commit already in progress can finish publishing before it releases the guard.
+Successful polls publish snapshot health in the same SQLite transaction as the PR projection.
+The health record is scoped to the running ledger, so startup still waits for its own poll.
+Snapshots can read the last committed observation while the writer is busy. Canceled queued
+polls keep the normal writer cancellation behavior.
 Synthetic tests exercise startup, an empty successful poll, provider failure and recovery,
 and a first poll forced between the MCP capture and render. The existing mounted-PAT
 smoke uses its original assertions.

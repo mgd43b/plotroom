@@ -31,6 +31,7 @@ from plotroom.core.github import (
     MERGE_SHA_ATTEMPT_PREFIX,
     PULL_DETAIL_ATTEMPT_PREFIX,
     PULL_REQUESTS,
+    SNAPSHOT_HEALTH,
     TERMINAL_PULL_DETAIL_BUDGET,
     FetchCursor,
     FetchRetry,
@@ -821,8 +822,13 @@ class MemoryStore:
         return self._work_items
 
     async def read_snapshot(
-        self, role: str, repository: str | None, *, checklist_lane: str | None = None
-    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
+        self,
+        role: str,
+        repository: str | None,
+        *,
+        checklist_lane: str | None = None,
+        include_github_health: bool = False,
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None, FetchCursor | None]:
         board, github = (
             (await self.read_board(role), None)
             if repository is None
@@ -836,7 +842,12 @@ class MemoryStore:
                     break
         trigger_counts = dict(Counter(t.state for t in self._triggers.values()))
         claim_count = len(_visible_claims(self._claims, self._lanes, role))
-        return board, github, trigger_counts, claim_count, self._freeze_reason
+        health = (
+            await self.fetch_cursor(repository, SNAPSHOT_HEALTH)
+            if include_github_health and repository is not None
+            else None
+        )
+        return board, github, trigger_counts, claim_count, self._freeze_reason, health
 
     async def read_github_board(self, role: str, repository: str) -> tuple[Board, GitHubSummary]:
         opened = sum(

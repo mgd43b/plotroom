@@ -14,7 +14,12 @@ from typing import Any
 from plotroom.core.events import LedgerError
 from plotroom.ports.store import Store, Transaction
 
-type _Item = tuple[Callable[[Transaction], Awaitable[Any]], asyncio.Future[Any]]
+type _Item = tuple[
+    Callable[[Transaction], Awaitable[Any]],
+    asyncio.Future[Any],
+    bool,
+    Callable[[Any], None] | None,
+]
 
 
 # The writer whose transaction the current task is running work in, if any
@@ -79,14 +84,27 @@ class ProjectWriter:
         behind itself. The backlog is not capped: inputs are bounded by the transport's request
         size, and a cap with backpressure belongs with the transport limits.
         """
+        return await self.enqueue(work)
+
+    def enqueue[T](
+        self,
+        work: Callable[[Transaction], Awaitable[T]],
+        *,
+        notify: bool = True,
+        after_commit: Callable[[T], None] | None = None,
+    ) -> asyncio.Future[T]:
+        """Queue an input; publish its committed result before waking waiters.
+
+        Metadata-only writes can opt out of waking commit waiters.
+        """
         if _WORKING_FOR.get() is self:
             raise RuntimeError("re-entrant submit: use the UnitOfWork inside work")
         queue = self._queue
         if not self._accepting or queue is None:
             raise _unavailable()
         future: asyncio.Future[T] = asyncio.get_running_loop().create_future()
-        queue.put_nowait((work, future))  # no await before this: arrival order is call order
-        return await future
+        queue.put_nowait((work, future, notify, after_commit))
+        return future
 
     async def _run(self, queue: asyncio.Queue[_Item | None]) -> None:
         try:
@@ -94,7 +112,7 @@ class ProjectWriter:
                 item = await queue.get()
                 if item is None:
                     return
-                work, future = item
+                work, future, notify, after_commit = item
                 if future.cancelled():
                     continue
                 try:
@@ -127,8 +145,15 @@ class ProjectWriter:
                         future.set_exception(_unavailable())
                     raise
                 else:
-                    committed, self.commit_signal = self.commit_signal, asyncio.Event()
-                    committed.set()
+                    if after_commit is not None:
+                        try:
+                            after_commit(result)
+                        except Exception as exc:
+                            if not future.done():
+                                future.set_exception(exc)
+                    if notify:
+                        committed, self.commit_signal = self.commit_signal, asyncio.Event()
+                        committed.set()
                     if not future.done():
                         future.set_result(result)
         finally:

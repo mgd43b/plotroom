@@ -22,6 +22,7 @@ from plotroom.adapters.store_sqlite import SqliteStore
 from plotroom.app.config import load_config
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import TokenRegistry
+from plotroom.core import ledger as ledger_module
 from plotroom.core.catalog import build_catalog
 from plotroom.core.events import LedgerError, format_time
 from plotroom.core.github import (
@@ -31,8 +32,11 @@ from plotroom.core.github import (
     PR_OPENED,
     PR_REOPENED,
     PULL_REQUESTS,
+    FetchCursor,
+    ObservedPull,
 )
 from plotroom.core.ledger import Ledger
+from plotroom.core.unit_of_work import UnitOfWork
 from test_daemon_start import stop_owner
 
 REPO = "fixture/read-only"
@@ -348,45 +352,168 @@ async def test_mcp_snapshot_captures_github_health_with_projection(
             await serving
 
 
-async def test_canceled_poll_waiting_for_snapshot_does_not_commit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_snapshot_can_read_while_canceled_poll_is_queued(tmp_path: Path) -> None:
     store = SqliteStore("demo", tmp_path)
     await store.migrate()
     clock = FixedClock()
     ledger = Ledger(store, build_catalog(), clock, github_repository=REPO)
     ledger.start()
     notification = ledger.commit_signal
-    reading = asyncio.Event()
+    writing = asyncio.Event()
     release = asyncio.Event()
     attempted = asyncio.Event()
-    original = ledger.snapshot_summary
 
-    async def pause_read(role: str, *, checklist_lane: str | None = None):
-        reading.set()
+    async def hold_writer(_uow: UnitOfWork) -> None:
+        writing.set()
         await release.wait()
-        return await original(role, checklist_lane=checklist_lane)
 
     async def poll() -> bool:
         attempted.set()
         return await ledger.commit_github_pull_poll(REPO, None, (), format_time(clock.now()))
 
-    monkeypatch.setattr(ledger, "snapshot_summary", pause_read)
     try:
         async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
-            snapshot = tasks.create_task(ledger.snapshot_observation("orchestrator"))
+            tasks.create_task(ledger.run("system", hold_writer))
             try:
-                await reading.wait()
+                await writing.wait()
                 polling = tasks.create_task(poll())
                 await attempted.wait()
+                observation = await ledger.snapshot_observation("orchestrator")
+                assert observation[1] is not None
+                assert (observation[1].open_prs, observation[1].as_of) == (0, None)
+                assert observation[-1] == "waiting for the first GitHub poll"
+                assert not notification.is_set()
                 polling.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await polling
             finally:
                 release.set()
-        assert snapshot.result()[-1] == "waiting for the first GitHub poll"
-        assert await ledger.fetch_cursor(REPO, PULL_REQUESTS) is None
+        assert await ledger.run("system", lambda uow: uow.fetch_cursor(REPO, PULL_REQUESTS)) is None
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+async def test_snapshot_health_is_local_to_the_running_ledger(tmp_path: Path) -> None:
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    clock = FixedClock()
+    previous = Ledger(store, build_catalog(), clock, github_repository=REPO)
+    reopened = Ledger(store, build_catalog(), clock, github_repository=REPO)
+    previous.start()
+    try:
+        as_of = format_time(clock.now())
+        assert await previous.commit_github_pull_poll(REPO, None, (), as_of)
+        assert (await previous.snapshot_observation("orchestrator"))[-1] is None
+        await previous.stop()
+
+        reopened.start()
+        startup = await reopened.snapshot_observation("orchestrator")
+        assert startup[1] is not None
+        assert startup[1].as_of == as_of
+        assert startup[-1] == "waiting for the first GitHub poll"
+        notification = reopened.commit_signal
+        await reopened.set_github_error("GitHub fixture unavailable")
+        failed = await reopened.snapshot_observation("orchestrator")
+        assert failed[1] is not None
+        assert (failed[1].open_prs, failed[1].as_of) == (0, as_of)
+        assert failed[-1] == "GitHub fixture unavailable"
+        assert reopened.commit_signal is notification
         assert not notification.is_set()
+    finally:
+        await previous.stop()
+        await reopened.stop()
+        await store.close()
+
+
+@pytest.fixture
+def held_pr_publication(monkeypatch: pytest.MonkeyPatch) -> tuple[asyncio.Event, asyncio.Event]:
+    writing = asyncio.Event()
+    release = asyncio.Event()
+    apply = ledger_module.apply_pull_poll
+
+    async def pause_before_commit(
+        uow: UnitOfWork,
+        repository: str,
+        baseline: FetchCursor | None,
+        pulls: tuple[ObservedPull, ...],
+        as_of: str,
+    ) -> bool:
+        result = await apply(uow, repository, baseline, pulls, as_of)
+        writing.set()
+        await release.wait()
+        return result
+
+    monkeypatch.setattr(ledger_module, "apply_pull_poll", pause_before_commit)
+    return writing, release
+
+
+async def test_successful_poll_does_not_clear_newer_provider_error(
+    tmp_path: Path, held_pr_publication: tuple[asyncio.Event, asyncio.Event]
+) -> None:
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    clock = FixedClock()
+    ledger = Ledger(store, build_catalog(), clock, github_repository=REPO)
+    ledger.start()
+    writing, release = held_pr_publication
+    error_started = asyncio.Event()
+
+    async def report_error() -> None:
+        error_started.set()
+        await ledger.set_github_error("newer provider error")
+
+    try:
+        async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
+            poll = tasks.create_task(
+                ledger.commit_github_pull_poll(REPO, None, (), format_time(clock.now()))
+            )
+            try:
+                await writing.wait()
+                tasks.create_task(report_error())
+                await error_started.wait()
+                assert ledger.github_error == "newer provider error"
+            finally:
+                release.set()
+        assert poll.result()
+        assert ledger.github_error == "newer provider error"
+        assert (await ledger.snapshot_observation("orchestrator"))[-1] == ledger.github_error
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+async def test_canceling_active_poll_does_not_split_committed_health(
+    tmp_path: Path, held_pr_publication: tuple[asyncio.Event, asyncio.Event]
+) -> None:
+    store = SqliteStore("demo", tmp_path)
+    await store.migrate()
+    clock = FixedClock()
+    ledger = Ledger(store, build_catalog(), clock, github_repository=REPO)
+    ledger.start()
+    writing, release = held_pr_publication
+    as_of = format_time(clock.now())
+    try:
+        async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
+            poll = tasks.create_task(ledger.commit_github_pull_poll(REPO, None, (), as_of))
+            try:
+                await writing.wait()
+                poll.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await poll
+                before = await ledger.snapshot_observation("orchestrator")
+                assert before[1] is not None
+                assert before[1].as_of is None
+                assert before[-1] == "waiting for the first GitHub poll"
+            finally:
+                release.set()
+            cursor = await ledger.run("system", lambda uow: uow.fetch_cursor(REPO, PULL_REQUESTS))
+            assert cursor is not None
+            assert cursor.as_of == as_of
+        after = await ledger.snapshot_observation("orchestrator")
+        assert after[1] is not None
+        assert after[1].as_of == as_of
+        assert after[-1] is ledger.github_error is None
     finally:
         await ledger.stop()
         await store.close()
