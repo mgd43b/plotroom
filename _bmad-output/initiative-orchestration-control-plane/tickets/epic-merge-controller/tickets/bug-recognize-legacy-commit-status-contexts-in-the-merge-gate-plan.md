@@ -63,9 +63,14 @@ Given CI and legacy status data on the current head, when a pending or unignored
 - High, patch. A stable first page can advertise a later terminal page that disappears from intermediate Link metadata. Retain the provider's advertised bound and refuse a truncated list.
 - Low, patch. The configured Kodus fixture had empty legacy evidence. Supply a successful legacy status with the trusted check's name and verify that Kodus still refuses.
 
+- Opening Kodus review found two additional pagination cases. Explicit next pages cannot be empty, and a last page beyond the budget is refused at once.
+
 ## Verification
+
+Built: [PR #234](https://github.com/mgd43b/plotroom/pull/234).
 
 - Locked Python 3.15.2 full suite passed all 1,532 tests.
 - Locked Python 3.14.10 full run passed 1,531 tests. The mounted-PAT smoke test exposed a preexisting snapshot/readiness race that was independently reproduced on the baseline tree. The exact test passed in a separate diagnostic run on the same candidate.
 - Ruff lint and formatting, Pyright, and the core dependency check passed on both interpreters.
 - Independent reviewers confirmed the fixes for every in-scope finding.
+- Both locked Python versions passed 29 provider tests after the opening Kodus review corrections.

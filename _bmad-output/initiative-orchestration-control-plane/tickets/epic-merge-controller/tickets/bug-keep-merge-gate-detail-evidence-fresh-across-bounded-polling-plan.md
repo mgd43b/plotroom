@@ -65,6 +65,8 @@ Given a previously ready project, when the known active count crosses the capaci
 
 ## Verification
 
+Built: [PR #234](https://github.com/mgd43b/plotroom/pull/234).
+
 - Locked Python 3.15.2 full suite passed all 1,532 tests.
 - Locked Python 3.14.10 full run passed 1,531 tests. The mounted-PAT smoke test exposed a preexisting snapshot/readiness race that was independently reproduced on the baseline tree. The exact test passed in a separate diagnostic run on the same candidate.
 - Ruff lint and formatting, Pyright, and the core dependency check passed on both interpreters.

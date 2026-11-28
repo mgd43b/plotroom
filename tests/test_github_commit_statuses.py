@@ -159,7 +159,7 @@ async def test_declared_last_page_cannot_be_lost(
         assert page == 2
         headers: dict[str, str] = {}
         if conflicting_link:
-            headers["link"] = f'<{API}{PATH}?page=3>; rel="next", <{API}{PATH}?page=4>; rel="last"'
+            headers["link"] = f'<{API}{PATH}?page=2>; rel="last"'
         return httpx.Response(
             200,
             json=[item(identifier) for identifier in range(201, 201 - second_count, -1)],
@@ -169,6 +169,62 @@ async def test_declared_last_page_cannot_be_lost(
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(GitHubUnavailable, match=error):
             await fetch_commit_statuses(GitHubReadClient(API, REPOSITORY), client, "fixture", HEAD)
+
+
+@pytest.mark.parametrize("verify_boundaries", [False, True])
+async def test_explicit_next_page_cannot_be_empty(verify_boundaries: bool) -> None:
+    visits: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = verify_request(request)
+        visits.append(page)
+        if page == 2:
+            return httpx.Response(200, json=[])
+        assert page == 1
+        return httpx.Response(
+            200,
+            json=[item(identifier) for identifier in range(100, 0, -1)],
+            headers={"link": f'<{API}{PATH}?page=2>; rel="next"'},
+        )
+
+    api = GitHubReadClient(API, REPOSITORY)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GitHubUnavailable, match="empty advertised page"):
+            _ = [
+                row
+                async for row in api.pages(
+                    client,
+                    "fixture",
+                    f"/commits/{HEAD}/statuses",
+                    verify_terminal=True,
+                    verify_boundaries=verify_boundaries,
+                    max_pages=MAX_STATUS_PAGES,
+                    require_full_pages=True,
+                )
+            ]
+    assert visits == [1, 2]
+
+
+async def test_advertised_last_beyond_budget_refuses_without_followup_requests() -> None:
+    visits: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = verify_request(request)
+        visits.append(page)
+        assert page == 1
+        last = MAX_STATUS_PAGES + 1
+        return httpx.Response(
+            200,
+            json=[item(identifier) for identifier in range(100, 0, -1)],
+            headers={
+                "link": f'<{API}{PATH}?page=2>; rel="next", <{API}{PATH}?page={last}>; rel="last"'
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GitHubUnavailable, match="exceeded the page limit"):
+            await fetch_commit_statuses(GitHubReadClient(API, REPOSITORY), client, "fixture", HEAD)
+    assert visits == [1]
 
 
 @pytest.mark.parametrize(

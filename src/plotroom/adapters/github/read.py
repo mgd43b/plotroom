@@ -298,6 +298,7 @@ class GitHubReadClient:
 
         prior = None
         advertised_last = None
+        expected_nonempty = False
         for page in range(1, max_pages + 1 + verify_terminal):
             observed = await read(page)
             assert observed is not None
@@ -305,9 +306,14 @@ class GitHubReadClient:
             if page > max_pages and (records or more):
                 break
             if require_full_pages:
+                if expected_nonempty and not records:
+                    raise GitHubUnavailable("GitHub returned an empty advertised page")
+                expected_nonempty = observed.has_next
                 if more and len(records) != 100:
                     raise GitHubUnavailable("GitHub returned a short nonterminal page")
                 if observed.last_page is not None:
+                    if observed.last_page > max_pages:
+                        raise GitHubUnavailable("GitHub read exceeded the page limit")
                     if advertised_last not in (None, observed.last_page):
                         raise GitHubUnavailable("GitHub returned conflicting last pages")
                     advertised_last = observed.last_page
