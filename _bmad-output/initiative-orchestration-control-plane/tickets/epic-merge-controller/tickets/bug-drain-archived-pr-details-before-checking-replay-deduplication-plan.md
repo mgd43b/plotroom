@@ -61,8 +61,13 @@ Given the four pinned PRs and healthy provider reads, when the normal witness ru
 
 - Medium, patch. A failed PR-list poll did not invoke the detail callback, so a later clean poll could hide it. The witness now reports a failed poll before a retry, and the new fixture proves refusal and teardown. Independent inspection confirmed the correction.
 
+- Opening Kodus review found two gaps in the synthetic test. The fixture now isolates its GitHub environment and proves the witness rejects a valid event added during the replay pass.
+
 ## Verification
+
+Built: [PR #238](https://github.com/mgd43b/plotroom/pull/238).
 
 - Locked Python 3.14.10 and 3.15.2 each passed 97 focused tests covering the archive, production scheduler, and failure and teardown paths. Ruff lint and format, configured Pyright, and the diff check passed.
 - The reviewed code on base `2345d7ea91c15f3fcf1c33893f47c8dfc113f442` completed the public host capture and actual network-disabled Compose replay. Each observed 36 events, zero actions, and PR-list generation 3 with terminal detail passes [1, 2], [4, 5], and [2]. The host made 38 provider reads. Compose replayed 63 responses with zero additional provider reads and zero owned resources left.
 - Protected PAT verification remains deferred.
+- After opening review, both locked interpreters passed 23 archive tests each with a synthetic inherited override.

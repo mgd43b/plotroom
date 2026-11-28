@@ -12,6 +12,9 @@ from typing import Any
 import httpx
 import pytest
 
+from plotroom.adapters.github import github_secret_name
+from plotroom.core.events import Event
+from plotroom.core.ledger import Ledger
 from plotroom.ports.work_items import WorkItem
 
 # Epic 2's fixed synthetic contract, including both transport and ingest variants.
@@ -388,6 +391,7 @@ def test_archive_graphql_query_is_bound_to_the_fixture(acceptance: Any) -> None:
     ("fault", "error", "expected_passes"),
     [
         (None, None, [[1, 2], [4, 5], [2]]),
+        ("replay_event", "^$", [[1, 2], [4, 5], [2]]),
         ("moved", "archived pull #4 did not match its pin", [[1, 2]]),
         ("missing", "archived pull roster changed", [[1, 2]]),
         ("extra", "archived pull roster changed", [[1, 2]]),
@@ -405,6 +409,7 @@ async def test_archived_witness_accounts_for_terminal_polls_and_cleans_up(
     expected_passes: list[list[int]],
 ) -> None:
     archive: Any = importlib.import_module(acceptance.archived_checks.__module__)
+    monkeypatch.delenv(github_secret_name(archive.PROJECT), raising=False)
     repo: str = archive.REPO
     main = "a" * 40
     now = "2026-11-22T10:00:00Z"
@@ -465,7 +470,16 @@ async def test_archived_witness_accounts_for_terminal_polls_and_cleans_up(
 
     passes: list[list[int]] = []
     temporary_roots: list[Path] = []
+    event_snapshots: list[list[Event]] = []
     project_witness = archive.project_witness
+    events_after = Ledger.events_after
+    replay_check_id = 100
+
+    async def record_events(ledger: Ledger, seq: int, limit: int = 100) -> list[Event]:
+        events = await events_after(ledger, seq, limit)
+        if (seq, limit) == (0, 500):
+            event_snapshots.append(events)
+        return events
 
     async def record_root(root: Path, endpoint: str, marker: str) -> dict[str, int]:
         temporary_roots.append(root)
@@ -505,10 +519,24 @@ async def test_archived_witness_accounts_for_terminal_polls_and_cleans_up(
                 passes.append([])
                 if fault == "uncommitted" and len(passes) == 2:
                     return {}, b"{}"
-            response = rest[path]
+            if (
+                fault == "replay_event"
+                and len(passes) == 3
+                and path == f"/commits/{archive.REVIEW_HEAD}/check-runs"
+            ):
+                extra_check = {
+                    "id": replay_check_id,
+                    "name": "Unexpected replay check",
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+                response = {"check_runs": [*checks, extra_check], "total_count": len(checks) + 1}
+            else:
+                response = rest[path]
         return {}, json.dumps(response).encode()
 
     monkeypatch.setattr(archive, "project_witness", record_root)
+    monkeypatch.setattr(Ledger, "events_after", record_events)
     if fault == "skipped":
         poll_resources = archive.GitHubDetailPoller._poll_resources
 
@@ -518,7 +546,7 @@ async def test_archived_witness_accounts_for_terminal_polls_and_cleans_up(
 
         monkeypatch.setattr(archive.GitHubDetailPoller, "_poll_resources", skip_second_poll)
     async with asyncio.timeout(20):
-        if error:
+        if error is not None:
             with pytest.raises((AssertionError, archive.ArchiveReadError), match=error):
                 await archive.witness(read)
         else:
@@ -526,6 +554,13 @@ async def test_archived_witness_accounts_for_terminal_polls_and_cleans_up(
             assert result["cursor_generation"] == 3
             assert result["actions"] == 0
             assert result["events"] > 0
+            before, after = event_snapshots
+            assert after == before
+    if fault == "replay_event":
+        before, after = event_snapshots
+        assert after[:-1] == before
+        assert after[-1].kind == "github.check_run"
+        assert after[-1].fields["id"] == replay_check_id
     assert passes == expected_passes
     (root,) = temporary_roots
     assert not root.exists()
