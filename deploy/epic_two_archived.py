@@ -27,13 +27,13 @@ from uuid import uuid4
 
 import httpx
 
-from plotroom.adapters.github import github_secret_name
+from plotroom.adapters.github import GitHubPoller, github_secret_name
 from plotroom.adapters.github.details import GitHubDetailPoller
 from plotroom.adapters.github.read import PULL_MERGE_SHA_QUERY, REVIEW_THREADS_QUERY
 from plotroom.app.config import load_config
 from plotroom.app.serve import Daemon
 from plotroom.core.events import Event
-from plotroom.core.github import PULL_REQUESTS
+from plotroom.core.github import PULL_DETAIL_ATTEMPT_PREFIX, PULL_REQUESTS
 from plotroom.core.github_projection import CHECKS, THREADS
 from plotroom.core.ledger import Ledger
 
@@ -52,7 +52,13 @@ MAX_RESPONSE = 4 * 1024 * 1024
 MAX_CAPTURE = 16 * 1024 * 1024
 MAX_FRAME = 2 * MAX_RESPONSE
 SAFE_HEADERS = {"link", "x-ratelimit-remaining", "x-ratelimit-reset", "retry-after"}
-FIXTURE_PR_NUMBERS = (1, 2, 4, 5)
+FIXTURE_PULLS = {
+    1: ("merged", MERGED_HEAD),
+    2: ("closed", REVIEW_HEAD),
+    4: ("closed", "68743618337ec4c7f562b3f5fb4f574c2a4a9f3d"),
+    5: ("closed", "d58ac0958b8cb0411c08029dd1fd9218fc125b84"),
+}
+FIXTURE_PR_NUMBERS = tuple(FIXTURE_PULLS)
 REST_RESOURCE = re.compile(
     r"(?:/branches/main|/pulls(?:/[1245](?:/files)?)?"
     r"|/commits/[0-9a-f]{40}/check-runs|/actions/runs(?:/\d+(?:/attempts/\d+(?:/jobs)?)?)?"
@@ -432,23 +438,62 @@ controller_merges = false
         encoding="utf-8",
     )
 
-    done: asyncio.Queue[None] = asyncio.Queue()
-    original_poll = GitHubDetailPoller.poll
+    completed: asyncio.Queue[tuple[bool, asyncio.Event]] = asyncio.Queue(maxsize=1)
+    original_pull_poll = GitHubPoller.poll
+    original_detail_poll = GitHubDetailPoller.poll
 
-    async def observe_completed(self: GitHubDetailPoller, client: httpx.AsyncClient) -> None:
-        await original_poll(self, client)
-        done.put_nowait(None)
+    async def report_poll(committed: bool) -> None:
+        # Park the poll loop while the witness reads the ledger. Daemon teardown
+        # cancels this wait on the final pass and on refusal.
+        resume = asyncio.Event()
+        completed.put_nowait((committed, resume))
+        await resume.wait()
+
+    async def observe_pull_poll(self: GitHubPoller, client: httpx.AsyncClient) -> bool:
+        committed = await original_pull_poll(self, client)
+        if not committed:
+            await report_poll(committed=False)
+        return committed
+
+    async def observe_detail_poll(self: GitHubDetailPoller, client: httpx.AsyncClient) -> None:
+        await original_detail_poll(self, client)
+        await report_poll(committed=True)
+
+    def pull_numbers() -> tuple[int, ...]:
+        with closing(sqlite3.connect(data / f"{PROJECT}.db")) as database:
+            rows = database.execute(
+                "SELECT number FROM github_pull_requests WHERE repository = ? ORDER BY number",
+                (REPO,),
+            )
+            return tuple(int(row[0]) for row in rows)
 
     def count_actions() -> int:
         with closing(sqlite3.connect(data / f"{PROJECT}.db")) as database:
             return int(database.execute("SELECT count(*) FROM actions").fetchone()[0])
 
-    with patch.object(GitHubDetailPoller, "poll", observe_completed):
+    with (
+        patch.object(GitHubPoller, "poll", observe_pull_poll),
+        patch.object(GitHubDetailPoller, "poll", observe_detail_poll),
+    ):
         async with daemon(config) as ledger, asyncio.timeout(85):
-            await done.get()
-            cursor = await ledger.fetch_cursor(REPO, PULL_REQUESTS)
-            assert cursor is not None
-            assert cursor.generation == 1
+
+            async def observe_pass(
+                generation: int, detail_attempts: tuple[int, ...]
+            ) -> asyncio.Event:
+                committed, resume = await completed.get()
+                assert committed, "archived pull poll did not commit"
+                cursor = await ledger.fetch_cursor(REPO, PULL_REQUESTS)
+                assert cursor is not None
+                assert cursor.generation == generation, "archived pull poll was skipped"
+                assert await asyncio.to_thread(pull_numbers) == FIXTURE_PR_NUMBERS, (
+                    "archived pull roster changed"
+                )
+                await verify_detail_attempts(ledger, detail_attempts)
+                return resume
+
+            resume = await observe_pass(1, (1, 1, 0, 0))
+            resume.set()
+            resume = await observe_pass(2, (1, 1, 1, 1))
             await verify_projection(ledger)
             events = await ledger.events_after(0, 500)
             assert len(events) < 500
@@ -457,23 +502,52 @@ controller_merges = false
             # Closed PR details are normally skipped once reconciled. Make only
             # this disposable cursor stale so identical checks and thread are read again.
             previous = await detail_generations(ledger)
-            detail_cursor = await ledger.fetch_cursor(REPO, "pull_details/2")
+            replay_scope = f"{PULL_DETAIL_ATTEMPT_PREFIX}2"
+            detail_cursor = await ledger.fetch_cursor(REPO, replay_scope)
             assert detail_cursor is not None
             await ledger.run(
                 "system",
                 lambda uow: uow.save_fetch_cursor(
-                    REPO, "pull_details/2", replace(detail_cursor, watermark="")
+                    REPO, replay_scope, replace(detail_cursor, watermark="")
                 ),
             )
-            await done.get()
-            current = await ledger.fetch_cursor(REPO, PULL_REQUESTS)
-            assert current is not None
-            assert current.generation == cursor.generation + 1
+            resume.set()
+            await observe_pass(3, (1, 2, 1, 1))
             await verify_projection(ledger)
             assert await detail_generations(ledger) == (previous[0] + 1, previous[1] + 1)
             assert await ledger.events_after(0, 500) == events
             assert await asyncio.to_thread(count_actions) == 0
-    return {"events": len(events), "actions": 0, "cursor_generation": current.generation}
+    return {"events": len(events), "actions": 0, "cursor_generation": 3}
+
+
+async def verify_detail_attempts(ledger: Ledger, generations: tuple[int, ...]) -> None:
+    for (number, (state, sha)), generation in zip(FIXTURE_PULLS.items(), generations, strict=True):
+        pull = await ledger.pull_request(REPO, number)
+        pin_error = f"archived pull #{number} did not match its pin"
+        assert pull is not None, pin_error
+        assert (
+            pull.complete,
+            pull.repository,
+            pull.head_repository,
+            pull.state,
+            pull.head_sha,
+        ) == (
+            True,
+            REPO,
+            REPO,
+            state,
+            sha,
+        ), pin_error
+        cursor = await ledger.fetch_cursor(REPO, f"{PULL_DETAIL_ATTEMPT_PREFIX}{number}")
+        if generation == 0:
+            assert cursor is None, f"unexpected detail attempt for archived pull #{number}"
+        else:
+            attempt_error = f"incomplete or unexpected detail attempt for archived pull #{number}"
+            assert cursor is not None, attempt_error
+            assert (cursor.generation, cursor.watermark) == (
+                generation,
+                f"{pull.updated_at}:{pull.version}",
+            ), attempt_error
 
 
 async def detail_generations(ledger: Ledger) -> tuple[int, int]:

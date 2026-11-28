@@ -209,3 +209,14 @@ covers = ["R1", "R2"]
 after = [1, "2.14"]
 hitl = false
 risk = "medium"
+
+[[entry]]
+id = 19
+type = "bug"
+title = "Drain archived PR details before checking replay deduplication"
+description = "The archived Epic 2 witness assumes PR #2 is refreshed on its next poll. The bounded terminal scheduler can still have unattempted archived PRs, so the witness fails its generation check before verifying replay deduplication."
+verify = "With saved provider responses, drain the terminal backlog before the baseline, stale only the disposable PR #2 cursor, and prove one check/thread generation advance, identical events and zero actions on host and isolated Compose."
+covers = ["R1"]
+after = [18, "2.2"]
+hitl = false
+risk = "medium"
