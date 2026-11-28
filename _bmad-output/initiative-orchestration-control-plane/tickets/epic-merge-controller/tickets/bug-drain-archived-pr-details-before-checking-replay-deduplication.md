@@ -5,12 +5,12 @@ title: "Drain archived PR details before checking replay deduplication"
 parent: epic-merge-controller
 covers: [R1]
 after: [18, "2.2"]
-refined: false
+refined: true
 hitl: false
 risk: medium
 tracker_id: "237"
 remote: "https://github.com/mgd43b/plotroom/issues/237"
-tracker_status: backlog
+tracker_status: done
 ---
 
 # Drain archived PR details before checking replay deduplication
@@ -39,3 +39,7 @@ The witness assumes its target is the next terminal row selected. The scheduler 
 - scheduler — https://github.com/mgd43b/plotroom/issues/233 and https://github.com/mgd43b/plotroom/pull/234
 - fixture facts — https://github.com/mgd43b/plotroom/issues/29
 - affected suite and prior witness — https://github.com/mgd43b/plotroom/issues/46 and https://github.com/mgd43b/plotroom/pull/225
+
+## Verification
+
+The archived witness observed PRs #1 and #2, then #4 and #5, before taking the baseline. The following #2 detail replay advanced both resources once and preserved the exact event log with zero actions. Host and isolated Compose matched. See the build plan for evidence and the remaining protected PAT verification.
