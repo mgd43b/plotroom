@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
 from typing import Any
+from uuid import uuid4
 
 from plotroom.core.actions import ACTION_PAGE_SIZE, Action, QueuedAction
 from plotroom.core.ask_checks import DEFAULT_ASK_STALE_DAYS
@@ -26,7 +27,15 @@ from plotroom.core.events import (
     is_json,
     validate_fields,
 )
-from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
+from plotroom.core.github import (
+    SNAPSHOT_HEALTH,
+    FetchCursor,
+    FetchRetry,
+    GitHubSummary,
+    ObservedPull,
+    PullRequest,
+    apply_pull_poll,
+)
 from plotroom.core.github_projection import GitHubResource
 from plotroom.core.merge_controller import ACTIVE_MERGE_ITEMS, reconcile_merge_controller
 from plotroom.core.merge_gate import GatePolicy, GateSnapshot, GateVerdict, evaluate_gate
@@ -45,6 +54,8 @@ from plotroom.ports.search import MAX_SEARCH_LIMIT, MAX_SEARCH_QUERY_LENGTH, Sea
 from plotroom.ports.store import Board, Store, Transaction
 from plotroom.ports.work_items import WorkItem, WorkItemSource
 
+_WAITING_FOR_GITHUB = "waiting for the first GitHub poll"
+
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -59,6 +70,11 @@ def _check_role(role: str) -> str:
         return role_family(role)
     except ValueError as exc:
         raise LedgerError("invalid", str(exc)) from None
+
+
+def _consume_write_failure(future: asyncio.Future[None]) -> None:
+    if not future.cancelled():
+        future.exception()
 
 
 class Ledger:
@@ -111,7 +127,10 @@ class Ledger:
         )
         self._fixture_merge_enabled = fixture_merge_enabled
         self._fixture_branch_updates = fixture_branch_updates
-        self.github_error = "waiting for the first GitHub poll" if github_repository else None
+        self.github_error = _WAITING_FOR_GITHUB if github_repository else None
+        self._github_error_revision = 0
+        # A reopened ledger does not inherit the previous daemon's health.
+        self._github_snapshot_epoch = uuid4().hex
         self.session_workers = dict(session_workers or {})
         self._drain_enabled = drain_enabled
         self._brief_settings = brief_settings or BriefSettings()
@@ -208,17 +227,85 @@ class Ledger:
         return replace(snapshot, github_unavailable=self.github_error is not None)
 
     async def set_github_error(self, error: str | None) -> None:
-        if self.github_error != error:
-            self.github_error = error
-            await self.refresh_merge_controller()
+        changed = self.github_error != error
+        self.github_error = error
+        self._github_error_revision += 1
+        repository = self.github_repository
+        if repository is None:
+            if changed:
+                await self.refresh_merge_controller()
+            return
+
+        marker = self._snapshot_health_cursor(error, format_time(self._clock.now()))
+        if changed and self._live_merge_controller:
+
+            async def publish(uow: UnitOfWork) -> None:
+                await uow.save_fetch_cursor(repository, SNAPSHOT_HEALTH, marker)
+                uow.all_merge_pulls = True
+
+            publication = self._enqueue_work("system", publish)
+        else:
+
+            async def publish_silently(tx: Transaction) -> None:
+                previous = await tx.fetch_cursor(repository, SNAPSHOT_HEALTH)
+                if previous is None or previous.watermark != marker.watermark:
+                    await tx.save_fetch_cursor(repository, SNAPSHOT_HEALTH, marker)
+
+            publication = self._writer.enqueue(publish_silently, notify=False)
+
+        # Health is already fail-closed. Publish that accepted observation
+        # even if its caller stops waiting behind another writer input.
+        publication.add_done_callback(_consume_write_failure)
+        await asyncio.shield(publication)
+
+    def _snapshot_health_cursor(self, error: str | None, as_of: str) -> FetchCursor:
+        status = "-" if error is None else "+" + error
+        return FetchCursor(self._github_snapshot_epoch + status, as_of, 1)
+
+    async def commit_github_pull_poll(
+        self,
+        repository: str,
+        baseline: FetchCursor | None,
+        pulls: tuple[ObservedPull, ...],
+        as_of: str,
+    ) -> bool:
+        error_revision = self._github_error_revision
+        refresh: asyncio.Future[None] | None = None
+
+        async def commit_observation(uow: UnitOfWork) -> bool:
+            committed = await apply_pull_poll(uow, repository, baseline, pulls, as_of)
+            if committed:
+                await uow.save_fetch_cursor(
+                    repository, SNAPSHOT_HEALTH, self._snapshot_health_cursor(None, as_of)
+                )
+            return committed
+
+        def publish(committed: bool) -> None:
+            nonlocal refresh
+            if (
+                not committed
+                or self.github_error is None
+                or self._github_error_revision != error_revision
+            ):
+                return
+            self.github_error = None
+            if self._live_merge_controller and self._writer.running:
+                refresh = self._enqueue_work("system", self._mark_all_merge_pulls)
+                # A canceled active poll still commits and queues its refresh.
+                refresh.add_done_callback(_consume_write_failure)
+
+        committed = await self.run("system", commit_observation, after_commit=publish)
+        if refresh is not None:
+            await asyncio.shield(refresh)
+        return committed
+
+    @staticmethod
+    async def _mark_all_merge_pulls(uow: UnitOfWork) -> None:
+        uow.all_merge_pulls = True
 
     async def refresh_merge_controller(self) -> None:
         if self._live_merge_controller:
-
-            async def refresh(uow: UnitOfWork) -> None:
-                uow.all_merge_pulls = True
-
-            await self.run("system", refresh)
+            await self.run("system", self._mark_all_merge_pulls)
 
     async def _refresh_merge_controller(self, uow: UnitOfWork) -> None:
         if (
@@ -254,8 +341,23 @@ class Ledger:
             )
             await leaves.evaluate_open(uow)
 
-    async def run[T](self, role: str, work: Callable[[UnitOfWork], Awaitable[T]]) -> T:
+    async def run[T](
+        self,
+        role: str,
+        work: Callable[[UnitOfWork], Awaitable[T]],
+        *,
+        after_commit: Callable[[T], None] | None = None,
+    ) -> T:
         """Run ``work`` as one input in one transaction; its appends are checked as ``role``."""
+        return await self._enqueue_work(role, work, after_commit=after_commit)
+
+    def _enqueue_work[T](
+        self,
+        role: str,
+        work: Callable[[UnitOfWork], Awaitable[T]],
+        *,
+        after_commit: Callable[[T], None] | None = None,
+    ) -> asyncio.Future[T]:
         _check_role(role)
 
         async def in_transaction(tx: Transaction) -> T:
@@ -274,7 +376,7 @@ class Ledger:
             await self._evaluate_triggers(tx)
             return result
 
-        return await self._writer.submit(in_transaction)
+        return self._writer.enqueue(in_transaction, after_commit=after_commit)
 
     async def append(self, role: str, event: NewEvent) -> AppendResult:
         """Append one event as ``role``. A duplicate returns the stored event, ``created=False``."""
@@ -512,9 +614,31 @@ class Ledger:
     async def snapshot_summary(
         self, role: str, *, checklist_lane: str | None = None
     ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
-        return await self._store.read_snapshot(
+        board, github, counts, claims, freeze, _ = await self._store.read_snapshot(
             role, self.github_repository, checklist_lane=checklist_lane
         )
+        return board, github, counts, claims, freeze
+
+    async def snapshot_observation(
+        self, role: str, *, checklist_lane: str | None = None
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None, str | None]:
+        board, github, counts, claims, freeze, health = await self._store.read_snapshot(
+            role,
+            self.github_repository,
+            checklist_lane=checklist_lane,
+            include_github_health=True,
+        )
+        error = None
+        if github is not None:
+            error = _WAITING_FOR_GITHUB
+            status = ""
+            if health is not None and health.watermark.startswith(self._github_snapshot_epoch):
+                status = health.watermark[len(self._github_snapshot_epoch) :]
+            if status == "-" and github.as_of is not None:
+                error = None
+            elif status.startswith("+"):
+                error = status[1:]
+        return board, github, counts, claims, freeze, error
 
     async def snapshot_with_triggers(
         self, role: str

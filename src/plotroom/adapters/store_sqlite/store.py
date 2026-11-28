@@ -62,7 +62,13 @@ from plotroom.core.actions import Action, QueuedAction
 from plotroom.core.ask_checks import Ask
 from plotroom.core.claims import Claim
 from plotroom.core.events import Event, LedgerError
-from plotroom.core.github import FetchCursor, FetchRetry, GitHubSummary, PullRequest
+from plotroom.core.github import (
+    SNAPSHOT_HEALTH,
+    FetchCursor,
+    FetchRetry,
+    GitHubSummary,
+    PullRequest,
+)
 from plotroom.core.github_projection import ISSUE_TREE, ISSUES, GitHubResource
 from plotroom.core.goal_projection import (
     GoalFacts,
@@ -392,8 +398,13 @@ class SqliteStore:
             return await self._board(connection, role)
 
     async def read_snapshot(
-        self, role: str, repository: str | None, *, checklist_lane: str | None = None
-    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None]:
+        self,
+        role: str,
+        repository: str | None,
+        *,
+        checklist_lane: str | None = None,
+        include_github_health: bool = False,
+    ) -> tuple[Board, GitHubSummary | None, dict[str, int], int, str | None, FetchCursor | None]:
         async with self._engine.connect() as connection:
             board, github = (
                 (await self._board(connection, role), None)
@@ -410,7 +421,12 @@ class SqliteStore:
             trigger_counts = await triggers_sql.trigger_counts(connection)
             claim_count = await count_claims(connection, role)
             freeze_reason = await SqliteTransaction(connection).deploy_freeze()
-            return board, github, trigger_counts, claim_count, freeze_reason
+            health = (
+                await github_sql.fetch_cursor(connection, repository, SNAPSHOT_HEALTH)
+                if include_github_health and repository is not None
+                else None
+            )
+            return board, github, trigger_counts, claim_count, freeze_reason, health
 
     async def read_github_board(self, role: str, repository: str) -> tuple[Board, GitHubSummary]:
         async with self._engine.connect() as connection:

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from plotroom.core.unit_of_work import UnitOfWork
 
 PULL_REQUESTS = "pull_requests"
+SNAPSHOT_HEALTH = "snapshot_health"
 DETAILS = "details"
 PULL_DETAIL_ATTEMPT_PREFIX = "pull_details/"
 ACTIVE_PULL_DETAIL_BUDGET = 17

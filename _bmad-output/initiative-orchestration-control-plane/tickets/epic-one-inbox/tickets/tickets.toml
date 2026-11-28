@@ -208,3 +208,14 @@ covers = ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11"]
 after = [12, "1.10", 2, 6]
 hitl = false
 risk = "low"
+
+[[entry]]
+id = 19
+type = "bug"
+title = "Keep GitHub health and PR projection coherent in snapshot()"
+description = "A snapshot can report GitHub available with a PR count and watermark from before the first successful poll. Availability and the accompanying board and GitHub summary should describe a coherent observation."
+verify = "Deterministically interleave a snapshot and the first committed provider poll through normal MCP. Verify coherent pre/post responses, healthy empty repositories, later health changes, and unchanged mounted-PAT smoke behavior."
+covers = ["R1"]
+after = [2, "1.6"]
+hitl = false
+risk = "medium"
