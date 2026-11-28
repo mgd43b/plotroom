@@ -9,7 +9,7 @@ import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +67,7 @@ class Pull:
     unreadable: str = ""
     lane: str | None = None
     head_version: int = 0
+    closed: bool = False
 
     @property
     def head(self) -> str:
@@ -80,7 +81,7 @@ class Pull:
             "node_id": f"PR_{self.number}",
             "user": {"login": "developer"},
             "created_at": NOW,
-            "state": "open" if self.merge_commit is None else "closed",
+            "state": "closed" if self.closed or self.merge_commit is not None else "open",
             "merged": self.merge_commit is not None,
             "merged_at": None if self.merge_commit is None else updated,
             "merge_commit_sha": self.merge_commit,
@@ -360,7 +361,10 @@ def repository(monkeypatch: pytest.MonkeyPatch) -> Repository:
 
 @asynccontextmanager
 async def running_daemon(
-    directory: Path, *, kodus_review: KodusReviewPolicy | None = None
+    directory: Path,
+    *,
+    kodus_review: KodusReviewPolicy | None = None,
+    max_age: timedelta = timedelta(minutes=2),
 ) -> AsyncGenerator[tuple[Daemon, Client, Client, Client]]:
     secret = directory / "token"
     secret.write_text("fixture", encoding="utf-8")
@@ -382,6 +386,7 @@ async def running_daemon(
                 merge_gate_policy=GatePolicy(
                     2,
                     ignore_checks=("check-2",),
+                    max_age=max_age,
                     ci_workflow=WORKFLOW,
                     fix_label=FIX_LABEL,
                     skip_label="skip-merge",

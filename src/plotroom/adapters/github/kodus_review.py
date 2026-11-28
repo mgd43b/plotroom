@@ -323,6 +323,10 @@ async def fetch_kodus_review(
         opening_check = await _check(api, client, token, pull, identity, policy, opening.head_sha)
         if opening_check.mode != "reviewed" or opening_check.id == check.id:
             raise GitHubUnavailable("Opening head lacks a completed Kodus review")
+        if opening_check.completed_at > check.started_at:
+            raise GitHubUnavailable(
+                "The current cadence skip started before opening review completed"
+            )
         author = _nonempty(obj(detail["user"])["login"]).lower()
         thread_pull = ReviewThreadPull(_nonempty(detail["node_id"]), author)
         answered_threads: list[str] = []

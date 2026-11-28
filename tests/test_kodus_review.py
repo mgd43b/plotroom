@@ -1,18 +1,21 @@
 """Fail-closed provider contracts and shared merge readiness for opt-in Kodus review."""
 
+import asyncio
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from plotroom.adapters.github import GitHubUnavailable
+from plotroom.adapters.github import GitHubUnavailable, details
 from plotroom.adapters.github.kodus_review import fetch_kodus_review
 from plotroom.adapters.github.read import CADENCE_THREADS_QUERY, GitHubReadClient, Row
 from plotroom.app.config import ConfigError, load_config
 from plotroom.core.events import format_time
 from plotroom.core.github import PullRequest
+from plotroom.core.github_projection import KODUS_REVIEW, PULL_TEXT, GitHubResource
 from plotroom.core.kodus_review import KodusReviewPolicy, OpeningHeadAttestation
 from test_merge_controller_e2e import (
     API,
@@ -93,6 +96,8 @@ class Provider:
         self.association = OpeningHeadAttestation(REPO, 23, self.detail["id"], CREATED_AT, OPENING)
         self.policy = replace(APP, opening_heads=(self.association,)) if cadence else APP
         self.current = check(self.pull, self.pr.head_sha, skipped=cadence)
+        if cadence:
+            self.current["started_at"] = LATER
         self.opening = check(self.pull, OPENING)
         self.check_count = 1
         self.thread: Row = {
@@ -308,12 +313,84 @@ async def test_cadence_skip_requires_trusted_opening_and_complete_answered_threa
 
 async def test_attested_opening_review_and_answered_threads_allow_cadence_skip() -> None:
     provider = Provider(cadence=True)
+    assert provider.opening["completed_at"] == provider.current["started_at"]
     evidence = await provider.read()
     assert (evidence["mode"], evidence["opening_sha"], evidence["opening_check_id"]) == (
         "cadence-skip",
         OPENING,
         provider.opening["id"],
     )
+
+
+async def test_cadence_skip_started_before_opening_review_completed_is_refused() -> None:
+    provider = Provider(cadence=True)
+    provider.opening["completed_at"] = "2026-11-22T12:00:01.000001Z"
+    with pytest.raises(GitHubUnavailable, match="skip started before opening review completed"):
+        await provider.read()
+    assert "/graphql" not in provider.paths
+
+
+async def test_kodus_poll_prioritizes_ordinary_evidence_and_rotates_budgeted_open_pulls(
+    tmp_path: Path, repository: Repository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second, third = Pull(520), Pull(521), Pull(522)
+    closed, merged = Pull(523, closed=True), Pull(524, merge_commit="9" * 40)
+    targets = (first, second, third, closed, merged)
+    repository.add(*targets)
+    elapsed = 0.0
+    timeouts: list[float] = []
+    attempts: list[int] = []
+
+    def monotonic() -> float:
+        return elapsed
+
+    def timeout(seconds: float) -> asyncio.Timeout:
+        timeouts.append(seconds)
+        return asyncio.timeout(seconds)
+
+    async with running_daemon(tmp_path, kodus_review=APP, max_age=timedelta(seconds=8)) as (
+        daemon,
+        _,
+        _,
+        _,
+    ):
+        ledger = daemon.ledgers["epic4"]
+
+        async def read(
+            api: GitHubReadClient,
+            client: httpx.AsyncClient,
+            token: str,
+            pull: PullRequest,
+            policy: KodusReviewPolicy,
+        ) -> GitHubResource:
+            nonlocal elapsed
+            for target in targets:
+                assert await ledger.github_resource(REPO, PULL_TEXT, str(target.number)) is not None
+            attempts.append(pull.number)
+            took = min(1.25, timeouts[-1])
+            elapsed += took
+            if pull.number == first.number or took < 1.25:
+                raise TimeoutError
+            return GitHubResource(())
+
+        monkeypatch.setattr(details, "monotonic", monotonic)
+        monkeypatch.setattr(details, "asyncio", SimpleNamespace(timeout=timeout))
+        monkeypatch.setattr(details, "fetch_kodus_review", read)
+
+        for expected in (
+            [first.number, second.number],
+            [first.number, second.number, third.number, first.number],
+            [first.number, second.number, third.number, first.number, second.number, third.number],
+        ):
+            await repository.refresh()
+            assert attempts == expected
+        assert timeouts == [2.0, 0.75] * 3
+        first_proof = await ledger.github_resource(REPO, KODUS_REVIEW, str(first.number))
+        assert first_proof is not None
+        assert first_proof.generation == 2
+        assert not first_proof.complete
+        for pull in (closed, merged):
+            assert await ledger.github_resource(REPO, KODUS_REVIEW, str(pull.number)) is None
 
 
 async def test_kodus_poll_advisory_live_and_pinned_confirmation(

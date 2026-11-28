@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime
 from functools import partial
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -96,7 +97,7 @@ log = logging.getLogger("plotroom.github")
 MAX_NEW_COMPARISONS = 4
 MAX_ASK_HISTORIES = 4
 MAX_MERGE_SHA_READS = 2
-KODUS_REVIEW_READ_TIMEOUT = 5
+KODUS_REVIEW_READ_TIMEOUT = 5.0
 MERGE_SHA_READ_TIMEOUT = 3
 _READ_ERRORS = (
     GitHubUnavailable,
@@ -106,6 +107,10 @@ _READ_ERRORS = (
     TypeError,
     OverflowError,
 )
+
+
+class _KodusReviewBudgetExhausted(Exception):
+    """There is no time left to attempt another review read."""
 
 
 class GitHubDetailPoller:
@@ -395,13 +400,6 @@ class GitHubDetailPoller:
                 complete = complete and result is not None
                 if resource == FILES:
                     files = result
-            if self.ledger.merge_gate_policy.kodus_review is not None:
-                await self._refresh(
-                    KODUS_REVIEW,
-                    str(pull.number),
-                    lambda _, pull=pull: self._read_kodus_review(client, token, pull),
-                    pull=pull,
-                )
             if main is not None and main.complete and self.ci_workflow is not None:
                 await self._refresh(
                     PULL_COMPARISON,
@@ -455,14 +453,57 @@ class GitHubDetailPoller:
             else:
                 await self._mark_incomplete(ISSUE_TREE, "")
         await poll_deployments(self.ledger, api, client, token, format_time(self.clock.now()))
+        if self.ledger.merge_gate_policy.kodus_review is not None:
+            await self._poll_kodus_reviews(client, token, pulls)
+
+    async def _poll_kodus_reviews(
+        self, client: httpx.AsyncClient, token: str, pulls: tuple[PullRequest, ...]
+    ) -> None:
+        deadline = monotonic() + min(
+            KODUS_REVIEW_READ_TIMEOUT, self.ledger.merge_gate_policy.max_age.total_seconds() / 4
+        )
+        attempts: list[tuple[tuple[str, int, int], PullRequest]] = []
+        for pull in pulls:
+            if pull.state != "open":
+                continue
+            previous = await self.ledger.github_resource(
+                self.api.repository, KODUS_REVIEW, str(pull.number)
+            )
+            last_attempt = previous.as_of if previous is not None else ""
+            generation = previous.generation if previous is not None else 0
+            attempts.append(((last_attempt, generation, pull.number), pull))
+        # Ordinary PR targets rotate independently. Prioritize the least recently
+        # attempted review within each batch so a slow PR cannot monopolize it.
+        for _, pull in sorted(attempts, key=lambda target: target[0]):
+            try:
+                await self._refresh(
+                    KODUS_REVIEW,
+                    str(pull.number),
+                    lambda _, pull=pull: self._read_kodus_review(
+                        client, token, pull, deadline=deadline
+                    ),
+                    pull=pull,
+                )
+            except _KodusReviewBudgetExhausted:
+                break
 
     async def _read_kodus_review(
-        self, client: httpx.AsyncClient, token: str, pull: PullRequest
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+        pull: PullRequest,
+        *,
+        deadline: float | None = None,
     ) -> GitHubResource:
         policy = self.ledger.merge_gate_policy.kodus_review
         assert policy is not None
+        timeout = KODUS_REVIEW_READ_TIMEOUT
+        if deadline is not None:
+            timeout = min(timeout, deadline - monotonic())
+            if timeout <= 0:
+                raise _KodusReviewBudgetExhausted
         try:
-            async with asyncio.timeout(KODUS_REVIEW_READ_TIMEOUT):
+            async with asyncio.timeout(timeout):
                 return await fetch_kodus_review(self.api, client, token, pull, policy)
         except TimeoutError, RecursionError:
             raise GitHubUnavailable("Kodus review read exceeded its limits") from None
@@ -658,7 +699,7 @@ class GitHubDetailPoller:
                     "GitHub projection refresh failed",
                     extra={"project": self.ledger.project_id, "resource": resource},
                 )
-            if resource == ISSUE_TREE or previous is None or previous.complete:
+            if resource in (ISSUE_TREE, KODUS_REVIEW) or previous is None or previous.complete:
                 await self._mark_incomplete(resource, scope, pulls)
             return None
 

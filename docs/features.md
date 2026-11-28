@@ -128,7 +128,8 @@ head_sha = "1234567890abcdef1234567890abcdef12345678"
 ```
 
 Cadence also requires a completed review of that opening head and a designated
-skip from the trusted App on the current head. Resolved threads need a reply
+skip from the trusted App on the current head. The opening review must finish
+by the time the skip starts. Resolved threads need a reply
 from the PR author or an owner, member, or collaborator who is a human and
 different from the thread author. Plotroom reads the complete thread list and
 up to 100 comments per thread. Incomplete evidence keeps the gate closed.

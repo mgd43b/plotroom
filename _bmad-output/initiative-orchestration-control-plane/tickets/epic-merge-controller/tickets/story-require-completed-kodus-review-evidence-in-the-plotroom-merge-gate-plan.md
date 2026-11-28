@@ -69,13 +69,15 @@ Given an existing MERGE offer, when provider proof disappears or either pin move
 - Medium, patch. A canonical provider URL with mixed-case owner or repository would reject a valid PR review. Compare the repository path case-insensitively with the origin and PR number still pinned.
 - Medium, patch. Successful cadence was tested in the evidence reader and fixture dispatch separately. Exercise provider polling, advisory, live, and pinned confirmation together.
 
+- Opening Kodus review caught two additional issues. The follow-up caps total optional review-read time per poll, rotates open PRs by least recent attempt, and requires the opening review to finish by skip start. The new regression fixtures exercise both corrections.
+
 ## Design Notes
 
 The genuine #229 opening and final checks had empty PR lists. GitHub GraphQL associated the opening commit uniquely with #229. That establishes the provider's current association and cannot attest opening. The repository Events API's historical opened events returned the final head. The product's projected opened event represents first observation. Normal workflow runs record the event type without the activity action. A unique commit association can omit historical PRs. A submitted review by the configured App bot can corroborate completion when GitHub reports the exact commit under the target PR. A timestamp-correlated App comment without a commit pin cannot attribute completion. An empty-association skip has no submitted review to corroborate it.
 
 ## Verification
 
-- Python 3.14.10 from the locked environment passed all 1,479 tests. Ruff lint and formatting, Pyright, and the core dependency check passed.
-- Python 3.15.2 from the locked environment passed all 1,479 tests. Ruff lint and formatting, Pyright, and the core dependency check passed.
+- The opening revision passed all 1,479 tests on locked Python 3.14.10. Ruff lint and formatting, Pyright, and the core dependency check passed.
+- The opening revision passed all 1,479 tests on locked Python 3.15.2. Ruff lint and formatting, Pyright, and the core dependency check passed.
 - Independent BMad review found three issues. The patches passed the focused regression runs and both full locked suites.
 - After merge, verify both Python jobs on the exact main merge commit and rerun focused offline policy fixtures on that revision.
