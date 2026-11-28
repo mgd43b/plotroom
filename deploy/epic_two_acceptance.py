@@ -242,9 +242,14 @@ def verify_integrated(tag: str, token_file: Path) -> int:
             print(f"   External acceptance DEFERRED — {deferred}")
 
     if not (local and compose and archive and mirrors):
-        print("Result: included integrated witnesses failed. Full #46 acceptance remains pending.")
+        print(
+            "Result: included integrated witnesses failed. "
+            "Deferred live checks remain on Epic 2 (#2)."
+        )
         return 1
-    print("Result: limited integrated witnesses passed. Full #46 acceptance remains pending.")
+    print(
+        "Result: limited integrated witnesses passed. Deferred live checks remain on Epic 2 (#2)."
+    )
     return 0
 
 
@@ -290,7 +295,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--verify-integrated and --token-file must be supplied together")
     if args.verify_integrated:
         return verify_integrated(args.image_tag, args.token_file)
-    print("Running Epic 2 synthetic witnesses. Full acceptance needs real evidence.", flush=True)
+    print(
+        "Running Epic 2 synthetic witnesses. Full Epic 2 acceptance needs live evidence.",
+        flush=True,
+    )
 
     def check(label: str, run_check: Callable[[], None], *, verdict: str = "passed") -> bool:
         try:
@@ -338,16 +346,16 @@ def main(argv: list[str] | None = None) -> int:
             print("   Full PENDING — verify both sources in integrated credential-backed CI.")
         elif blocked:
             print(f"   Full BLOCKED — {blocked}")
-    print("Integrated credential-backed CI acceptance remains pending.")
+    print("Integrated credential-backed CI acceptance for all Epic 2 checks remains pending.")
 
     if not local or not compose:
-        print("Result: synthetic checks failed. Full acceptance remains incomplete.")
+        print("Result: synthetic checks failed. Full Epic 2 acceptance remains incomplete.")
         return 1
     if args.archived_github and not archived:
-        print("Result: archived GitHub checks failed. Full acceptance remains incomplete.")
+        print("Result: archived GitHub checks failed. Full Epic 2 acceptance remains incomplete.")
         return 1
     if args.work_item_mirrors and not mirrors_checked:
-        print("Result: work-item mirror checks failed. Full acceptance remains incomplete.")
+        print("Result: work-item mirror checks failed. Full Epic 2 acceptance remains incomplete.")
         return 1
     if not args.synthetic:
         covered = (
@@ -355,9 +363,9 @@ def main(argv: list[str] | None = None) -> int:
             if archived
             else "Synthetic checks passed."
         )
-        print(f"Result: full acceptance blocked. {covered}")
+        print(f"Result: full Epic 2 acceptance blocked. {covered}")
         return 1
-    print("Result: synthetic checks passed. Full acceptance remains incomplete.")
+    print("Result: synthetic checks passed. Full Epic 2 acceptance remains incomplete.")
     return 0
 
 

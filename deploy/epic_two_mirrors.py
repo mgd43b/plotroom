@@ -502,7 +502,10 @@ async def verify_published(tag: str, token_file: Path, report: Callable[[str], N
         )
     if not matched:
         raise ArchiveReadError("the host and Compose did not match the published fixture")
-    report("Published row 6 credential-backed witness PASS. Full #46 acceptance remains pending.")
+    report(
+        "Published row 6 credential-backed witness PASS. "
+        "Deferred live checks remain on Epic 2 (#2)."
+    )
 
 
 async def _replay_child(arguments: list[str]) -> dict[str, object]:
