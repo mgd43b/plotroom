@@ -17,6 +17,7 @@ MAIN = "main_runs"
 MAIN_CI = "main_ci"
 MAIN_CI_WINDOW = 30
 THREADS = "review_threads"
+KODUS_REVIEW = "kodus_review"
 FILES = "pull_files"
 LABELS = "pull_labels"
 PULL_TEXT = "pull_text"

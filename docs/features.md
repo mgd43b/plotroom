@@ -95,6 +95,46 @@ printed command. Controller-run merges default to off and require an injected
 loopback test fixture, where both refs are checked at dispatch. With a live
 repository, use the verdict and pinned command for a human or clerk to act on.
 
+Projects can require completed Kodus review before a MERGE verdict. Configure
+the numeric GitHub App ID, App slug, and exact check name in the trusted
+project configuration.
+
+```toml
+[projects.example.github.kodus_review]
+app_id = 123456
+app_slug = "kodus-example"
+check_name = "Kody Code Review"
+```
+
+Plotroom requires the App's completed review result for the exact PR head,
+with evidence linking the check to that PR. For a successful check with an
+empty PR association list, a submitted review by the App's GitHub bot can
+provide corroboration when it names the exact commit and falls within the
+check's run. A success with neither a direct association nor a qualifying
+submitted review leaves the gate closed, including when there are no findings.
+A cadence skip requires a direct GitHub association to the PR.
+
+Project administrators can attest the opening head if they independently
+witnessed it when the PR opened. Record the repository, PR number, immutable
+numeric GitHub PR ID, creation time, and full opening SHA.
+
+```toml
+[[projects.example.github.kodus_review.opening_heads]]
+repository = "owner/repository"
+pull_number = 42
+pull_id = 123456789
+created_at = "2026-11-25T20:00:00Z"
+head_sha = "1234567890abcdef1234567890abcdef12345678"
+```
+
+Cadence also requires a completed review of that opening head and a designated
+skip from the trusted App on the current head. Resolved threads need a reply
+from the PR author or an owner, member, or collaborator who is a human and
+different from the thread author. Plotroom reads the complete thread list and
+up to 100 comments per thread. Incomplete evidence keeps the gate closed.
+Without an attestation, a completed review on the current head is required.
+Automatic capture of the opening head is separate from this policy.
+
 The orchestrator can set the deploy window with `freeze(reason, request_id)` and
 clear it with `unfreeze(request_id)`. The window is stored in the project ledger
 and holds all PRs until it is cleared. `snapshot()` shows the active window.

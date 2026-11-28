@@ -33,6 +33,7 @@ from plotroom.adapters.github.issue_details import (
     fetch_issue_tree,
     fetch_issues,
 )
+from plotroom.adapters.github.kodus_review import fetch_kodus_review
 from plotroom.adapters.github.pr_details import (
     fetch_files,
     fetch_labels,
@@ -62,6 +63,7 @@ from plotroom.core.github_projection import (
     ISSUE_RELATION_RETRY,
     ISSUE_TREE,
     ISSUES,
+    KODUS_REVIEW,
     LABELS,
     MAIN,
     MAIN_CI,
@@ -94,6 +96,7 @@ log = logging.getLogger("plotroom.github")
 MAX_NEW_COMPARISONS = 4
 MAX_ASK_HISTORIES = 4
 MAX_MERGE_SHA_READS = 2
+KODUS_REVIEW_READ_TIMEOUT = 5
 MERGE_SHA_READ_TIMEOUT = 3
 _READ_ERRORS = (
     GitHubUnavailable,
@@ -170,7 +173,13 @@ class GitHubDetailPoller:
             as_of=observed_at,
         )
         checks = await fetch_checks(
-            api, client, token, pull.head_sha, snapshot.checks, include_junit=False
+            api,
+            client,
+            token,
+            pull.head_sha,
+            snapshot.checks,
+            include_junit=False,
+            kodus_review=self.ledger.merge_gate_policy.kodus_review,
         )
         labels = await fetch_labels(api, client, token, pull)
         threads = await fetch_threads(api, client, token, pull)
@@ -184,6 +193,14 @@ class GitHubDetailPoller:
             head,
             snapshot.comparison,
         )
+        review = None
+        if self.ledger.merge_gate_policy.kodus_review is not None:
+            try:
+                review = await self._read_kodus_review(client, token, pull)
+            except GitHubRateLimited:
+                raise
+            except _READ_ERRORS:
+                review = GitHubResource((), complete=False)
         current = obj(await api.get(client, token, f"/pulls/{pull.number}"))
         draft = current["draft"]
         identity = obj(current["head"])
@@ -209,6 +226,7 @@ class GitHubDetailPoller:
             labels=replace(bind_overlap_labels(labels, snapshot.labels, pull), as_of=observed_at),
             pull_text=replace(text, as_of=observed_at),
             comparison=replace(comparison, as_of=observed_at),
+            kodus_review=replace(review, as_of=observed_at) if review is not None else None,
         )
 
     async def cooling_down(self) -> bool:
@@ -349,6 +367,7 @@ class GitHubDetailPoller:
                     recovery_check_ids=recoveries.get(sha, ()),
                     junit_budget=junit_budget,
                     allow_junit_lookup=allow_lookup,
+                    kodus_review=self.ledger.merge_gate_policy.kodus_review,
                 ),
                 pulls=tuple(numbers),
             )
@@ -376,6 +395,13 @@ class GitHubDetailPoller:
                 complete = complete and result is not None
                 if resource == FILES:
                     files = result
+            if self.ledger.merge_gate_policy.kodus_review is not None:
+                await self._refresh(
+                    KODUS_REVIEW,
+                    str(pull.number),
+                    lambda _, pull=pull: self._read_kodus_review(client, token, pull),
+                    pull=pull,
+                )
             if main is not None and main.complete and self.ci_workflow is not None:
                 await self._refresh(
                     PULL_COMPARISON,
@@ -429,6 +455,17 @@ class GitHubDetailPoller:
             else:
                 await self._mark_incomplete(ISSUE_TREE, "")
         await poll_deployments(self.ledger, api, client, token, format_time(self.clock.now()))
+
+    async def _read_kodus_review(
+        self, client: httpx.AsyncClient, token: str, pull: PullRequest
+    ) -> GitHubResource:
+        policy = self.ledger.merge_gate_policy.kodus_review
+        assert policy is not None
+        try:
+            async with asyncio.timeout(KODUS_REVIEW_READ_TIMEOUT):
+                return await fetch_kodus_review(self.api, client, token, pull, policy)
+        except TimeoutError, RecursionError:
+            raise GitHubUnavailable("Kodus review read exceeded its limits") from None
 
     async def _poll_main_flakes(
         self,
