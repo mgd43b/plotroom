@@ -71,8 +71,14 @@ def test_clean_witnesses_only_pass_in_synthetic_mode(
     assert "approved CI App credential" in output
     assert "Existing recorded GitHub deployment" in output
     assert "Epic 2 Notes" in output
-    assert "Integrated credential-backed CI acceptance remains pending" in output
-    summary = "remains incomplete" if synthetic else "full acceptance blocked"
+    assert (
+        "Integrated credential-backed CI acceptance for all Epic 2 checks remains pending" in output
+    )
+    summary = (
+        "Full Epic 2 acceptance remains incomplete"
+        if synthetic
+        else "full Epic 2 acceptance blocked"
+    )
     assert summary in output
 
 
@@ -173,7 +179,7 @@ def test_integrated_result_requires_each_included_witness_and_reports_its_scope(
     assert deferred == {2, 5, 7}
     assert local_rows == set(range(1, 10))
     assert compose_rows == {2, 3, 4, 8, 9}
-    assert "Full #46 acceptance remains pending." in captured.out
+    assert "Deferred live checks remain on Epic 2 (#2)." in captured.out
     assert "untrusted error detail" not in captured.err
     if fault == "archive":
         assert "HTTP 403 at GraphQL review threads for PR #2" in captured.err
@@ -316,7 +322,7 @@ def test_archived_rows_are_explicit_and_full_mode_remains_blocked(
     assert blocked_rows == ({2, 5, 6, 7} if available else {1, 2, 5, 6, 7, 9})
     if available:
         assert "Original live transitions remain outside" in captured.out
-        assert "full acceptance blocked" in captured.out
+        assert "full Epic 2 acceptance blocked" in captured.out
     else:
         assert "read-only fixture input is missing" in captured.err
         assert "archived GitHub checks failed" in captured.out
@@ -1289,7 +1295,9 @@ async def test_published_mirror_captures_auth_reads_and_replays_without_credenti
         await mirror.verify_published("fixture", path, reports.append)
         assert compose_calls == [(1, 7)]
         assert set(calls) == set(data)
-        assert any("credential-backed witness PASS" in report for report in reports)
+        assert reports[-1] == (
+            "Published row 6 credential-backed witness PASS. Deferred live checks remain on Epic 2 (#2)."
+        )
     else:
         message = {
             "body-drift": "story metadata or body differs",
