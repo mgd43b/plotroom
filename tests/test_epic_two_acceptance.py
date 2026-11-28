@@ -12,6 +12,9 @@ from typing import Any
 import httpx
 import pytest
 
+from plotroom.adapters.github import github_secret_name
+from plotroom.core.events import Event
+from plotroom.core.ledger import Ledger
 from plotroom.ports.work_items import WorkItem
 
 # Epic 2's fixed synthetic contract, including both transport and ingest variants.
@@ -358,6 +361,7 @@ def test_archive_broker_allows_only_fixture_reads_and_replays_only_captured_inpu
         ("PUT", endpoint, b""),
         ("GET", "/repos/mgd43b/plotroom/pulls", b""),
         ("GET", "/repos/mgd43b/plotroom-test/actions/runs/1/logs", b""),
+        ("GET", f"/repos/mgd43b/plotroom-test/commits/{archive.REVIEW_HEAD}/statuses", b""),
         ("POST", "/graphql", b'{"query":"mutation { changed }","variables":{}}'),
     ):
         with pytest.raises(ValueError, match="outside"):
@@ -381,6 +385,185 @@ def test_archive_graphql_query_is_bound_to_the_fixture(acceptance: Any) -> None:
     for key, value in (("owner", "other"), ("name", "plotroom"), ("number", 3)):
         with pytest.raises(ValueError, match="outside"):
             archive._scoped_endpoint("POST", "/graphql", document({**scoped, key: value}))
+
+
+@pytest.mark.parametrize(
+    ("fault", "error", "expected_passes"),
+    [
+        (None, None, [[1, 2], [4, 5], [2]]),
+        ("replay_event", "^$", [[1, 2], [4, 5], [2]]),
+        ("moved", "archived pull #4 did not match its pin", [[1, 2]]),
+        ("missing", "archived pull roster changed", [[1, 2]]),
+        ("extra", "archived pull roster changed", [[1, 2]]),
+        ("incomplete", "incomplete or unexpected detail attempt", [[1, 2], [4, 5]]),
+        ("skipped", "incomplete or unexpected detail attempt", [[1, 2], []]),
+        ("uncommitted", "archived pull poll did not commit", [[1, 2], []]),
+        ("denied", "GitHub fixture read failed: fixture read denied", [[1, 2], [4, 5]]),
+    ],
+)
+async def test_archived_witness_accounts_for_terminal_polls_and_cleans_up(
+    acceptance: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str | None,
+    error: str | None,
+    expected_passes: list[list[int]],
+) -> None:
+    archive: Any = importlib.import_module(acceptance.archived_checks.__module__)
+    monkeypatch.delenv(github_secret_name(archive.PROJECT), raising=False)
+    repo: str = archive.REPO
+    main = "a" * 40
+    now = "2026-11-22T10:00:00Z"
+    pulls: dict[int, dict[str, Any]] = {}
+    for number, branch, head in (
+        (1, archive.MERGED_BRANCH, archive.MERGED_HEAD),
+        (2, archive.REVIEW_BRANCH, archive.REVIEW_HEAD),
+        (4, "fixture-four", archive.FIXTURE_PULLS[4][1]),
+        (5, "fixture-five", archive.FIXTURE_PULLS[5][1]),
+    ):
+        pulls[number] = {
+            "number": number,
+            "state": "closed",
+            "updated_at": now,
+            "merged_at": now if number == 1 else None,
+            "merge_commit_sha": archive.MERGED_COMMIT if number == 1 else None,
+            "head": {"ref": branch, "sha": head, "repo": {"full_name": repo}},
+            "base": {"ref": "main", "sha": main},
+            "changed_files": 0,
+        }
+    if fault == "moved":
+        pulls[4]["head"]["sha"] = "b" * 40
+    if fault == "missing":
+        del pulls[5]
+    if fault == "extra":
+        pulls[6] = {**pulls[5], "number": 6}
+
+    checks = [
+        {
+            "id": check_id,
+            "name": name,
+            "status": "completed",
+            "conclusion": "success",
+            "html_url": f"https://github.com/{repo}/actions/runs/{archive.RUN}/job/{check_id}",
+        }
+        for check_id, name in archive.CHECK_NAMES.items()
+    ]
+    rest: dict[str, object] = {
+        "": {"default_branch": "main"},
+        "/branches/main": {"commit": {"sha": main}},
+        "/actions/runs": {"workflow_runs": []},
+        "/pulls": list(pulls.values()),
+        "/issues": [],
+        "/issues/comments": [],
+        "/deployments": [],
+    }
+    for number, pull in pulls.items():
+        head = pull["head"]["sha"]
+        rows = checks if number == 2 else []
+        rest[f"/commits/{head}/check-runs"] = {"check_runs": rows, "total_count": len(rows)}
+        rest[f"/pulls/{number}"] = pull
+        rest[f"/pulls/{number}/files"] = []
+        rest[f"/issues/{number}/labels"] = []
+        rest[f"/issues/{number}/events"] = []
+    rest[f"/commits/{main}/check-runs"] = {"check_runs": [], "total_count": 0}
+    if fault == "incomplete":
+        rest["/pulls/4/files"] = [{"filename": "unexpected", "status": "modified"}]
+
+    passes: list[list[int]] = []
+    temporary_roots: list[Path] = []
+    event_snapshots: list[list[Event]] = []
+    project_witness = archive.project_witness
+    events_after = Ledger.events_after
+    replay_check_id = 100
+
+    async def record_events(ledger: Ledger, seq: int, limit: int = 100) -> list[Event]:
+        events = await events_after(ledger, seq, limit)
+        if (seq, limit) == (0, 500):
+            event_snapshots.append(events)
+        return events
+
+    async def record_root(root: Path, endpoint: str, marker: str) -> dict[str, int]:
+        temporary_roots.append(root)
+        result: dict[str, int] = await project_witness(root, endpoint, marker)
+        return result
+
+    def read(method: str, target: str, body: bytes) -> tuple[dict[str, str], bytes]:
+        archive._scoped_endpoint(method, target, body)
+        response: object
+        if method == "POST":
+            number = int(json.loads(body)["variables"]["number"])
+            passes[-1].append(number)
+            if fault == "denied" and number == 4:
+                raise archive.ArchiveReadError("fixture read denied")
+            nodes = (
+                [{"id": archive.THREAD, "isResolved": True, "path": "fixture.py", "line": None}]
+                if number == 2
+                else []
+            )
+            response = {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "headRefOid": pulls[number]["head"]["sha"],
+                            "reviewThreads": {
+                                "nodes": nodes,
+                                "totalCount": len(nodes),
+                                "pageInfo": {"endCursor": None, "hasNextPage": False},
+                            },
+                        }
+                    }
+                }
+            }
+        else:
+            path = target.partition("?")[0].removeprefix(f"/repos/{repo}")
+            if path == "/pulls":
+                passes.append([])
+                if fault == "uncommitted" and len(passes) == 2:
+                    return {}, b"{}"
+            if (
+                fault == "replay_event"
+                and len(passes) == 3
+                and path == f"/commits/{archive.REVIEW_HEAD}/check-runs"
+            ):
+                extra_check = {
+                    "id": replay_check_id,
+                    "name": "Unexpected replay check",
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+                response = {"check_runs": [*checks, extra_check], "total_count": len(checks) + 1}
+            else:
+                response = rest[path]
+        return {}, json.dumps(response).encode()
+
+    monkeypatch.setattr(archive, "project_witness", record_root)
+    monkeypatch.setattr(Ledger, "events_after", record_events)
+    if fault == "skipped":
+        poll_resources = archive.GitHubDetailPoller._poll_resources
+
+        async def skip_second_poll(poller: Any, client: httpx.AsyncClient, token: str) -> None:
+            if len(passes) == 1:
+                await poll_resources(poller, client, token)
+
+        monkeypatch.setattr(archive.GitHubDetailPoller, "_poll_resources", skip_second_poll)
+    async with asyncio.timeout(20):
+        if error is not None:
+            with pytest.raises((AssertionError, archive.ArchiveReadError), match=error):
+                await archive.witness(read)
+        else:
+            result = await archive.witness(read)
+            assert result["cursor_generation"] == 3
+            assert result["actions"] == 0
+            assert result["events"] > 0
+            before, after = event_snapshots
+            assert after == before
+    if fault == "replay_event":
+        before, after = event_snapshots
+        assert after[:-1] == before
+        assert after[-1].kind == "github.check_run"
+        assert after[-1].fields["id"] == replay_check_id
+    assert passes == expected_passes
+    (root,) = temporary_roots
+    assert not root.exists()
 
 
 def test_archive_preflight_stops_before_details_if_fixture_is_private(
