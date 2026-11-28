@@ -7,6 +7,7 @@ after: []
 hitl: true
 risk: low
 tracker_id: "12"
+assignee: "mgd43b"
 remote: "https://github.com/mgd43b/plotroom/issues/12"
 tracker_status: done
 ---

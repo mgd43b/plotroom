@@ -8,6 +8,7 @@ after: [1, 1.8, 2.5]
 hitl: false
 risk: high
 tracker_id: "83"
+assignee: "mgd43b"
 remote: "https://github.com/mgd43b/plotroom/issues/83"
 tracker_status: done
 ---
