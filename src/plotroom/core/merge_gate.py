@@ -12,6 +12,7 @@ from plotroom.core.events import format_time
 from plotroom.core.github import PULL_REQUESTS, FetchCursor, PullRequest
 from plotroom.core.github_projection import (
     CHECKS,
+    KODUS_REVIEW,
     LABELS,
     MAIN,
     MAIN_CI,
@@ -23,6 +24,7 @@ from plotroom.core.github_projection import (
     checks_for_head,
     unresolved_threads,
 )
+from plotroom.core.kodus_review import KodusReviewPolicy, trusted_current_check
 from plotroom.core.merge_flakes import FAILURES as MAIN_FAILURES
 from plotroom.core.merge_flakes import EventLookup, main_check_is_flake
 from plotroom.core.merge_lane import MergeLaneIndex, merge_lane_evidence
@@ -67,6 +69,7 @@ class GatePolicy:
     skip_label: str | None = None
     merge_method: Literal["merge", "squash", "rebase"] = "merge"
     controller_merges: bool = False
+    kodus_review: KodusReviewPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,7 @@ class GateSnapshot:
     earlier_pull: int | None = None
     ambiguous_lane: bool = False
     pull_text: GitHubResource | None = None
+    kodus_review: GitHubResource | None = None
 
 
 @dataclass(frozen=True)
@@ -320,6 +324,7 @@ async def load_gate_snapshot(
         earlier_pull=earlier_pull,
         ambiguous_lane=ambiguous_lane,
         pull_text=await reader.github_resource(repository, PULL_TEXT, scope),
+        kodus_review=await reader.github_resource(repository, KODUS_REVIEW, scope),
     )
 
 
@@ -518,6 +523,66 @@ GATE_RULES: tuple[GateRule, ...] = (
 )
 
 
+def _rule_kodus_review(
+    snapshot: GateSnapshot, policy: GatePolicy, now: datetime
+) -> GateReason | None:
+    review_policy = policy.kodus_review
+    if review_policy is None:
+        return None
+    missing = GateReason("kodus_review_unverified", "could not verify completed Kodus review")
+    pull, review, checks = snapshot.pull, snapshot.kodus_review, snapshot.checks
+    if (
+        pull is None
+        or review is None
+        or checks is None
+        or not _bound_pull_evidence(review, pull, policy, now)
+    ):
+        return missing
+    proof = review.attributes
+    check_id = proof.get("check_id")
+    fingerprint = proof.get("check_fingerprint")
+    if (
+        proof.get("repository") != pull.repository
+        or type(proof.get("pull_number")) is not int
+        or proof["pull_number"] != pull.number
+        or type(proof.get("pull_id")) is not int
+        or proof["pull_id"] < 1
+        or type(proof.get("app_id")) is not int
+        or proof["app_id"] != review_policy.app_id
+        or proof.get("app_slug") != review_policy.app_slug
+        or proof.get("check_name") != review_policy.check_name
+        or type(check_id) is not int
+        or check_id < 1
+        or not isinstance(fingerprint, str)
+        or not fingerprint
+    ):
+        return missing
+    if proof.get("mode") == "reviewed" and trusted_current_check(
+        review_policy, checks, pull.head_sha, check_id, fingerprint, "success"
+    ):
+        return None
+    opening = review_policy.opening_head(pull.repository, pull.number)
+    if (
+        proof.get("mode") == "cadence-skip"
+        and snapshot.threads is not None
+        and proof.get("answered_threads")
+        == sorted(thread.key for thread in snapshot.threads.records)
+        and opening is not None
+        and proof["pull_id"] == opening.pull_id
+        and proof.get("created_at") == opening.created_at
+        and proof.get("opening_sha") == opening.head_sha
+        and opening.head_sha != pull.head_sha
+        and type(proof.get("opening_check_id")) is int
+        and proof["opening_check_id"] > 0
+        and proof["opening_check_id"] != check_id
+        and trusted_current_check(
+            review_policy, checks, pull.head_sha, check_id, fingerprint, "skipped"
+        )
+    ):
+        return None
+    return missing
+
+
 def active_skip_label(snapshot: GateSnapshot, policy: GatePolicy, now: datetime) -> bool:
     labels = current_label_evidence(snapshot, policy, now)
     return (
@@ -550,6 +615,7 @@ def evaluate_gate(
             snapshot.main,
             snapshot.comparison,
             snapshot.pull_text,
+            snapshot.kodus_review if policy.kodus_review is not None else None,
         )
         if observation is not None
         if (timestamp := observation_time(observation.as_of)) is not None
@@ -591,5 +657,7 @@ def evaluate_gate(
         reason = GateReason(
             "duplicate_lane_pr", f"PR #{snapshot.earlier_pull} is already open for this lane"
         )
+        return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
+    if (reason := _rule_kodus_review(snapshot, policy, now)) is not None:
         return GateVerdict("REFUSE", (reason,), reason.exit_class, head, as_of)
     return GateVerdict("MERGE", (), 0, head, as_of)

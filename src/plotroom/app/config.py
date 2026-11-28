@@ -10,7 +10,7 @@ import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -26,7 +26,9 @@ from plotroom.adapters.github import (
 from plotroom.adapters.github.ticket_tree import validate_tree_path
 from plotroom.adapters.openrouter import OpenRouterRun
 from plotroom.core.briefs import BriefSettings
-from plotroom.core.events import LedgerError
+from plotroom.core.events import LedgerError, format_time
+from plotroom.core.github import valid_git_sha
+from plotroom.core.kodus_review import KodusReviewPolicy, OpeningHeadAttestation
 from plotroom.core.merge_gate import GatePolicy
 from plotroom.core.roles import role_family
 from plotroom.core.routing import validate_route_label
@@ -684,7 +686,7 @@ def _github_projects(projects: tuple[str, ...], table: Any, base: Path) -> dict[
             api_url,
             poll_seconds,
             _string_list(f"{label}.image_jobs", settings.get("image_jobs"), ()),
-            _merge_gate_policy(label, settings, poll_seconds),
+            _merge_gate_policy(label, settings, poll_seconds, repository),
             app,
         )
     return configured
@@ -712,7 +714,74 @@ def _github_app(settings: dict[str, Any], label: str, base: Path) -> GitHubAppCo
     return GitHubAppConfig(client_id, installation, base / key)
 
 
-def _merge_gate_policy(label: str, settings: dict[str, Any], poll_seconds: int) -> GatePolicy:
+def _positive_github_id(label: str, value: Any) -> int:
+    if type(value) is not int or not 0 < value <= 2**63 - 1:
+        raise ConfigError(f"{label} must be a positive GitHub integer ID")
+    return value
+
+
+def _opening_head(label: str, repository: str, value: Any) -> OpeningHeadAttestation:
+    required = {"repository", "pull_number", "pull_id", "created_at", "head_sha"}
+    if not isinstance(value, dict) or value.keys() != required:
+        raise ConfigError(
+            f"{label} requires repository, pull_number, pull_id, created_at, and head_sha"
+        )
+    entry = cast("dict[str, Any]", value)
+    if _string(f"{label}.repository", entry["repository"]).lower() != repository:
+        raise ConfigError(f"{label}.repository must match the project's GitHub repository")
+    sha = _string(f"{label}.head_sha", entry["head_sha"])
+    if not valid_git_sha(sha):
+        raise ConfigError(f"{label}.head_sha must be a full lowercase Git SHA")
+    created_at = _string(f"{label}.created_at", entry["created_at"])
+    try:
+        created_at = format_time(datetime.fromisoformat(created_at))
+    except ValueError, OverflowError:
+        raise ConfigError(f"{label}.created_at must be a timestamp with a UTC offset") from None
+    return OpeningHeadAttestation(
+        repository,
+        _positive_github_id(f"{label}.pull_number", entry["pull_number"]),
+        _positive_github_id(f"{label}.pull_id", entry["pull_id"]),
+        created_at,
+        sha,
+    )
+
+
+def _kodus_policy(
+    label: str, repository: str, settings: dict[str, Any]
+) -> KodusReviewPolicy | None:
+    if "kodus_review" not in settings:
+        return None
+    label = f"{label}.kodus_review"
+    raw = settings["kodus_review"]
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{label} must be a table")
+    table = cast("dict[str, Any]", raw)
+    identity = {"app_id", "app_slug", "check_name"}
+    if not identity <= table.keys() <= identity | {"opening_heads"}:
+        raise ConfigError(f"{label} requires app_id, app_slug, and check_name")
+    slug = _string(f"{label}.app_slug", table["app_slug"])
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug):
+        raise ConfigError(f"{label}.app_slug must be a lowercase GitHub App slug")
+    name = _string(f"{label}.check_name", table["check_name"])
+    opening_heads = table.get("opening_heads", [])
+    if not isinstance(opening_heads, list):
+        raise ConfigError(f"{label}.opening_heads must be an array of tables")
+    attestations = tuple(
+        _opening_head(f"{label}.opening_heads[{index}]", repository, entry)
+        for index, entry in enumerate(cast("list[Any]", opening_heads))
+    )
+    if len({entry.pull_number for entry in attestations}) != len(attestations) or len(
+        {entry.pull_id for entry in attestations}
+    ) != len(attestations):
+        raise ConfigError(f"{label}.opening_heads contains duplicate pull identity")
+    return KodusReviewPolicy(
+        _positive_github_id(f"{label}.app_id", table["app_id"]), slug, name, attestations
+    )
+
+
+def _merge_gate_policy(
+    label: str, settings: dict[str, Any], poll_seconds: int, repository: str
+) -> GatePolicy:
     minimum = (
         _integer(f"{label}.min_checks", settings["min_checks"], minimum=1)
         if "min_checks" in settings
@@ -763,6 +832,7 @@ def _merge_gate_policy(label: str, settings: dict[str, Any], poll_seconds: int) 
             skip_label=skip_label,
             merge_method=merge_method,
             controller_merges=controller_merges,
+            kodus_review=_kodus_policy(label, repository, settings),
         )
     except OverflowError:
         raise ConfigError(f"{label}.poll_seconds is too large for the merge gate") from None

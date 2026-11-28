@@ -1,6 +1,7 @@
 """The controller opt-in uses only fresh authoritative fixture writes."""
 
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -11,13 +12,25 @@ from plotroom.app.config import ConfigError, load_config
 from plotroom.app.runtime import ProjectRuntime
 from plotroom.core.branch_updates import BRANCH_UPDATED
 from plotroom.core.catalog import build_catalog
-from plotroom.core.github_projection import GitHubRecord
+from plotroom.core.events import format_time
+from plotroom.core.github_projection import (
+    CHECKS,
+    KODUS_REVIEW,
+    THREADS,
+    GitHubRecord,
+    GitHubResource,
+)
+from plotroom.core.kodus_review import (
+    KODUS_CHECK_FINGERPRINT,
+    KodusReviewPolicy,
+    OpeningHeadAttestation,
+)
 from plotroom.core.ledger import Ledger
 from plotroom.core.merge_controller import MERGE_OBSERVED, MERGE_READY, MERGE_STAGED
 from plotroom.core.merge_gate import GateSnapshot
 from plotroom.core.unit_of_work import UnitOfWork
 from plotroom.ports.github_write import BranchUpdateReceipt, FixtureMergeEvidence
-from test_branch_updates import HEAD, NEXT, POLICY, REPO, TIP, FixtureWrite, observe
+from test_branch_updates import BASE, HEAD, NEXT, POLICY, REPO, TIP, FixtureWrite, observe
 
 MERGED = "8" * 40
 ACTION_KEY = f"controller_merge:7:{HEAD}:{TIP}"
@@ -63,7 +76,12 @@ class MergeFixture(FixtureWrite):
 
 
 async def runtime_for(
-    directory: Path, clock: FixedClock, fixture: MergeFixture | None, *, on: bool
+    directory: Path,
+    clock: FixedClock,
+    fixture: MergeFixture | None,
+    *,
+    on: bool,
+    kodus_review: KodusReviewPolicy | None = None,
 ) -> tuple[SqliteStore, Ledger, ProjectRuntime]:
     store = SqliteStore("demo", directory)
     await store.migrate()
@@ -72,7 +90,9 @@ async def runtime_for(
         build_catalog(frozenset({"worker"}), github_repository=REPO),
         clock,
         github_repository=REPO,
-        merge_gate_policy=replace(POLICY, controller_merges=on, merge_method="squash"),
+        merge_gate_policy=replace(
+            POLICY, controller_merges=on, merge_method="squash", kodus_review=kodus_review
+        ),
         live_merge_controller=True,
         fixture_merge_enabled=fixture is not None,
     )
@@ -387,6 +407,137 @@ async def test_main_pin_replaces_offer_without_duplicate_verdict(tmp_path: Path)
         assert replacement["context"]["main_sha"] == NEXT
         verdicts = [e for e in await ledger.events_after(0) if e.kind == "core.merge_verdict"]
         assert [e.fields["verdict"] for e in verdicts] == ["MERGE"]
+    finally:
+        await ledger.stop()
+        await store.close()
+
+
+async def test_kodus_gate_rechecks_evidence_and_pins_before_fixture_execution(
+    tmp_path: Path,
+) -> None:
+    fixture, clock = MergeFixture(), FixedClock()
+    opening = OpeningHeadAttestation(REPO, 7, 1, format_time(clock.now()), BASE)
+    app = KodusReviewPolicy(88, "fixture-kodus", "Review", (opening,))
+    store, ledger, runtime = await runtime_for(tmp_path, clock, fixture, on=True, kodus_review=app)
+    try:
+        await observe(ledger)
+        verdict = await ledger.merge_gate("orchestrator", 7)
+        assert verdict.reasons[0].code == "stale_ci"
+        await observe(ledger, overlap=False, pending=True)
+        verdict = await ledger.merge_gate("orchestrator", 7)
+        assert verdict.reasons[0].code == "checks_pending"
+        await observe(ledger, overlap=False, unresolved=True)
+        verdict = await ledger.merge_gate("orchestrator", 7)
+        assert verdict.reasons[0].code == "review_threads_unresolved"
+        await observe(ledger, overlap=False)
+        verdict = await ledger.merge_gate("orchestrator", 7)
+        assert verdict.reasons[0].code == "kodus_review_unverified"
+        assert not await runtime.run_one_action()
+
+        snapshot = await store.read_merge_gate(REPO, 7)
+        assert snapshot.pull is not None
+        assert snapshot.checks is not None
+        assert snapshot.threads is not None
+        pull, checks, threads = snapshot.pull, snapshot.checks, snapshot.threads
+        fingerprint = "5" * 64
+        run = GitHubRecord(
+            "88",
+            "check_run",
+            {
+                "id": 88,
+                "name": app.check_name,
+                "head_sha": HEAD,
+                "status": "completed",
+                "conclusion": "skipped",
+            },
+            details={"app_id": app.app_id, KODUS_CHECK_FINGERPRINT: fingerprint},
+        )
+        proof = GitHubResource(
+            (),
+            attributes={
+                "repository": REPO,
+                "pull_number": pull.number,
+                "pull_id": opening.pull_id,
+                "created_at": opening.created_at,
+                "head_sha": HEAD,
+                "pull_version": pull.version,
+                "pull_updated_at": pull.updated_at,
+                "app_id": app.app_id,
+                "app_slug": app.app_slug,
+                "check_name": app.check_name,
+                "check_id": 88,
+                "check_fingerprint": fingerprint,
+                "mode": "cadence-skip",
+                "opening_sha": opening.head_sha,
+                "opening_check_id": 80,
+                "answered_threads": [],
+            },
+            as_of=pull.as_of,
+        )
+
+        async def write(uow: UnitOfWork) -> None:
+            await uow.save_github_resource(
+                REPO, CHECKS, HEAD, replace(checks, records=(*checks.records, run))
+            )
+            await uow.save_github_resource(REPO, KODUS_REVIEW, "7", proof)
+
+        await ledger.run("system", write)
+        verdict = await ledger.merge_gate("orchestrator", 7)
+        assert verdict.verdict == "MERGE"
+        _, items = await store.read_next("orchestrator", 0, 5)
+        assert MERGE_READY in [item.kind for item in items]
+
+        ready = await store.read_merge_gate(REPO, 7)
+        assert ready.main_ci is not None
+        newer_threads = replace(
+            threads,
+            records=(
+                GitHubRecord("new", "review_thread", {"id": "new", "number": 7, "resolved": True}),
+            ),
+        )
+        for fresh in (
+            replace(ready, kodus_review=None),
+            replace(ready, threads=newer_threads),
+            replace(ready, pull=replace(pull, head_sha=NEXT)),
+            replace(
+                ready,
+                checks=replace(
+                    checks,
+                    records=(*checks.records, replace(run, fields={**run.fields, "id": 89})),
+                ),
+            ),
+            replace(
+                ready,
+                main_ci=replace(
+                    ready.main_ci, attributes={**ready.main_ci.attributes, "head_sha": NEXT}
+                ),
+            ),
+            replace(
+                ready,
+                kodus_review=replace(proof, as_of=format_time(clock.now() - timedelta(minutes=3))),
+            ),
+        ):
+            fixture.snapshot = fresh
+            assert not await runtime.run_one_action()
+            assert not fixture.merge_calls
+
+        # The regular thread poll discovers a new resolved thread before the cadence read sees it.
+        await ledger.run(
+            "system", lambda uow: uow.save_github_resource(REPO, THREADS, "7", newer_threads)
+        )
+        verdict = await ledger.merge_gate("orchestrator", 7)
+        assert verdict.reasons[0].code == "kodus_review_unverified"
+        _, items = await store.read_next("orchestrator", 0, 5)
+        assert MERGE_READY not in [item.kind for item in items]
+
+        await ledger.run(
+            "system", lambda uow: uow.save_github_resource(REPO, THREADS, "7", threads)
+        )
+        fixture.snapshot = ready
+        assert await runtime.run_one_action()  # Retire the invalidated offer.
+        assert not fixture.merge_calls
+        assert await runtime.run_one_action()
+        assert fixture.merge_calls == [(HEAD, TIP, "squash", "fixture-revision")]
     finally:
         await ledger.stop()
         await store.close()

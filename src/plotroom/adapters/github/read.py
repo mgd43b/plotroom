@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
 
@@ -58,6 +59,12 @@ def _merge_oid(value: Any) -> str | None:
 
 class GitHubNotFound(GitHubUnavailable):
     """A configured GitHub read endpoint did not return its resource."""
+
+
+@dataclass(frozen=True)
+class ReviewThreadPull:
+    node_id: str
+    author_login: str
 
 
 class GitHubReadClient:
@@ -352,7 +359,13 @@ class GitHubReadClient:
         return _merge_oid(detail["merge_commit_sha"])
 
     async def review_threads(
-        self, client: httpx.AsyncClient, token: str, pull: int, head_sha: str
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+        pull: int,
+        head_sha: str,
+        *,
+        cadence: ReviewThreadPull | None = None,
     ) -> AsyncIterator[Row]:
         owner, name = self.repository.split("/")
         cursor: str | None = None
@@ -365,7 +378,7 @@ class GitHubReadClient:
                 token,
                 f"{self.api_url}/graphql",
                 query={
-                    "query": REVIEW_THREADS_QUERY,
+                    "query": REVIEW_THREADS_QUERY if cadence is None else CADENCE_THREADS_QUERY,
                     "variables": {"owner": owner, "name": name, "number": pull, "after": cursor},
                 },
             )
@@ -375,7 +388,15 @@ class GitHubReadClient:
                 if any(error.get("type") == "RATE_LIMITED" for error in errors):
                     raise GitHubRateLimited(response.headers)
                 raise GitHubUnavailable("GitHub review thread query failed")
-            current = obj(document["data"]["repository"]["pullRequest"])
+            repository = obj(obj(document["data"])["repository"])
+            current = obj(repository["pullRequest"])
+            if cadence is not None and (
+                string(repository["nameWithOwner"]).lower() != self.repository.lower()
+                or number(current["number"]) != pull
+                or current["id"] != cadence.node_id
+                or string(obj(current["author"])["login"]).lower() != cadence.author_login
+            ):
+                raise GitHubUnavailable("GitHub returned threads for a different pull request")
             if string(current["headRefOid"]) != head_sha:
                 raise GitHubUnavailable("PR head moved during review thread poll")
             connection = obj(current["reviewThreads"])
@@ -431,6 +452,34 @@ query PullReviewThreads($owner: String!, $name: String!, $number: Int!, $after: 
       reviewThreads(first: 100, after: $after) {
         totalCount
         nodes { id isResolved path line }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
+CADENCE_THREADS_QUERY = """
+query PullCadenceThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    pullRequest(number: $number) {
+      id
+      number
+      author { login }
+      headRefOid
+      reviewThreads(first: 100, after: $after) {
+        totalCount
+        nodes {
+          id
+          isResolved
+          comments(first: 100) {
+            totalCount
+            nodes { id author { __typename login } authorAssociation replyTo { id } }
+            pageInfo { hasNextPage }
+          }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }

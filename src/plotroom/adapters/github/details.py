@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime
 from functools import partial
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -33,6 +34,7 @@ from plotroom.adapters.github.issue_details import (
     fetch_issue_tree,
     fetch_issues,
 )
+from plotroom.adapters.github.kodus_review import fetch_kodus_review
 from plotroom.adapters.github.pr_details import (
     fetch_files,
     fetch_labels,
@@ -62,6 +64,7 @@ from plotroom.core.github_projection import (
     ISSUE_RELATION_RETRY,
     ISSUE_TREE,
     ISSUES,
+    KODUS_REVIEW,
     LABELS,
     MAIN,
     MAIN_CI,
@@ -94,6 +97,7 @@ log = logging.getLogger("plotroom.github")
 MAX_NEW_COMPARISONS = 4
 MAX_ASK_HISTORIES = 4
 MAX_MERGE_SHA_READS = 2
+KODUS_REVIEW_READ_TIMEOUT = 5.0
 MERGE_SHA_READ_TIMEOUT = 3
 _READ_ERRORS = (
     GitHubUnavailable,
@@ -103,6 +107,10 @@ _READ_ERRORS = (
     TypeError,
     OverflowError,
 )
+
+
+class _KodusReviewBudgetExhausted(Exception):
+    """There is no time left to attempt another review read."""
 
 
 class GitHubDetailPoller:
@@ -170,7 +178,13 @@ class GitHubDetailPoller:
             as_of=observed_at,
         )
         checks = await fetch_checks(
-            api, client, token, pull.head_sha, snapshot.checks, include_junit=False
+            api,
+            client,
+            token,
+            pull.head_sha,
+            snapshot.checks,
+            include_junit=False,
+            kodus_review=self.ledger.merge_gate_policy.kodus_review,
         )
         labels = await fetch_labels(api, client, token, pull)
         threads = await fetch_threads(api, client, token, pull)
@@ -184,6 +198,14 @@ class GitHubDetailPoller:
             head,
             snapshot.comparison,
         )
+        review = None
+        if self.ledger.merge_gate_policy.kodus_review is not None:
+            try:
+                review = await self._read_kodus_review(client, token, pull)
+            except GitHubRateLimited:
+                raise
+            except _READ_ERRORS:
+                review = GitHubResource((), complete=False)
         current = obj(await api.get(client, token, f"/pulls/{pull.number}"))
         draft = current["draft"]
         identity = obj(current["head"])
@@ -209,6 +231,7 @@ class GitHubDetailPoller:
             labels=replace(bind_overlap_labels(labels, snapshot.labels, pull), as_of=observed_at),
             pull_text=replace(text, as_of=observed_at),
             comparison=replace(comparison, as_of=observed_at),
+            kodus_review=replace(review, as_of=observed_at) if review is not None else None,
         )
 
     async def cooling_down(self) -> bool:
@@ -349,6 +372,7 @@ class GitHubDetailPoller:
                     recovery_check_ids=recoveries.get(sha, ()),
                     junit_budget=junit_budget,
                     allow_junit_lookup=allow_lookup,
+                    kodus_review=self.ledger.merge_gate_policy.kodus_review,
                 ),
                 pulls=tuple(numbers),
             )
@@ -429,6 +453,60 @@ class GitHubDetailPoller:
             else:
                 await self._mark_incomplete(ISSUE_TREE, "")
         await poll_deployments(self.ledger, api, client, token, format_time(self.clock.now()))
+        if self.ledger.merge_gate_policy.kodus_review is not None:
+            await self._poll_kodus_reviews(client, token, pulls)
+
+    async def _poll_kodus_reviews(
+        self, client: httpx.AsyncClient, token: str, pulls: tuple[PullRequest, ...]
+    ) -> None:
+        deadline = monotonic() + min(
+            KODUS_REVIEW_READ_TIMEOUT, self.ledger.merge_gate_policy.max_age.total_seconds() / 4
+        )
+        attempts: list[tuple[tuple[str, int, int], PullRequest]] = []
+        for pull in pulls:
+            if pull.state != "open":
+                continue
+            previous = await self.ledger.github_resource(
+                self.api.repository, KODUS_REVIEW, str(pull.number)
+            )
+            last_attempt = previous.as_of if previous is not None else ""
+            generation = previous.generation if previous is not None else 0
+            attempts.append(((last_attempt, generation, pull.number), pull))
+        # Ordinary PR targets rotate independently. Prioritize the least recently
+        # attempted review within each batch so a slow PR cannot monopolize it.
+        for _, pull in sorted(attempts, key=lambda target: target[0]):
+            try:
+                await self._refresh(
+                    KODUS_REVIEW,
+                    str(pull.number),
+                    lambda _, pull=pull: self._read_kodus_review(
+                        client, token, pull, deadline=deadline
+                    ),
+                    pull=pull,
+                )
+            except _KodusReviewBudgetExhausted:
+                break
+
+    async def _read_kodus_review(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+        pull: PullRequest,
+        *,
+        deadline: float | None = None,
+    ) -> GitHubResource:
+        policy = self.ledger.merge_gate_policy.kodus_review
+        assert policy is not None
+        timeout = KODUS_REVIEW_READ_TIMEOUT
+        if deadline is not None:
+            timeout = min(timeout, deadline - monotonic())
+            if timeout <= 0:
+                raise _KodusReviewBudgetExhausted
+        try:
+            async with asyncio.timeout(timeout):
+                return await fetch_kodus_review(self.api, client, token, pull, policy)
+        except TimeoutError, RecursionError:
+            raise GitHubUnavailable("Kodus review read exceeded its limits") from None
 
     async def _poll_main_flakes(
         self,
@@ -621,7 +699,7 @@ class GitHubDetailPoller:
                     "GitHub projection refresh failed",
                     extra={"project": self.ledger.project_id, "resource": resource},
                 )
-            if resource == ISSUE_TREE or previous is None or previous.complete:
+            if resource in (ISSUE_TREE, KODUS_REVIEW) or previous is None or previous.complete:
                 await self._mark_incomplete(resource, scope, pulls)
             return None
 

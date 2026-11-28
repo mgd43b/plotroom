@@ -32,6 +32,7 @@ from plotroom.core.github_projection import (
     CHECKS,
     COMMENTS,
     ISSUES,
+    KODUS_REVIEW,
     LABELS,
     MAIN,
     MAIN_CI,
@@ -300,7 +301,7 @@ class UnitOfWork:
             self.all_merge_pulls = True
         elif resource == CHECKS:
             self.merge_check_heads.add(scope)
-        elif resource in (LABELS, THREADS, PULL_COMPARISON, PULL_TEXT):
+        elif resource in (LABELS, THREADS, PULL_COMPARISON, PULL_TEXT, KODUS_REVIEW):
             self.merge_pull_numbers.add(int(scope))
         if resource in {ISSUES, COMMENTS, ASK_COMMENT_HISTORY}:
             self._ask_repositories.add(repository)

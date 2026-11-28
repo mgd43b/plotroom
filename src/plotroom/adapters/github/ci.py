@@ -11,6 +11,7 @@ import httpx
 
 from plotroom.adapters.github import GitHubRateLimited, GitHubUnavailable
 from plotroom.adapters.github.junit import JUnitReader
+from plotroom.adapters.github.kodus_review import parse_review_check
 from plotroom.adapters.github.read import (
     GitHubNotFound,
     GitHubReadClient,
@@ -21,6 +22,7 @@ from plotroom.adapters.github.read import (
     string,
 )
 from plotroom.core.github_projection import MAIN_CI_WINDOW, GitHubRecord, GitHubResource
+from plotroom.core.kodus_review import KODUS_CHECK_FINGERPRINT, KodusReviewPolicy
 from plotroom.core.merge_flakes import (
     has_test_identity,
     is_failure,
@@ -115,6 +117,7 @@ async def fetch_checks(
     recovery_check_ids: Collection[int] = (),
     junit_budget: JUnitBudget | None = None,
     allow_junit_lookup: bool = True,
+    kodus_review: KodusReviewPolicy | None = None,
 ) -> GitHubResource:
     checks: list[GitHubRecord] = []
     junit = JUnitReader(api, client, token) if include_junit else None
@@ -154,6 +157,8 @@ async def fetch_checks(
             if timestamp.utcoffset() is None:
                 raise ValueError("check completion time has no offset")
             details["completed_at"] = timestamp.timestamp()
+        if kodus_review is not None and (review := parse_review_check(row, kodus_review)):
+            details[KODUS_CHECK_FINGERPRINT] = review.fingerprint
         check = GitHubRecord(
             str(fields["id"]), "check_run", fields, details=details, fact=_state(fields)
         )

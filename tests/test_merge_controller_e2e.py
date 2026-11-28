@@ -9,7 +9,7 @@ import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,11 +21,12 @@ from conftest import authenticated_client, tool_json
 from fakes import FixedClock
 from plotroom.adapters.github import GitHubPoller, github_secret_name
 from plotroom.adapters.github.details import GitHubDetailPoller
-from plotroom.adapters.github.read import REVIEW_THREADS_QUERY
+from plotroom.adapters.github.read import CADENCE_THREADS_QUERY, REVIEW_THREADS_QUERY
 from plotroom.app.config import Config, GitHubConfig
 from plotroom.app.serve import Daemon
 from plotroom.app.tokens import TokenRegistry
 from plotroom.core.events import Event
+from plotroom.core.kodus_review import KodusReviewPolicy
 from plotroom.core.merge_flakes import MAIN_FLAKE_EVENT
 from plotroom.core.merge_gate import GatePolicy, GateSnapshot
 
@@ -66,6 +67,7 @@ class Pull:
     unreadable: str = ""
     lane: str | None = None
     head_version: int = 0
+    closed: bool = False
 
     @property
     def head(self) -> str:
@@ -75,7 +77,11 @@ class Pull:
         updated = NOW if self.merge_commit is None and self.head_version == 0 else LATER
         return {
             "number": self.number,
-            "state": "open" if self.merge_commit is None else "closed",
+            "id": self.number + 1_000_000,
+            "node_id": f"PR_{self.number}",
+            "user": {"login": "developer"},
+            "created_at": NOW,
+            "state": "closed" if self.closed or self.merge_commit is not None else "open",
             "merged": self.merge_commit is not None,
             "merged_at": None if self.merge_commit is None else updated,
             "merge_commit_sha": self.merge_commit,
@@ -85,9 +91,9 @@ class Pull:
             "head": {
                 "ref": self.lane or f"pr-{self.number}",
                 "sha": self.head,
-                "repo": {"full_name": REPO},
+                "repo": {"id": 55, "full_name": REPO},
             },
-            "base": {"ref": "main", "sha": MAIN, "repo": {"full_name": REPO}},
+            "base": {"ref": "main", "sha": MAIN, "repo": {"id": 55, "full_name": REPO}},
             "commits": 1,
             "changed_files": 1,
         }
@@ -152,6 +158,8 @@ class Repository:
     main_paths: tuple[str, ...] = ("shared.py",)
     main_head: str = MAIN
     main_reads: list[str] = field(default_factory=list[str])
+    review_runs: dict[str, list[Row]] = field(default_factory=dict[str, list[Row]])
+    cadence_threads: dict[int, list[Row]] = field(default_factory=dict[int, list[Row]])
     cycles: asyncio.Queue[asyncio.Future[None]] = field(
         default_factory=asyncio.Queue[asyncio.Future[None]]
     )
@@ -189,7 +197,7 @@ class Repository:
         if request.url.path == "/graphql":
             assert request.method == "POST"
             query = json.loads(request.content)
-            assert query["query"] == REVIEW_THREADS_QUERY
+            assert query["query"] in (REVIEW_THREADS_QUERY, CADENCE_THREADS_QUERY)
             variables = query["variables"]
             assert variables["owner"] == "fixture"
             assert variables["name"] == "epic4"
@@ -197,10 +205,16 @@ class Repository:
             pull = self.pulls[variables["number"]]
             if pull.unreadable == "threads":
                 return httpx.Response(503)
-            nodes = [
-                {"id": f"thread-{index}", "isResolved": False, "path": pull.path, "line": 1}
-                for index in range(pull.threads)
-            ]
+            if pull.number in self.cadence_threads:
+                nodes = [
+                    {**thread, "path": pull.path, "line": 1}
+                    for thread in self.cadence_threads[pull.number]
+                ]
+            else:
+                nodes = [
+                    {"id": f"thread-{index}", "isResolved": False, "path": pull.path, "line": 1}
+                    for index in range(pull.threads)
+                ]
             connection = {
                 "totalCount": len(nodes),
                 "nodes": nodes,
@@ -214,10 +228,14 @@ class Repository:
                 json={
                     "data": {
                         "repository": {
+                            "nameWithOwner": REPO,
                             "pullRequest": {
+                                "id": pull.row()["node_id"],
+                                "number": pull.number,
+                                "author": pull.row()["user"],
                                 "headRefOid": pull.head,
                                 "reviewThreads": connection,
-                            }
+                            },
                         }
                     }
                 },
@@ -240,8 +258,11 @@ class Repository:
                     for index, value in enumerate(pull.checks)
                 ]
             else:
-                assert sha in {MAIN, *(run.head for run in self.runs)}, sha
+                assert sha in {MAIN, *(run.head for run in self.runs), *self.review_runs}, sha
                 checks = [run.check() for run in self.runs if run.head == sha and run.annotations]
+            checks.extend(self.review_runs.get(sha, []))
+            if check_name := request.url.params.get("check_name"):
+                checks = [check for check in checks if check["name"] == check_name]
             return httpx.Response(200, json=counted("check_runs", checks))
 
         rows: dict[str, object] = {
@@ -339,7 +360,12 @@ def repository(monkeypatch: pytest.MonkeyPatch) -> Repository:
 
 
 @asynccontextmanager
-async def running_daemon(directory: Path) -> AsyncGenerator[tuple[Daemon, Client, Client, Client]]:
+async def running_daemon(
+    directory: Path,
+    *,
+    kodus_review: KodusReviewPolicy | None = None,
+    max_age: timedelta = timedelta(minutes=2),
+) -> AsyncGenerator[tuple[Daemon, Client, Client, Client]]:
     secret = directory / "token"
     secret.write_text("fixture", encoding="utf-8")
     config = Config(
@@ -360,10 +386,12 @@ async def running_daemon(directory: Path) -> AsyncGenerator[tuple[Daemon, Client
                 merge_gate_policy=GatePolicy(
                     2,
                     ignore_checks=("check-2",),
+                    max_age=max_age,
                     ci_workflow=WORKFLOW,
                     fix_label=FIX_LABEL,
                     skip_label="skip-merge",
                     authorized_label_logins=("owner",),
+                    kodus_review=kodus_review,
                 ),
             )
         },
